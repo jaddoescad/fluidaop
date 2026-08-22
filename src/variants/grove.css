@@ -1,0 +1,905 @@
+/* Variant — Grove: calm organic ambient. Relationship heat as literal life:
+   growth, bloom, wilt. Warm parchment daylight, living greens, golden money
+   moments. A garden a contractor can keep open all day. */
+
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..700;1,9..144,400..700&family=Karla:ital,wght@0,400..800;1,400..700&family=Spline+Sans+Mono:wght@400;500;600&display=swap');
+
+.v-grove {
+  /* shared token contract */
+  --bg: #f3edda;
+  --panel: #ebe3cb;
+  --card: #fbf7ea;
+  --line: #ded2b4;
+  --line-2: #c6b890;
+  --ink: #2f351f;
+  --dim: #6d7255;
+  --faint: #9a977a;
+  --danger: #b5512b;
+  --danger-soft: rgba(181, 81, 43, 0.12);
+  --warn: #a3720e;
+  --warn-soft: rgba(163, 114, 14, 0.13);
+  --ok: #4d7c47;
+  --ok-soft: rgba(77, 124, 71, 0.14);
+  --c-sms: #4d7c47;
+  --c-email: #7b64a8;
+  --c-call: #b5731f;
+  --c-form: #ad5876;
+  --radius: 13px;
+  --font-body: 'Karla', 'Avenir Next', -apple-system, sans-serif;
+  --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+  --font-mono: 'Spline Sans Mono', ui-monospace, monospace;
+
+  /* grove-only tokens */
+  --gold: #b98a24;
+  --gold-deep: #6b4d0d;
+  --gold-soft: rgba(202, 157, 62, 0.16);
+  --fern: #5d7a4b;
+  --leaf: #6f9455;
+
+  position: relative;
+  z-index: 0;
+  background:
+    radial-gradient(1100px 560px at 12% -10%, rgba(224, 182, 78, 0.17), transparent 62%),
+    radial-gradient(900px 480px at 90% -6%, rgba(123, 100, 168, 0.08), transparent 60%),
+    radial-gradient(1200px 720px at 50% 118%, rgba(77, 124, 71, 0.13), transparent 64%),
+    var(--bg);
+  color: var(--ink);
+}
+
+/* ambient daylight glaze — breathes slowly; rests when paused */
+.v-grove::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(56% 42% at 22% 0%, rgba(236, 202, 116, 0.18), transparent 70%);
+  animation: grvDaylight 16s ease-in-out infinite;
+}
+
+.v-grove.is-paused::after {
+  animation: none;
+  opacity: 0.35;
+}
+
+@keyframes grvDaylight {
+  0%, 100% { opacity: 0.55; transform: translateX(0); }
+  50% { opacity: 1; transform: translateX(28px); }
+}
+
+.v-grove.is-paused .plant,
+.v-grove.is-paused .plant-flower {
+  animation-play-state: paused;
+}
+
+/* ---------- top bar ---------- */
+
+.v-grove .gr-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 247, 234, 0.6);
+}
+
+.v-grove .gr-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.v-grove .gr-brand b {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 620;
+  letter-spacing: 0.2px;
+  display: block;
+  line-height: 1.05;
+}
+
+.v-grove .gr-brand-sub {
+  font-size: 10.5px;
+  color: var(--faint);
+  letter-spacing: 0.3px;
+}
+
+.v-grove .gr-mark {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #5f8153, #40603a 68%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22), 0 2px 6px rgba(64, 96, 58, 0.28);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.v-grove .gr-mark-stem {
+  fill: none;
+  stroke: #f3edda;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.v-grove .gr-mark-leaf {
+  fill: #f3edda;
+}
+
+.v-grove .gr-counters {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+.v-grove .gr-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.v-grove .gr-count b {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 640;
+  color: var(--ink);
+}
+
+.v-grove .gr-count.ripe {
+  border-color: rgba(181, 81, 43, 0.45);
+  background: var(--danger-soft);
+  color: #a34724;
+  animation: grvRipeCount 3.2s ease-in-out infinite;
+}
+
+.v-grove .gr-count.ripe b {
+  color: #a34724;
+}
+
+@keyframes grvRipeCount {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 81, 43, 0.24); }
+  50% { box-shadow: 0 0 0 5px rgba(181, 81, 43, 0); }
+}
+
+.v-grove .gr-weather {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.v-grove .gr-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: grvBreathe 3.2s ease-in-out infinite;
+}
+
+@keyframes grvBreathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(77, 124, 71, 0.4); }
+  50% { box-shadow: 0 0 0 5px rgba(77, 124, 71, 0); }
+}
+
+.v-grove.is-paused .gr-dot {
+  background: var(--faint);
+  animation: none;
+}
+
+.v-grove .gr-status {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.v-grove .gr-pause {
+  border: 1px solid var(--line-2);
+  background: var(--card);
+  border-radius: 999px;
+  padding: 5px 15px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+.v-grove .gr-pause:hover {
+  border-color: var(--ok);
+  color: var(--ok);
+  box-shadow: 0 1px 6px rgba(77, 124, 71, 0.18);
+}
+
+/* ---------- focus band ---------- */
+
+.v-grove .gr-focusband {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 7px 20px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(77, 124, 71, 0.14), rgba(224, 182, 78, 0.12));
+  animation: grvFadeDown 0.28s ease-out;
+}
+
+@keyframes grvFadeDown {
+  from { opacity: 0; transform: translateY(-5px); }
+  to { opacity: 1; transform: none; }
+}
+
+.v-grove .gr-focustext {
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.v-grove .gr-focustext b {
+  font-family: var(--font-display);
+  font-weight: 640;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.v-grove .gr-unfocus {
+  border: 1px solid var(--line-2);
+  background: var(--card);
+  border-radius: 999px;
+  padding: 3px 13px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.v-grove .gr-unfocus:hover {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+/* ---------- columns ---------- */
+
+.v-grove .gr-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 254px 1.2fr 1.05fr 282px 282px 308px;
+}
+
+.v-grove .pane {
+  border-right: 1px solid var(--line);
+}
+
+.v-grove .pane:last-child {
+  border-right: none;
+}
+
+.v-grove .gr-side {
+  background: rgba(235, 227, 203, 0.55);
+}
+
+/* keep the last cards clear of the floating switcher dock */
+.v-grove .pane-scroll {
+  padding-bottom: 100px;
+}
+
+.v-grove .gr-head {
+  flex: none;
+  padding: 13px 14px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.v-grove .gr-head-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.v-grove .gr-head h2 {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 620;
+  letter-spacing: 0.2px;
+}
+
+.v-grove .gr-count-pill {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--dim);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 9px;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-grove .gr-gloss {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 2px;
+  letter-spacing: 0.2px;
+}
+
+.v-grove .gr-focus-pill {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: #a34724;
+  background: var(--danger-soft);
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+/* ---------- cards: things grow in from the soil ---------- */
+
+.v-grove .card {
+  border-color: var(--line);
+  box-shadow: 0 1px 3px rgba(64, 76, 42, 0.07);
+  transform-origin: 50% 100%;
+  animation: grvSprout 0.45s cubic-bezier(0.24, 1.1, 0.4, 1);
+}
+
+@keyframes grvSprout {
+  from { opacity: 0; transform: translateY(9px) scale(0.965); }
+  to { opacity: 1; transform: none; }
+}
+
+.v-grove .card.fresh {
+  animation: grvSprout 0.45s cubic-bezier(0.24, 1.1, 0.4, 1), grvNewRing 2.2s ease-out;
+}
+
+@keyframes grvNewRing {
+  0% { box-shadow: 0 0 0 0 rgba(77, 124, 71, 0.38); }
+  100% { box-shadow: 0 0 0 10px rgba(77, 124, 71, 0), 0 1px 3px rgba(64, 76, 42, 0.07); }
+}
+
+.v-grove .card.leaving {
+  opacity: 0;
+  transform: translateY(6px) rotate(0.6deg) scale(0.97);
+}
+
+.v-grove .card-who {
+  font-weight: 700;
+}
+
+.v-grove .card-text {
+  color: #565d40;
+}
+
+/* ---------- day dividers: field-journal dates ---------- */
+
+.v-grove .sday-label {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 12.5px;
+  font-weight: 560;
+  text-transform: none;
+  letter-spacing: 0.3px;
+  color: var(--dim);
+  background: var(--bg);
+  border-bottom: 1px dashed var(--line-2);
+}
+
+/* ---------- the grove (people as plants) ---------- */
+
+.v-grove .gr-bed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px 13px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  margin-bottom: 6px;
+  position: relative;
+  transition: background 0.16s, border-color 0.16s, box-shadow 0.16s;
+}
+
+.v-grove .gr-bed:hover {
+  background: var(--card);
+  border-color: var(--line);
+}
+
+.v-grove .gr-bed.focused {
+  background: var(--card);
+  border-color: var(--line-2);
+  box-shadow: 0 2px 10px rgba(77, 96, 50, 0.14), inset 0 0 0 1px rgba(77, 124, 71, 0.3);
+}
+
+.v-grove .gr-bed-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.v-grove .gr-bed-name {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.v-grove .gr-bed-temp {
+  display: block;
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 1px;
+}
+
+.v-grove .gr-bed-temp b {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 10px;
+}
+
+.v-grove .temp-hot .gr-bed-temp { color: #a8641c; }
+.v-grove .temp-warm .gr-bed-temp { color: var(--warn); }
+.v-grove .temp-cool .gr-bed-temp { color: var(--dim); }
+.v-grove .temp-cold .gr-bed-temp { color: var(--faint); }
+
+.v-grove .gr-bed-badges {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.v-grove .gr-money,
+.v-grove .gr-wait {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.v-grove .gr-money {
+  color: var(--gold-deep);
+  background: linear-gradient(100deg, rgba(224, 182, 78, 0.3), rgba(233, 205, 132, 0.42), rgba(224, 182, 78, 0.3));
+  box-shadow: inset 0 0 0 1px rgba(185, 138, 36, 0.35);
+}
+
+.v-grove .gr-wait {
+  color: #a34724;
+  background: var(--danger-soft);
+  box-shadow: inset 0 0 0 1px rgba(181, 81, 43, 0.28);
+}
+
+/* soil-moisture heat bar along the bed's bottom edge */
+.v-grove .gr-soil {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(198, 184, 144, 0.5);
+  overflow: hidden;
+}
+
+.v-grove .gr-soil i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #8fae6b, #d9ad45);
+  transition: width 0.6s ease;
+}
+
+/* plant drawings */
+
+.v-grove .plant {
+  flex: none;
+  overflow: visible;
+}
+
+.v-grove .plant-ground {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.v-grove .plant-stem {
+  fill: none;
+  stroke: var(--fern);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.v-grove .plant-leaf {
+  fill: var(--leaf);
+}
+
+.v-grove .plant-bud {
+  fill: #cf8f66;
+}
+
+.v-grove .plant-sepal {
+  fill: var(--fern);
+}
+
+.v-grove .plant-petal {
+  fill: #e6b84c;
+}
+
+.v-grove .plant-heart {
+  fill: #b5512b;
+}
+
+.v-grove .plant-cold .plant-stem { stroke: #a9a489; }
+.v-grove .plant-cold .plant-leaf { fill: #b7b198; }
+.v-grove .plant-cool .plant-leaf { fill: #8aa671; }
+
+/* the hottest relationships sway gently in the breeze */
+.v-grove .plant-hot {
+  transform-origin: 50% 92%;
+  animation: grvSway 4.8s ease-in-out infinite;
+}
+
+.v-grove .plant-warm {
+  transform-origin: 50% 92%;
+  animation: grvSway 7s ease-in-out infinite;
+}
+
+@keyframes grvSway {
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(2.4deg); }
+}
+
+/* ---------- signals: intent as a bloom banner ---------- */
+
+.v-grove .gr-intent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -10px -12px 9px;
+  padding: 6px 13px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.25px;
+}
+
+.v-grove .gi-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+/* money is the loudest thing in the garden — a gold bloom */
+.v-grove .gi-paid,
+.v-grove .gi-ready {
+  background: linear-gradient(100deg, #eeddab, #e3c271, #eeddab);
+  background-size: 220% 100%;
+  color: var(--gold-deep);
+  font-size: 13px;
+  animation: grvShimmer 3.4s linear infinite;
+}
+
+@keyframes grvShimmer {
+  from { background-position: 0% 0; }
+  to { background-position: 220% 0; }
+}
+
+.v-grove .gi-urgent {
+  background: rgba(181, 81, 43, 0.15);
+  color: #a34724;
+}
+
+.v-grove .gi-urgent .gi-dot {
+  animation: grvEmber 1.8s ease-in-out infinite;
+}
+
+@keyframes grvEmber {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 81, 43, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(181, 81, 43, 0); }
+}
+
+.v-grove .gi-lead { background: rgba(77, 124, 71, 0.15); color: #3e6a39; }
+.v-grove .gi-love { background: rgba(173, 88, 118, 0.13); color: #964d67; }
+.v-grove .gi-future { background: rgba(123, 100, 168, 0.13); color: #6a5494; }
+.v-grove .gi-sched { background: rgba(154, 151, 122, 0.18); color: var(--dim); }
+.v-grove .gi-ask { background: rgba(163, 114, 14, 0.13); color: #8c620c; }
+
+.v-grove .gr-sig.int-paid,
+.v-grove .gr-sig.int-ready {
+  border-color: #d9bb67;
+  box-shadow: 0 2px 10px rgba(202, 157, 62, 0.22);
+}
+
+.v-grove .gr-sig.int-paid.fresh,
+.v-grove .gr-sig.int-ready.fresh {
+  animation: grvSprout 0.45s cubic-bezier(0.24, 1.1, 0.4, 1), grvBloom 3s ease-out;
+}
+
+@keyframes grvBloom {
+  0% { box-shadow: 0 0 0 0 rgba(224, 182, 78, 0.55); background: #fdf3d3; }
+  60% { box-shadow: 0 0 0 12px rgba(224, 182, 78, 0); background: #fcf5e0; }
+  100% { box-shadow: 0 0 0 12px rgba(224, 182, 78, 0), 0 2px 10px rgba(202, 157, 62, 0.22); background: var(--card); }
+}
+
+.v-grove .gr-sig.int-urgent {
+  border-left: 3px solid var(--danger);
+}
+
+/* ---------- tending (actions) ---------- */
+
+.v-grove .gr-kind {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 2px 9px;
+  margin-bottom: 6px;
+}
+
+.v-grove .gk-reply {
+  color: #a34724;
+  background: var(--danger-soft);
+}
+
+.v-grove .gk-reminder {
+  color: #8c620c;
+  background: var(--warn-soft);
+}
+
+.v-grove .gk-nudge {
+  color: #6a5494;
+  background: rgba(123, 100, 168, 0.13);
+}
+
+.v-grove .gr-act {
+  border-left: 3px solid var(--line-2);
+}
+
+.v-grove .gr-act.kind-reply { border-left-color: var(--danger); }
+.v-grove .gr-act.kind-reminder { border-left-color: var(--warn); }
+.v-grove .gr-act.kind-nudge { border-left-color: var(--c-email); }
+
+.v-grove .gr-title {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.3;
+  margin-bottom: 2px;
+}
+
+.v-grove .gr-meta {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-bottom: 6px;
+}
+
+/* ---------- planted (reminders) ---------- */
+
+.v-grove .gr-rem .gr-title {
+  margin-top: 4px;
+}
+
+.v-grove .rem-card.due,
+.v-grove .rem-card.overdue {
+  border-left: 3px solid var(--danger);
+  background: #f7e7d6;
+  animation: grvSprout 0.45s ease-out, grvRipe 3.4s ease-in-out 0.5s infinite;
+}
+
+@keyframes grvRipe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 81, 43, 0.22); }
+  50% { box-shadow: 0 0 0 6px rgba(181, 81, 43, 0); }
+}
+
+.v-grove .rem-card.born {
+  animation: grvSprout 0.45s ease-out, grvSeedGlow 6s ease-out;
+}
+
+@keyframes grvSeedGlow {
+  0% { background: #e9efdc; border-color: var(--ok); }
+  70% { background: #f2f3e2; }
+  100% { background: var(--card); }
+}
+
+.v-grove .chip-born {
+  text-transform: none;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.v-grove .due-chip {
+  border-radius: 999px;
+}
+
+.v-grove .due-over {
+  background: var(--danger);
+  color: #fdf6ec;
+}
+
+/* ---------- shared atoms, warmed up ---------- */
+
+.v-grove .ops {
+  top: 8px;
+  right: 9px;
+}
+
+.v-grove .op {
+  border-radius: 999px;
+  border-color: var(--line-2);
+  background: var(--card);
+  box-shadow: 0 1px 3px rgba(64, 76, 42, 0.12);
+}
+
+.v-grove .op-done {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #f6f3e6;
+}
+
+.v-grove .op-snooze:hover {
+  background: var(--panel);
+}
+
+.v-grove .prov {
+  border-top-color: var(--line);
+}
+
+.v-grove .prov-quote {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 12px;
+  color: #5d6448;
+  border-left: 2px solid #cabf9d;
+}
+
+.v-grove .chip-reply {
+  border-radius: 999px;
+}
+
+.v-grove .tag,
+.v-grove .tag-sug {
+  border-radius: 999px;
+}
+
+.v-grove .empty-note {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 12.5px;
+  color: var(--faint);
+}
+
+.v-grove .heat-fill {
+  background: linear-gradient(90deg, #8fae6b, #d9ad45);
+}
+
+/* ---------- playbooks panel (shared markup, grove skin) ---------- */
+
+.v-grove .autos-h {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0.3px;
+  color: var(--dim);
+}
+
+.v-grove .seq-name {
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 620;
+}
+
+.v-grove .auto-toggle {
+  background: #c9bd9e;
+}
+
+.v-grove .auto-toggle.on {
+  background: var(--ok);
+}
+
+.v-grove .seq-steps {
+  border-left: 2px solid #d5c9a8;
+}
+
+.v-grove .seq-step-day {
+  color: #8c8568;
+}
+
+.v-grove .sdot {
+  border-color: #c0b490;
+}
+
+.v-grove .sdot-done {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.v-grove .sdot-next {
+  border-color: var(--c-call);
+  animation: grvSeedPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes grvSeedPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(181, 115, 31, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(181, 115, 31, 0); }
+}
+
+.v-grove .seqi-next b {
+  color: #a8641c;
+}
+
+.v-grove .seqi-endtag {
+  border-radius: 999px;
+}
+
+.v-grove .auto-paused {
+  color: #a34724;
+}
+
+/* ---------- field notes (context panel skin) ---------- */
+
+.v-grove .ctx-section {
+  border-bottom-color: var(--line);
+}
+
+.v-grove .ctx-section h4 {
+  color: var(--faint);
+  letter-spacing: 1px;
+}
+
+.v-grove .ctx-name {
+  font-family: var(--font-display);
+  font-weight: 640;
+  font-size: 18px;
+}
+
+.v-grove .ctx-note {
+  color: #565d40;
+}
+
+.v-grove .hist-day-label {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 600;
+  border-bottom-color: var(--line-2);
+}
+
+.v-grove .ctx-empty-mark {
+  color: #b7ab86;
+  font-size: 26px;
+}
+
+.v-grove .ctx-empty {
+  font-family: var(--font-display);
+  font-style: italic;
+  color: var(--dim);
+}
+
+/* ---------- scrollbars ---------- */
+
+.v-grove .pane-scroll {
+  scrollbar-color: #c6b890 transparent;
+}

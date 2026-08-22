@@ -1,0 +1,401 @@
+/* Variant 06 — Arcade: neo-brutalist game HUD. Thick borders, hard shadows, juice. */
+
+.v-arcade {
+  --bg: #1c1033;
+  --panel: #251545;
+  --card: #2d1b52;
+  --line: #3d2a66;
+  --line-2: #55407f;
+  --ink: #f5efff;
+  --dim: #b8a8d9;
+  --faint: #8672ad;
+  --danger: #ff5d8f;
+  --danger-soft: rgba(255, 93, 143, 0.16);
+  --warn: #ffd60a;
+  --warn-soft: rgba(255, 214, 10, 0.14);
+  --ok: #3ddc97;
+  --ok-soft: rgba(61, 220, 151, 0.15);
+  --c-sms: #40e0d0;
+  --c-email: #9d8bfb;
+  --c-call: #ffb703;
+  --c-form: #ff7ac6;
+  --radius: 12px;
+  --font-body: 'Space Grotesk', 'Inter', sans-serif;
+  --font-display: 'Space Grotesk', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* top bar */
+
+.v-arcade .ar-top {
+  height: 54px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 0 20px;
+  background: #150b28;
+  border-bottom: 3px solid #000;
+}
+
+.v-arcade .ar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 2.5px;
+}
+
+.v-arcade .ar-coin {
+  font-size: 20px;
+  animation: arCoin 2.4s ease-in-out infinite;
+  display: inline-block;
+}
+
+@keyframes arCoin {
+  0%, 100% { transform: rotateY(0deg); }
+  50% { transform: rotateY(180deg); }
+}
+
+.v-arcade .ar-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 2px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
+.v-arcade .ar-counters {
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+}
+
+.v-arcade .ar-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: var(--card);
+  border: 2px solid #000;
+  border-radius: 10px;
+  padding: 4px 12px;
+  box-shadow: 2px 2px 0 #000;
+  font-size: 12px;
+}
+
+.v-arcade .ar-stat b {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--warn);
+}
+
+.v-arcade .ar-stat em {
+  font-style: normal;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--dim);
+}
+
+.v-arcade .ar-stat.hot b { color: var(--danger); }
+.v-arcade .ar-stat.hot { animation: shakeX 2.4s ease-in-out infinite; }
+
+.v-arcade .ar-ctl { display: flex; align-items: center; gap: 10px; }
+
+.v-arcade .ar-pause {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #150b28;
+  background: var(--warn);
+  border: 2px solid #000;
+  border-radius: 10px;
+  padding: 6px 14px;
+  box-shadow: 3px 3px 0 #000;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.v-arcade .ar-pause:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 #000;
+}
+
+/* columns */
+
+.v-arcade .ar-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 245px 1.15fr 1fr 270px 270px 300px;
+}
+
+.v-arcade .pane { border-right: 2px solid #000; }
+.v-arcade .pane:last-child { border-right: none; }
+.v-arcade .pane-head { border-bottom: 2px solid #000; }
+
+.v-arcade .pane-head h2 {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.v-arcade .ar-side { background: var(--panel); }
+
+/* cards: chunky */
+
+.v-arcade .card {
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0 #000;
+  animation: bounceIn 0.4s cubic-bezier(0.34, 1.5, 0.64, 1);
+}
+
+.v-arcade .card:hover {
+  box-shadow: 4px 4px 0 #000;
+  transform: translate(-1px, -1px);
+}
+
+.v-arcade .card.fresh {
+  animation: bounceIn 0.4s cubic-bezier(0.34, 1.5, 0.64, 1), vring 2s ease-out;
+}
+
+.v-arcade .card.leaving {
+  transform: scale(0.9) rotate(3deg);
+  opacity: 0;
+}
+
+/* leaderboard */
+
+.v-arcade .ar-clear {
+  flex: none;
+  margin: 8px 12px 0;
+  padding: 6px 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-align: left;
+  color: var(--danger);
+  border: 2px solid var(--danger);
+  border-radius: 8px;
+}
+
+.v-arcade .ar-player {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  margin-bottom: 5px;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.v-arcade .ar-player:hover { background: var(--card); }
+
+.v-arcade .ar-player.focused {
+  background: var(--card);
+  border-color: var(--warn);
+  box-shadow: 3px 3px 0 #000;
+}
+
+.v-arcade .ar-rank {
+  font-size: 16px;
+  flex: none;
+  width: 30px;
+  font-family: var(--font-mono);
+}
+
+.v-arcade .ar-pcol { flex: 1; min-width: 0; }
+
+.v-arcade .ar-pname {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.v-arcade .ar-pbadges {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.v-arcade .ar-temp,
+.v-arcade .ar-money {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.v-arcade .ar-temp.temp-hot { color: #ff9166; background: rgba(255, 110, 60, 0.18); }
+.v-arcade .ar-temp.temp-warm { color: var(--warn); background: var(--warn-soft); }
+.v-arcade .ar-temp.temp-cool { color: #9db8dd; background: rgba(157, 184, 221, 0.14); }
+.v-arcade .ar-temp.temp-cold { color: #7dd3fc; background: rgba(125, 211, 252, 0.14); }
+
+.v-arcade .ar-money {
+  color: #150b28;
+  background: var(--warn);
+  animation: puGlowPulse 2s ease-in-out infinite;
+}
+
+.v-arcade .ar-score {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--dim);
+  flex: none;
+}
+
+.v-arcade .temp-hot .ar-score { color: #ff9166; }
+
+/* incoming */
+
+.v-arcade .ar-sig-row { display: flex; gap: 10px; }
+
+.v-arcade .ar-sig-emoji {
+  font-size: 22px;
+  flex: none;
+  padding-top: 2px;
+}
+
+.v-arcade .ar-sig-body { flex: 1; min-width: 0; }
+
+.v-arcade .ar-sig .card-sub { margin-top: 6px; margin-bottom: 0; }
+
+.v-arcade .ar-tag {
+  display: inline-block;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  border-radius: 6px;
+  padding: 2px 8px;
+  margin: 2px 0 5px;
+  border: 1.5px solid currentColor;
+}
+
+.v-arcade .ar-tag.int-ready,
+.v-arcade .ar-tag.int-paid { color: var(--warn); background: var(--warn-soft); }
+.v-arcade .ar-tag.int-urgent { color: var(--danger); background: var(--danger-soft); }
+.v-arcade .ar-tag.int-lead { color: var(--c-email); }
+.v-arcade .ar-tag.int-love { color: var(--ok); }
+.v-arcade .ar-tag.int-future { color: var(--c-form); }
+.v-arcade .ar-tag.int-sched { color: var(--dim); }
+.v-arcade .ar-tag.int-ask { color: var(--warn); }
+
+.v-arcade .ar-sig.int-ready,
+.v-arcade .ar-sig.int-paid {
+  border-color: var(--warn);
+  box-shadow: 3px 3px 0 #7b5800;
+}
+
+.v-arcade .ar-sig.int-urgent { border-color: var(--danger); }
+
+/* quests */
+
+.v-arcade .ar-quest.kind-reply { border-color: var(--danger); }
+.v-arcade .ar-quest.kind-reminder { border-color: var(--warn); }
+.v-arcade .ar-quest.kind-nudge { border-color: var(--c-email); }
+
+.v-arcade .ar-quest-top {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.v-arcade .ar-quest-emoji { font-size: 22px; flex: none; }
+
+.v-arcade .ar-quest-body { flex: 1; min-width: 0; }
+
+.v-arcade .ar-quest-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.v-arcade .ar-quest-person {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 1px;
+}
+
+.v-arcade .ar-btns {
+  display: flex;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.v-arcade .ar-btn {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border: 2px solid #000;
+  border-radius: 9px;
+  padding: 5px 12px;
+  box-shadow: 2px 2px 0 #000;
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+
+.v-arcade .ar-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0 0 0 #000;
+}
+
+.v-arcade .ar-btn-done {
+  background: var(--ok);
+  color: #06281b;
+}
+
+.v-arcade .ar-btn-zzz {
+  background: var(--card);
+  color: var(--dim);
+}
+
+.v-arcade .ar-zero {
+  border: 2px dashed var(--line-2);
+  border-radius: 12px;
+  padding: 22px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--dim);
+  text-align: center;
+}
+
+/* timers */
+
+.v-arcade .ar-rem-note {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 4px 0 1px;
+  line-height: 1.3;
+}
+
+.v-arcade .rem-card.due,
+.v-arcade .rem-card.overdue {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  animation: shakeX 2s ease-in-out infinite;
+}
+
+/* shared tweaks */
+
+.v-arcade .sday-label {
+  border-bottom: 2px solid var(--line-2);
+  font-family: var(--font-mono);
+}
+
+.v-arcade .op { border: 2px solid #000; box-shadow: 2px 2px 0 #000; }
+.v-arcade .auto-toggle { border: 2px solid #000; }
