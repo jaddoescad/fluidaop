@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import '../variants/flow.css';
@@ -8,9 +8,8 @@ import './connections.css';
 /**
  * Connections — where the business grants Fluid access to real accounts.
  * Today that is one shared Gmail inbox. The page talks to the real
- * connections API: it never pretends an account is connected, it explains
- * how the background health checks keep the link alive, and every action
- * (connect / check / disconnect) reports exactly what happened.
+ * connections API: it never pretends an account is connected, and every
+ * action (connect / check / disconnect) reports exactly what happened.
  */
 
 interface GmailConnection {
@@ -135,21 +134,25 @@ function fmtFuture(iso: string | null, now: number): string {
   return `at ${new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
 }
 
-/** "every five minutes" — worded from the interval the server actually returns. */
+/** "every 5 minutes" — worded from the interval the server actually returns. */
 function everyPhrase(ms: number): string {
   const min = Math.round(ms / 60_000);
-  if (min <= 1) return 'every minute';
-  const words = ['two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
-  return `every ${words[min - 2] ?? String(min)} minutes`;
+  return min <= 1 ? 'every minute' : `every ${min} minutes`;
 }
 
 // ---------- small pieces ----------
 
-/** Letter mark for Gmail — a plain tile, no emoji, no gradient. */
-function GmailMark({ dim = false }: { dim?: boolean }) {
+/** The Gmail envelope mark, drawn inline — no emoji, no remote image. */
+function GmailLogo({ dim = false }: { dim?: boolean }) {
   return (
-    <span className={`cn-mark${dim ? ' cn-mark-dim' : ''}`} aria-hidden="true">
-      M
+    <span className={`cn-logo${dim ? ' cn-logo-dim' : ''}`} aria-hidden="true">
+      <svg viewBox="52 42 88 66" width="22" height="16.5" focusable="false">
+        <path fill="#4285f4" d="M58 108h14V74L52 59v43c0 3.32 2.69 6 6 6" />
+        <path fill="#34a853" d="M120 108h14c3.32 0 6-2.69 6-6V59l-20 15" />
+        <path fill="#fbbc04" d="M120 48v26l20-15v-8c0-7.42-8.47-11.65-14.4-7.2" />
+        <path fill="#ea4335" d="M72 74V48l24 18 24-18v26L96 92" />
+        <path fill="#c5221f" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2" />
+      </svg>
     </span>
   );
 }
@@ -168,7 +171,7 @@ function StatusPill({
           ? { cls: 'danger', dot: '', label: 'Needs attention' }
           : status === 'unavailable'
             ? { cls: 'warn', dot: '', label: 'Status unavailable' }
-          : { cls: 'off', dot: '', label: 'Not connected' };
+            : { cls: 'off', dot: '', label: 'Not connected' };
   return (
     <span className={`cn-pill cn-pill-${meta.cls}`}>
       <i className={`cn-dot${meta.dot}`} />
@@ -177,16 +180,160 @@ function StatusPill({
   );
 }
 
-function Fact({ label, value, abs }: { label: string; value: string; abs?: string }) {
+type Notice = { tone: 'ok' | 'danger' | 'info'; text: string; detail?: string };
+
+// ---------- connected account card ----------
+
+function ConnectedCard({
+  c,
+  now,
+  busy,
+  confirming,
+  onCheck,
+  onDisconnect,
+  onConfirmChange,
+}: {
+  c: GmailConnection;
+  now: number;
+  busy: boolean;
+  confirming: boolean;
+  onCheck: () => void;
+  onDisconnect: () => void;
+  onConfirmChange: (open: boolean) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef<HTMLDivElement | null>(null);
+  const manageRef = useRef<HTMLButtonElement | null>(null);
+  const menuItemRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    menuItemRef.current?.focus();
+    const onDown = (e: PointerEvent) => {
+      if (menuWrapRef.current !== null && !menuWrapRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+        manageRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (confirming) cancelRef.current?.focus();
+  }, [confirming]);
+
+  const checking = busy || c.status === 'checking';
+
   return (
-    <div className="cn-fact">
-      <dt>{label}</dt>
-      <dd title={abs}>{value}</dd>
-    </div>
+    <section className="cn-card" aria-label={`Gmail — ${c.email}`}>
+      <div className="cn-card-head">
+        <GmailLogo />
+        <div className="cn-who">
+          <b>{c.email}</b>
+          <span>Gmail</span>
+        </div>
+        <StatusPill status={c.status} />
+      </div>
+
+      {c.status === 'error' && (
+        <p className="cn-problem">
+          {c.error ??
+            'The last health check failed. Google didn’t say why — try a manual check, or reconnect.'}
+        </p>
+      )}
+
+      {confirming ? (
+        <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
+          <p>
+            Disconnect <b>{c.email}</b>? Fluid loses access to this inbox immediately. Nothing in
+            Gmail itself is deleted, and you can reconnect any time.
+          </p>
+          <div className="cn-actions">
+            <button
+              type="button"
+              className="cn-btn cn-btn-danger"
+              onClick={onDisconnect}
+              disabled={busy}
+            >
+              {busy ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+            <button
+              ref={cancelRef}
+              type="button"
+              className="cn-btn"
+              onClick={() => onConfirmChange(false)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="cn-card-foot">
+          <dl className="cn-meta">
+            <div className="cn-meta-item">
+              <dt>Last checked</dt>
+              <dd title={fmtAbs(c.lastCheckedAt)}>{fmtPast(c.lastCheckedAt, now, 'not yet')}</dd>
+            </div>
+            <div className="cn-meta-item">
+              <dt>Next check</dt>
+              <dd title={fmtAbs(c.nextCheckAt)}>{fmtFuture(c.nextCheckAt, now)}</dd>
+            </div>
+          </dl>
+          <div className="cn-actions">
+            <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>
+              {checking ? 'Checking…' : 'Check now'}
+            </button>
+            <div className="cn-menu-wrap" ref={menuWrapRef}>
+              <button
+                ref={manageRef}
+                type="button"
+                className="cn-btn cn-btn-icon"
+                aria-label={`Manage ${c.email}`}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+                  <circle cx="3" cy="8" r="1.4" fill="currentColor" />
+                  <circle cx="8" cy="8" r="1.4" fill="currentColor" />
+                  <circle cx="13" cy="8" r="1.4" fill="currentColor" />
+                </svg>
+              </button>
+              {menuOpen && (
+                <div className="cn-menu" role="menu" aria-label={`Manage ${c.email}`}>
+                  <button
+                    ref={menuItemRef}
+                    type="button"
+                    role="menuitem"
+                    className="cn-menu-item cn-menu-item-danger"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onConfirmChange(true);
+                    }}
+                  >
+                    Disconnect…
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
-
-type Notice = { tone: 'ok' | 'danger' | 'info'; text: string; detail?: string };
 
 // ---------- the page ----------
 
@@ -334,10 +481,7 @@ export function ConnectionsPage({
             <div className="cn-inner">
               <header className="cn-head">
                 <h1>Connections</h1>
-                <p>
-                  Connect external services to Fluid. The first integration is Gmail for the
-                  shared inbox <b>{INTENDED_EMAIL}</b>.
-                </p>
+                <p>External accounts Fluid can reach on this workspace’s behalf.</p>
               </header>
 
               {notice !== null && (
@@ -387,27 +531,24 @@ export function ConnectionsPage({
                   aria-label={`Gmail — ${INTENDED_EMAIL} — status unavailable`}
                 >
                   <div className="cn-card-head">
-                    <GmailMark dim />
+                    <GmailLogo dim />
                     <div className="cn-who">
                       <b>{INTENDED_EMAIL}</b>
-                      <span>Gmail · Google Workspace inbox</span>
+                      <span>Gmail</span>
                     </div>
                     <StatusPill status="unavailable" />
                   </div>
-                  <div className="cn-problem" role="alert">
-                    <b>Fluid’s Gmail integration server is unavailable.</b>{' '}
-                    Gmail itself was not reached, so this page is not claiming the inbox is
-                    connected or disconnected.
-                  </div>
-                  <p className="cn-hint">
+                  <p className="cn-problem" role="alert">
+                    <b>Fluid’s integration server is unavailable</b> — Gmail itself wasn’t reached,
+                    so this page isn’t claiming the inbox is connected or disconnected.{' '}
                     {loadError.message}
                     {loadError.status !== null && !loadError.message.includes('HTTP')
                       ? ` (HTTP ${loadError.status})`
                       : ''}
                   </p>
-                  <div className="cn-btns">
+                  <div className="cn-actions">
                     <button type="button" className="cn-btn" onClick={() => void load(false)}>
-                      Check Gmail status again
+                      Try again
                     </button>
                   </div>
                 </section>
@@ -424,150 +565,60 @@ export function ConnectionsPage({
                   )}
 
                   {gmailConnections.length === 0 ? (
-                    <section className="cn-card" aria-label="Gmail — not connected">
-                      <div className="cn-card-head">
-                        <GmailMark dim />
-                        <div className="cn-who">
-                          <b>{INTENDED_EMAIL}</b>
-                          <span>Gmail · shared company inbox</span>
-                        </div>
-                        <StatusPill status="off" />
-                      </div>
-                      <p className="cn-card-text">
-                        Fluid doesn’t have access to this inbox yet. Connecting opens Google’s
-                        sign-in for <b>{INTENDED_EMAIL}</b> — approve read access there and you’ll
-                        land back on this page.
-                      </p>
-                      <div className="cn-btns">
-                        <button
-                          type="button"
-                          className="cn-btn cn-btn-primary"
-                          onClick={() => void connect()}
-                          disabled={!payload.configured || connecting}
-                        >
-                          {connecting ? 'Opening Google sign-in…' : 'Connect Gmail'}
-                        </button>
-                      </div>
-                      {!payload.configured && (
-                        <p className="cn-hint">
-                          Disabled until the server has Google credentials — see the note above.
-                        </p>
-                      )}
-                    </section>
-                  ) : (
-                    gmailConnections.map((c) => (
-                      <section key={c.id} className="cn-card" aria-label={`Gmail — ${c.email}`}>
+                    <section className="cn-section" aria-labelledby="cn-section-h">
+                      <h2 id="cn-section-h" className="cn-section-label">
+                        Available
+                      </h2>
+                      <section className="cn-card" aria-label="Gmail — not connected">
                         <div className="cn-card-head">
-                          <GmailMark />
+                          <GmailLogo dim />
                           <div className="cn-who">
-                            <b>{c.email}</b>
-                            <span>Gmail · shared company inbox</span>
+                            <b>Gmail</b>
+                            <span>{INTENDED_EMAIL}</span>
                           </div>
-                          <StatusPill status={c.status} />
+                          <StatusPill status="off" />
                         </div>
-
-                        {c.status === 'error' && (
-                          <p className="cn-problem">
-                            {c.error ??
-                              'The last health check failed. Google didn’t say why — try a manual check, or reconnect.'}
+                        <p className="cn-card-text">
+                          Connect the shared inbox through Google sign-in — approve access there and
+                          you’ll land back on this page.
+                        </p>
+                        <div className="cn-actions">
+                          <button
+                            type="button"
+                            className="cn-btn cn-btn-primary"
+                            onClick={() => void connect()}
+                            disabled={!payload.configured || connecting}
+                          >
+                            {connecting ? 'Opening Google sign-in…' : 'Connect Gmail'}
+                          </button>
+                        </div>
+                        {!payload.configured && (
+                          <p className="cn-hint">
+                            Disabled until the server has Google credentials — see the note above.
                           </p>
                         )}
-
-                        <dl className="cn-facts">
-                          <Fact
-                            label="Last checked"
-                            value={fmtPast(c.lastCheckedAt, now, 'not yet')}
-                            abs={fmtAbs(c.lastCheckedAt)}
-                          />
-                          <Fact
-                            label="Last healthy"
-                            value={fmtPast(c.lastHealthyAt, now, 'never')}
-                            abs={fmtAbs(c.lastHealthyAt)}
-                          />
-                          <Fact
-                            label="Next check"
-                            value={fmtFuture(c.nextCheckAt, now)}
-                            abs={fmtAbs(c.nextCheckAt)}
-                          />
-                          <Fact
-                            label="Connected"
-                            value={fmtPast(c.createdAt, now, '—')}
-                            abs={fmtAbs(c.createdAt)}
-                          />
-                        </dl>
-
-                        {confirmId === c.id ? (
-                          <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
-                            <p>
-                              Disconnect <b>{c.email}</b>? Fluid loses access to this inbox
-                              immediately. Nothing in Gmail itself is deleted, and you can
-                              reconnect any time.
-                            </p>
-                            <div className="cn-btns">
-                              <button
-                                type="button"
-                                className="cn-btn cn-btn-danger"
-                                onClick={() => void disconnect(c)}
-                                disabled={busyId === c.id}
-                              >
-                                {busyId === c.id ? 'Disconnecting…' : 'Yes, disconnect'}
-                              </button>
-                              <button
-                                type="button"
-                                className="cn-btn"
-                                onClick={() => setConfirmId(null)}
-                                disabled={busyId === c.id}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="cn-btns">
-                            <button
-                              type="button"
-                              className="cn-btn cn-btn-primary"
-                              onClick={() => void checkNow(c.id)}
-                              disabled={busyId === c.id || c.status === 'checking'}
-                            >
-                              {busyId === c.id || c.status === 'checking' ? 'Checking…' : 'Check now'}
-                            </button>
-                            <button
-                              type="button"
-                              className="cn-btn cn-btn-quiet-danger"
-                              onClick={() => setConfirmId(c.id)}
-                            >
-                              Disconnect…
-                            </button>
-                          </div>
-                        )}
                       </section>
-                    ))
+                    </section>
+                  ) : (
+                    <section className="cn-section" aria-labelledby="cn-section-h">
+                      <h2 id="cn-section-h" className="cn-section-label">
+                        Connected
+                      </h2>
+                      {gmailConnections.map((c) => (
+                        <ConnectedCard
+                          key={c.id}
+                          c={c}
+                          now={now}
+                          busy={busyId === c.id}
+                          confirming={confirmId === c.id}
+                          onCheck={() => void checkNow(c.id)}
+                          onDisconnect={() => void disconnect(c)}
+                          onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
+                        />
+                      ))}
+                      <p className="cn-quiet">Automatic health checks {interval}.</p>
+                    </section>
                   )}
-
-                  <section className="cn-explain" aria-labelledby="cn-explain-h">
-                    <h2 id="cn-explain-h">How the connection stays healthy</h2>
-                    <ul>
-                      <li>
-                        <b>Background checks {interval}.</b> Fluid quietly confirms it can still
-                        reach the inbox — no mail is sent or moved. “Last checked” is the most
-                        recent attempt, “last healthy” is the most recent one that succeeded, and
-                        “next check” is when the following attempt is due.
-                      </li>
-                      <li>
-                        <b>It works while you’re away.</b> When you connect, Google issues Fluid a
-                        refresh token that’s stored on the server. The connection survives
-                        restarts and doesn’t need this page open or another sign-in — it keeps
-                        working until you disconnect or Google revokes access.
-                      </li>
-                      <li>
-                        <b>If a check fails</b>, the account flips to “needs attention” with
-                        Google’s reason shown on the card. A manual “Check now” often clears a
-                        temporary blip; if it doesn’t, disconnect and connect again to refresh the
-                        grant.
-                      </li>
-                    </ul>
-                  </section>
                 </>
               ) : null}
             </div>

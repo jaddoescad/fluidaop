@@ -1,6 +1,6 @@
 /* Connections — the Zen visual language (near-black neutrals, hairline
    borders, one lavender accent, ghost buttons) applied to a single-column
-   settings page. Unlike the board, this page flexes down to laptop and
+   integrations page. Unlike the board, this page flexes down to laptop and
    tablet widths. */
 
 .v.cn-root {
@@ -16,8 +16,8 @@
 }
 
 .cn-inner {
-  max-width: 760px;
-  padding: 28px clamp(16px, 4vw, 40px) 64px;
+  max-width: 720px;
+  padding: 32px clamp(16px, 4vw, 40px) 64px;
 }
 
 /* every control on this page keeps a visible focus ring */
@@ -30,14 +30,15 @@
 /* ---------- page header ---------- */
 
 .cn-head {
-  margin-bottom: 22px;
+  margin-bottom: 26px;
 }
 
 .cn-head h1 {
   font-size: 18px;
   font-weight: 650;
+  letter-spacing: -0.01em;
   color: var(--ink);
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 
 .cn-head p {
@@ -47,9 +48,15 @@
   max-width: 54ch;
 }
 
-.cn-head p b {
-  color: var(--ink);
+/* ---------- sections ---------- */
+
+.cn-section-label {
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 10px;
 }
 
 /* ---------- callback / error banners ---------- */
@@ -61,7 +68,7 @@
   border: 1px solid var(--line-2);
   border-radius: 10px;
   padding: 10px 12px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   background: var(--panel);
 }
 
@@ -133,7 +140,7 @@
   border-radius: 12px;
   background: var(--panel);
   padding: 14px 16px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .cn-panel-warn {
@@ -150,8 +157,6 @@
 .cn-panel-text b { color: var(--ink); font-weight: 600; }
 .cn-panel-warn .cn-panel-text b { color: var(--gold); }
 
-.cn-panel .cn-btn { margin-top: 10px; }
-
 /* ---------- the account card ---------- */
 
 .cn-card {
@@ -159,34 +164,35 @@
   border-radius: 12px;
   background: var(--card);
   padding: 16px 18px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .cn-card-head {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
-/* Gmail letter mark — a plain tile, no emoji, no gradient */
-.cn-mark {
+/* Gmail mark tile — the real multicolour envelope, drawn inline */
+.cn-logo {
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
-  background: #1e1e26;
-  border: 1px solid var(--line-2);
-  color: #e2766a;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
   user-select: none;
 }
 
-.cn-mark-dim { color: var(--faint); }
+.cn-logo svg { display: block; }
+
+.cn-logo-dim svg {
+  filter: grayscale(0.9) opacity(0.55);
+}
 
 .cn-who {
   flex: 1;
@@ -206,8 +212,11 @@
 }
 
 .cn-who span {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* status pill — text + dot, never colour alone */
@@ -237,6 +246,10 @@
   50% { opacity: 0.35; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .cn-dot-breathe { animation: none; }
+}
+
 .cn-pill-ok { color: var(--ok); background: var(--ok-soft); }
 .cn-pill-danger { color: var(--danger); background: var(--danger-soft); }
 .cn-pill-warn { color: var(--gold); background: var(--warn-soft); }
@@ -255,8 +268,6 @@
   max-width: 58ch;
 }
 
-.cn-card-text b { color: var(--ink); font-weight: 600; }
-
 /* what went wrong, verbatim from the server */
 .cn-problem {
   font-size: 12px;
@@ -271,36 +282,52 @@
 
 .cn-problem b { font-weight: 650; }
 
-/* ---------- health facts ---------- */
+/* ---------- card footer: metadata left, actions right ---------- */
 
-.cn-facts {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px 16px;
+.cn-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
   margin-top: 14px;
-  padding-top: 12px;
+  padding-top: 13px;
   border-top: 1px solid var(--line);
 }
 
-.cn-fact dt {
-  font-size: 10.5px;
+.cn-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px 28px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.cn-meta-item dt {
+  font-size: 10px;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--faint);
   margin-bottom: 3px;
 }
 
-.cn-fact dd {
+.cn-meta-item dd {
   font-size: 12px;
   color: var(--ink);
 }
 
 /* ---------- buttons: ghost by default, tinted when they matter ---------- */
 
-.cn-btns {
+.cn-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.cn-card-text + .cn-actions,
+.cn-problem + .cn-actions {
   margin-top: 14px;
 }
 
@@ -308,13 +335,18 @@
   font-size: 12.5px;
   font-weight: 600;
   color: var(--dim);
-  background: #23232b;
+  background: transparent;
+  border: 1px solid var(--line-2);
   border-radius: 9px;
-  padding: 7px 15px;
+  padding: 6px 14px;
   white-space: nowrap;
 }
 
-.cn-btn:hover:not(:disabled) { color: var(--ink); }
+.cn-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: color-mix(in srgb, var(--ink) 25%, var(--line-2));
+}
+
 .cn-btn:active:not(:disabled) { opacity: 0.8; }
 
 .cn-btn:disabled {
@@ -324,16 +356,19 @@
 
 .cn-btn-primary {
   background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   color: var(--accent);
 }
 
 .cn-btn-primary:hover:not(:disabled) {
   background: rgba(157, 151, 245, 0.2);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--accent);
 }
 
 .cn-btn-danger {
   background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
   color: var(--danger);
 }
 
@@ -342,21 +377,76 @@
   color: var(--danger);
 }
 
-/* disconnect entry point: quiet until you mean it */
-.cn-btn-quiet-danger {
-  background: transparent;
-  border: 1px solid var(--line-2);
+/* overflow "manage" affordance — quiet until opened */
+.cn-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--faint);
 }
 
-.cn-btn-quiet-danger:hover:not(:disabled) {
+.cn-btn-icon:hover:not(:disabled),
+.cn-btn-icon[aria-expanded='true'] {
+  color: var(--ink);
+}
+
+.cn-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.cn-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.cn-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--dim);
+  border-radius: 7px;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
+.cn-menu-item:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+.cn-menu-item-danger { color: var(--danger); }
+
+.cn-menu-item-danger:hover {
   color: var(--danger);
-  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-soft);
 }
 
 .cn-hint {
   font-size: 11px;
   color: var(--faint);
-  margin-top: 8px;
+  margin-top: 10px;
+}
+
+/* one quiet line instead of an essay */
+.cn-quiet {
+  font-size: 11.5px;
+  color: var(--faint);
+  margin-top: 2px;
+  padding-left: 2px;
 }
 
 /* the in-card confirm step */
@@ -365,7 +455,7 @@
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: 10px;
   background: var(--danger-soft);
-  padding: 11px 13px;
+  padding: 12px 14px;
 }
 
 .cn-confirm p {
@@ -376,47 +466,9 @@
 
 .cn-confirm p b { font-weight: 650; }
 
-.cn-confirm .cn-btns { margin-top: 10px; }
-
-/* ---------- how it works ---------- */
-
-.cn-explain {
-  margin-top: 26px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line);
-}
-
-.cn-explain h2 {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-  margin-bottom: 10px;
-}
-
-.cn-explain ul {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.cn-explain li {
-  font-size: 12.5px;
-  line-height: 1.65;
-  color: var(--dim);
-  max-width: 64ch;
-}
-
-.cn-explain li b {
-  color: var(--ink);
-  font-weight: 600;
-}
+.cn-confirm .cn-actions { margin-top: 11px; }
 
 /* ---------- responsive: laptop and tablet ---------- */
-
-@media (max-width: 900px) {
-  .cn-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 
 @media (max-width: 720px) {
   .cn-root .fl-nav { width: 60px; padding: 14px 6px 12px; }
@@ -434,7 +486,8 @@
 }
 
 @media (max-width: 560px) {
-  .cn-facts { grid-template-columns: minmax(0, 1fr); }
   .cn-card-head { flex-wrap: wrap; }
-  .cn-pill { margin-left: 48px; }
+  .cn-pill { margin-left: 50px; }
+  .cn-card-foot { flex-direction: column; align-items: stretch; }
+  .cn-card-foot .cn-actions { justify-content: flex-end; }
 }
