@@ -1,0 +1,321 @@
+/* Zen — dark, quiet, minimal. Near-black neutrals, hairline borders, one
+   soft lavender accent, ghost buttons — and genuinely less on screen:
+   quotes live in the popup, redundant chips disappear, text clamps. */
+
+.v-zen {
+  --bg: #0f0f13;
+  --panel: #141419;
+  --card: #191920;
+  --line: #24242c;
+  --line-2: #33333e;
+  --ink: #e9e9ee;
+  --dim: #9d9da9;
+  --faint: #666672;
+  --danger: #f4587a;
+  --danger-soft: rgba(244, 88, 122, 0.1);
+  --warn: #e0aa45;
+  --warn-soft: rgba(224, 170, 69, 0.11);
+  --ok: #43c78f;
+  --ok-soft: rgba(67, 199, 143, 0.1);
+  --c-sms: #4cc4b8;
+  --c-email: #9d97f5;
+  --c-call: #d3a24b;
+  --c-form: #e07bb4;
+  --gold: #e0b45e;
+  --radius: 10px;
+  --accent: #9d97f5;
+  --accent-soft: rgba(157, 151, 245, 0.12);
+  --font-display: 'Inter', -apple-system, sans-serif;
+}
+
+/* ---------- quiet typography ---------- */
+
+.v-zen .fl-nav-logo { letter-spacing: 0.5px; }
+
+.v-zen .pane-head h2 {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ---------- surfaces: hairlines, no chunk, no theatrics ---------- */
+
+.v-zen .card,
+.v-zen .fl-play,
+.v-zen .fk-focusmsg,
+.v-zen .fk-oblig {
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.v-zen .card { animation: cardIn 0.25s ease-out; }
+.v-zen .card.fresh { animation: cardIn 0.25s ease-out, vring 1.4s ease-out; }
+
+.v-zen .card:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: var(--line-2);
+}
+
+.v-zen .fl-play:hover {
+  transform: none;
+  box-shadow: none;
+  border-color: var(--line-2);
+  background: #1e1e26;
+}
+
+.v-zen .fl-play:active { transform: none; box-shadow: none; }
+
+.v-zen .pane { border-right: 1px solid var(--line); }
+.v-zen .pane-head { border-bottom: 1px solid var(--line); }
+
+.v-zen .fl-top {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.v-zen .fl-mark {
+  border: none;
+  box-shadow: none;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+/* header counters become plain text metrics */
+.v-zen .fl-stat {
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  padding: 0 4px;
+}
+
+.v-zen .fl-stat b { color: var(--ink); }
+.v-zen .fl-stat.hot { border: none; }
+.v-zen .fl-stat.hot b { color: var(--danger); }
+
+/* ---------- controls: ghost buttons, soft accent primary ---------- */
+
+.v-zen .fl-btn,
+.v-zen .fl-pause,
+.v-zen .fl-next,
+.v-zen .fl-x,
+.v-zen .fl-gear,
+.v-zen .fl-cfg,
+.v-zen .fl-clear {
+  border: none;
+  box-shadow: none;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.v-zen .fl-btn:active,
+.v-zen .fl-pause:active,
+.v-zen .fl-next:active,
+.v-zen .fl-x:active,
+.v-zen .fl-gear:active,
+.v-zen .fl-cfg:active {
+  transform: none;
+  box-shadow: none;
+  opacity: 0.8;
+}
+
+/* done = green outline + text, never a filled background */
+.v-zen .fl-btn-done {
+  background: transparent;
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.v-zen .fl-btn-done:hover { background: var(--ok-soft); }
+.v-zen .fl-btn-snooze { background: #23232b; color: var(--dim); }
+
+.v-zen .fl-pause,
+.v-zen .fl-next {
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-transform: none;
+}
+
+.v-zen .fl-pause:hover,
+.v-zen .fl-next:hover { background: rgba(157, 151, 245, 0.2); }
+
+.v-zen .fl-x,
+.v-zen .fl-gear,
+.v-zen .fl-cfg {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--dim);
+}
+
+.v-zen .fl-gear.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+.v-zen .fl-clear {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.v-zen .fl-viewtoggle button { border: 1px solid var(--line-2); }
+
+.v-zen .fl-viewtoggle button.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.v-zen .fl-custom input,
+.v-zen .fl-auto-select {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+}
+
+.v-zen .fl-custom input:focus,
+.v-zen .fl-auto-select:focus { border-color: var(--accent); }
+
+.v-zen .fl-custom { border-color: var(--line-2); }
+
+/* ---------- chips: small tinted pills, and fewer of them ---------- */
+
+.v-zen .fl-tag,
+.v-zen .fl-plabel,
+.v-zen .fl-role {
+  border: none;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  padding: 2px 8px;
+  font-weight: 600;
+}
+
+.v-zen .fl-plabel.tone-quiet { background: transparent; border: 1px dashed var(--line-2); }
+
+.v-zen .fl-chip-sug { border-color: var(--line-2); }
+.v-zen .fl-chip-saved { background: var(--warn-soft); color: var(--gold); border: none; }
+.v-zen .fl-chip-created { background: var(--ok-soft); color: var(--ok); border: none; }
+.v-zen .dk-money { background: var(--warn-soft); color: var(--gold); border: none; }
+
+/* clutter cuts: the board shows less, the popup holds the detail */
+.v-zen .prov-quote { display: none; }
+.v-zen .prov { border-top: none; padding-top: 2px; margin-top: 0; }
+.v-zen .chip-reply { display: none; }
+.v-zen .fl-open-hint { display: none; }
+.v-zen .fl-st:not(.fl-st-open) { display: none; }
+.v-zen .seqi-last { display: none; }
+
+.v-zen .fl-sig .card-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.v-zen .sday-label {
+  border-bottom: none;
+  font-family: var(--font-body);
+  font-weight: 600;
+  color: var(--faint);
+  padding-bottom: 2px;
+}
+
+/* ---------- selection & signal states ---------- */
+
+.v-zen .fl-person { border-radius: 9px; }
+
+.v-zen .fl-person.focused {
+  border-color: transparent;
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.v-zen .fl-person.owed { background: rgba(244, 88, 122, 0.05); }
+.v-zen .fl-person.owed::before { width: 3px; }
+
+.v-zen .fl-sig.selected { border-color: var(--accent); }
+
+.v-zen .fl-sig.int-ready,
+.v-zen .fl-sig.int-paid {
+  border-color: rgba(224, 180, 94, 0.4);
+  box-shadow: none;
+}
+
+.v-zen .fl-sig.int-urgent { border-color: rgba(244, 88, 122, 0.4); }
+
+.v-zen .fl-sig.settled,
+.v-zen .fl-done-card,
+.v-zen .fk-oblig.done {
+  opacity: 0.5;
+  border-color: transparent;
+  box-shadow: none;
+  background: var(--panel);
+}
+
+.v-zen .fl-sig.settled:hover { opacity: 0.85; border-color: var(--line); }
+
+.v-zen .rem-card.due,
+.v-zen .rem-card.overdue {
+  border-color: rgba(244, 88, 122, 0.4);
+  background: rgba(244, 88, 122, 0.06);
+  animation: none;
+}
+
+.v-zen .fl-open-hint { color: var(--accent); }
+
+.v-zen .fl-act::before,
+.v-zen .fl-done-card::before {
+  width: 3px;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 10px 0 0 10px;
+}
+
+/* ---------- popup: a calm dark dialog ---------- */
+
+.v-zen .fl-scrim { background: rgba(6, 6, 10, 0.65); }
+
+.v-zen .fl-mega {
+  border: 1px solid var(--line-2);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6);
+  border-radius: 14px;
+}
+
+.v-zen .fl-mega-head { background: var(--panel); border-bottom: 1px solid var(--line); }
+.v-zen .fl-mega-head .avatar { border: none; }
+.v-zen .fl-mega-decide { border-left: 1px solid var(--line); background: #121217; }
+.v-zen .fl-mega-summary { border-left: 1px solid var(--line); background: var(--panel); }
+.v-zen .fl-mega-foot { border-top: 1px solid var(--line); background: var(--panel); }
+
+.v-zen .fk-msg { border-radius: 9px; }
+
+.v-zen .fk-msg.anchor {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.v-zen .fk-quote { border-left-color: var(--accent); }
+
+.v-zen .fk-beat-now .fk-beat-body {
+  border: 1px solid var(--line-2);
+  box-shadow: none;
+  background: var(--card);
+}
+
+.v-zen .fl-settled-banner { border: 1px solid rgba(67, 199, 143, 0.3); }
+
+/* ---------- small stuff ---------- */
+
+.v-zen .auto-toggle { border: none; width: 30px; height: 17px; background: var(--line-2); }
+.v-zen .auto-toggle i { top: 2px; left: 2px; }
+.v-zen .auto-toggle.on i { left: 15px; }
+.v-zen .auto-toggle.on { background: var(--ok); }
+
+.v-zen .op { border: 1px solid var(--line); box-shadow: none; }
+.v-zen .fk-msg:not(.anchor) .fk-msg-text { color: var(--dim); }
+.v-zen .fk-bullet { border-width: 1px; }
+.v-zen .fl-st-rem { color: var(--gold); background: var(--warn-soft); }
+.v-zen .kind-chip-reminder { color: var(--gold); }
+.v-zen .fl-purgency.temp-warm { color: var(--gold); }
+
+.v-zen .fl-headline-msg.int-ready,
+.v-zen .fl-headline-msg.int-paid,
+.v-zen .fl-headline-msg.int-ready b,
+.v-zen .fl-headline-msg.int-paid b { color: var(--gold); }

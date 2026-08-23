@@ -2,7 +2,7 @@ import { ReactNode, useRef, useState } from 'react';
 import { CHANNEL_LABEL } from '../data';
 import { counters, heatOf, openReminders, personById, signalById, visibleActions } from '../engine';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, isOverdue, startOfToday } from '../time';
-import { ActionCard, Channel, Person, Reminder, Signal, State, StepKind } from '../types';
+import { ActionCard, Channel, Person, PersonRole, Reminder, Signal, State, StepKind } from '../types';
 import { Act } from '../useFluid';
 import './shared.css';
 
@@ -45,14 +45,33 @@ export const KIND_LABEL: Record<ActionCard['kind'], string> = {
   reply: 'Reply due',
   reminder: 'Reminder due',
   nudge: 'Gone quiet',
+  task: 'Task',
 };
+
+// ---------- person role: who they are to the business ----------
+
+export const ROLE_META: Record<PersonRole, { emoji: string; label: string; hint: string }> = {
+  lead: { emoji: '✨', label: 'lead', hint: 'Potential client — not booked yet' },
+  client: { emoji: '🤝', label: 'client', hint: 'Active or repeat customer' },
+  vendor: { emoji: '🛠️', label: 'vendor', hint: 'Someone you hire and pay — subs, suppliers' },
+};
+
+export function RoleTag({ role }: { role: PersonRole }) {
+  const m = ROLE_META[role];
+  return (
+    <span className={`fl-role role-${role}`} title={m.hint}>
+      {m.emoji} {m.label}
+    </span>
+  );
+}
 
 // ---------- signal intent classification ----------
 
-export type Intent = 'paid' | 'ready' | 'future' | 'lead' | 'urgent' | 'love' | 'sched' | 'ask';
+export type Intent = 'paid' | 'bill' | 'ready' | 'future' | 'lead' | 'urgent' | 'love' | 'sched' | 'ask';
 
 export const INTENT_META: Record<Intent, { emoji: string; label: string }> = {
   paid: { emoji: '💸', label: 'Payment made' },
+  bill: { emoji: '🧾', label: 'Invoice to pay' },
   ready: { emoji: '💰', label: 'Ready to start' },
   future: { emoji: '⏳', label: 'Future work' },
   lead: { emoji: '✨', label: 'New lead' },
@@ -65,9 +84,10 @@ export const INTENT_META: Record<Intent, { emoji: string; label: string }> = {
 export function classifyIntent(sig: Signal): Intent | null {
   const t = sig.text;
   if (/paid|payment (scheduled|sent)|invoice received|sent the deposit/i.test(t)) return 'paid';
+  if (/invoice attached|(my|our) invoice|bill attached|final bill/i.test(t)) return 'bill';
   if (/reach out in|in about (three|3) months|down the road|next (spring|year)/i.test(t)) return 'future';
   if (/ready to (start|go|redo)|we're (all )?set|accepted quote|go ahead with|when can you (start|begin)|finally ready/i.test(t)) return 'ready';
-  if (/quote request|requesting quote|ballpark|do you handle|asking (about|whether)/i.test(t)) return 'lead';
+  if (/quote request|requesting quote|asked? for a quote|wants? a quote|ballpark|do you handle|asking (about|whether)/i.test(t)) return 'lead';
   if (/before friday|asap|urgent|peeling badly|scuff repair/i.test(t)) return 'urgent';
   if (/loved|loves it|looks perfect|turned out great|thanks|thank you|passed along your number/i.test(t)) return 'love';
   if (/gate code|keys|access|crew|hour later|unlocked|parking/i.test(t)) return 'sched';
@@ -79,8 +99,8 @@ export function classifyIntent(sig: Signal): Intent | null {
 export function tempOf(heat: number): { emoji: string; label: string; key: 'hot' | 'warm' | 'cool' | 'cold' } {
   if (heat >= 55) return { emoji: '🔥', label: 'hot lead', key: 'hot' };
   if (heat >= 25) return { emoji: '☀️', label: 'warm', key: 'warm' };
-  if (heat >= 10) return { emoji: '🌥️', label: 'cooling', key: 'cool' };
-  return { emoji: '🧊', label: 'cold', key: 'cold' };
+  if (heat >= 10) return { emoji: '😴', label: 'going quiet', key: 'cool' };
+  return { emoji: '❄️', label: 'cold', key: 'cold' };
 }
 
 /** Money-state badge: most recent 💰/💸 intent in the past week wins. */
@@ -279,7 +299,7 @@ export function AutomationsPanel({ s, act }: VProps) {
 
   return (
     <div className="autos">
-      <h4 className="autos-h">Playbooks</h4>
+      <h4 className="autos-h">Automations</h4>
       {s.sequences.map((seq) => {
         const count = running.filter((i) => i.seqId === seq.id).length;
         return (
@@ -289,7 +309,7 @@ export function AutomationsPanel({ s, act }: VProps) {
               <button
                 className={`auto-toggle${seq.enabled ? ' on' : ''}`}
                 onClick={() => act.toggleSeq(seq.id)}
-                title={seq.enabled ? 'Pause this playbook' : 'Resume this playbook'}
+                title={seq.enabled ? 'Pause this automation' : 'Resume this automation'}
               >
                 <i />
               </button>
@@ -457,7 +477,7 @@ export function ContextPanel({ s, act }: VProps) {
           <div>
             <h3 className="ctx-name">{person.name}</h3>
             <div className="ctx-kind">
-              {person.company ? `${person.company} · ` : ''}
+              <RoleTag role={person.role} /> {person.company ? `${person.company} · ` : ''}
               {person.kind}
             </div>
           </div>

@@ -5,10 +5,14 @@ export interface Nba {
   label: string;
 }
 
+/** What this person IS to the business — not everyone is a lead. */
+export type PersonRole = 'lead' | 'client' | 'vendor';
+
 export interface Person {
   id: string;
   name: string;
   company?: string;
+  role: PersonRole;
   kind: 'residential' | 'commercial';
   note: string;
   tags: string[];
@@ -39,7 +43,22 @@ export interface Reminder {
   bornLive: boolean;
 }
 
-export type ActionKind = 'reply' | 'reminder' | 'nudge';
+export type ActionKind = 'reply' | 'reminder' | 'nudge' | 'task';
+
+/** One agent execution of an action: dispatched → running → ok/fail/review. */
+export interface AgentRun {
+  agent: string;
+  status: 'running' | 'ok' | 'fail' | 'review';
+  startedAt: number;
+  resolveAt: number;
+  /** decided at dispatch, applied when resolveAt passes */
+  outcome: 'ok' | 'fail' | 'review';
+  /** outcome detail once resolved ('' while running) */
+  note: string;
+  /** follow-up the agent recommends after success */
+  rec: string | null;
+  recTaken: boolean;
+}
 
 export interface ActionCard {
   id: string;
@@ -115,7 +134,9 @@ export interface State {
   signals: Signal[]; // ascending by `at`
   reminders: Reminder[];
   actions: ActionCard[]; // open action cards, newest first
+  runs: Record<string, AgentRun>; // action id -> its agent run
   completed: Record<string, number>; // action id -> completedAt (prevents resurrection)
+  handled: { a: ActionCard; at: number }[]; // completed actions stay visible, newest first
   log: LogEntry[];
   script: ScriptedEvent[];
   nextRandomAt: number;
