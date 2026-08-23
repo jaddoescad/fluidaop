@@ -1,17 +1,38 @@
-# Fluid — signal triage concept
+# Fluid — signal triage
 
-A front-end concept UI: every inbound client signal (SMS · Quo, Email · Gmail, Call,
-Form · Website) becomes a card. Cards are enriched into actions and reminders and
-triaged in one place. Mock data only — no backend, no network calls; everything is
-generated client-side after mount.
+Every inbound client signal (SMS · Quo, Email · Gmail, Call, Form · Website) becomes
+a card. Cards are enriched into actions and reminders and triaged in one place. The
+board still uses seeded concept data, while `/connections` now has a real server-side
+Gmail OAuth connection.
 
 ## Run
 
 ```sh
 npm install
-npm run dev        # open the printed localhost URL
+npm run dev        # starts Vite and the connections API
 npm run typecheck  # tsc --noEmit
+npm run build      # checks the client + server and builds the UI
 ```
+
+## Connect Gmail
+
+1. In Google Cloud, enable the Gmail API and create an OAuth 2.0 **Web application**
+   client.
+2. Add `http://localhost:5173/api/oauth/google/callback` as an authorized redirect URI
+   for local development. Use the same `/api/oauth/google/callback` path on the deployed
+   origin later.
+3. Configure the OAuth audience. If `paintersottawa.com` is a Google Workspace
+   organization you control, an Internal app is the simplest durable option. An External
+   app left in Testing issues Gmail refresh tokens that expire after seven days, so move
+   it to Production before relying on unattended checks.
+4. Copy `.env.example` to `.env`, add the Google client ID and secret, and generate a
+   stable token encryption key with `openssl rand -hex 32`.
+5. Run `npm run dev`, open `/connections`, and choose **Connect Gmail**. Google must be
+   authorized as `info@paintersottawa.com`; the server rejects a different mailbox.
+
+The server encrypts the refresh token at rest and checks the live Gmail profile every
+five minutes. A manual **Check now** uses the same refresh-and-profile path. Disconnecting
+revokes the Google grant and removes the local credential.
 
 ## The five panes
 
