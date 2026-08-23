@@ -33,10 +33,24 @@ interface ConnectionsPayload {
   configurationError?: string;
 }
 
+interface ConnectionLoadFailure {
+  status: number | null;
+  message: string;
+}
+
 /** The inbox this workspace is meant to connect. */
 const INTENDED_EMAIL = 'info@paintersottawa.com';
 
 // ---------- API ----------
+
+class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -58,7 +72,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // non-JSON error body — keep the status text
     }
-    throw new Error(detail);
+    throw new ApiError(detail, res.status);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -67,6 +81,22 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+function connectionLoadFailure(e: unknown): ConnectionLoadFailure {
+  if (e instanceof ApiError) {
+    return {
+      status: e.status,
+      message:
+        e.message === `the server answered ${e.status}`
+          ? `Fluid's Gmail integration API returned HTTP ${e.status}.`
+          : e.message,
+    };
+  }
+  return {
+    status: null,
+    message: "Fluid's Gmail integration API could not be reached.",
+  };
 }
 
 // ---------- plain-language time ----------
@@ -124,7 +154,11 @@ function GmailMark({ dim = false }: { dim?: boolean }) {
   );
 }
 
-function StatusPill({ status }: { status: GmailConnection['status'] | 'off' }) {
+function StatusPill({
+  status,
+}: {
+  status: GmailConnection['status'] | 'off' | 'unavailable';
+}) {
   const meta =
     status === 'connected'
       ? { cls: 'ok', dot: '', label: 'Connected' }
@@ -132,6 +166,8 @@ function StatusPill({ status }: { status: GmailConnection['status'] | 'off' }) {
         ? { cls: 'accent', dot: ' cn-dot-breathe', label: 'Checking…' }
         : status === 'error'
           ? { cls: 'danger', dot: '', label: 'Needs attention' }
+          : status === 'unavailable'
+            ? { cls: 'warn', dot: '', label: 'Status unavailable' }
           : { cls: 'off', dot: '', label: 'Not connected' };
   return (
     <span className={`cn-pill cn-pill-${meta.cls}`}>
@@ -163,7 +199,7 @@ export function ConnectionsPage({
 }) {
   const [payload, setPayload] = useState<ConnectionsPayload | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<ConnectionLoadFailure | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -182,7 +218,7 @@ export function ConnectionsPage({
       setLoadError(null);
       setNow(Date.now());
     } catch (e) {
-      if (!silent) setLoadError(errText(e));
+      if (!silent) setLoadError(connectionLoadFailure(e));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -299,8 +335,8 @@ export function ConnectionsPage({
               <header className="cn-head">
                 <h1>Connections</h1>
                 <p>
-                  Accounts Fluid is authorized to read. Right now that means the shared company
-                  inbox.
+                  Connect external services to Fluid. The first integration is Gmail for the
+                  shared inbox <b>{INTENDED_EMAIL}</b>.
                 </p>
               </header>
 
@@ -343,18 +379,38 @@ export function ConnectionsPage({
               {loading ? (
                 <div className="cn-loading" role="status">
                   <i className="cn-dot cn-dot-breathe" />
-                  Checking connection status…
+                  Checking Gmail connection status…
                 </div>
               ) : loadError !== null ? (
-                <div className="cn-panel" role="alert">
-                  <p className="cn-panel-text">
-                    Couldn’t load connection status — {loadError}. Nothing shown here would be
-                    trustworthy, so the page is holding back instead of guessing.
+                <section
+                  className="cn-card"
+                  aria-label={`Gmail — ${INTENDED_EMAIL} — status unavailable`}
+                >
+                  <div className="cn-card-head">
+                    <GmailMark dim />
+                    <div className="cn-who">
+                      <b>{INTENDED_EMAIL}</b>
+                      <span>Gmail · Google Workspace inbox</span>
+                    </div>
+                    <StatusPill status="unavailable" />
+                  </div>
+                  <div className="cn-problem" role="alert">
+                    <b>Fluid’s Gmail integration server is unavailable.</b>{' '}
+                    Gmail itself was not reached, so this page is not claiming the inbox is
+                    connected or disconnected.
+                  </div>
+                  <p className="cn-hint">
+                    {loadError.message}
+                    {loadError.status !== null && !loadError.message.includes('HTTP')
+                      ? ` (HTTP ${loadError.status})`
+                      : ''}
                   </p>
-                  <button type="button" className="cn-btn" onClick={() => void load(false)}>
-                    Try again
-                  </button>
-                </div>
+                  <div className="cn-btns">
+                    <button type="button" className="cn-btn" onClick={() => void load(false)}>
+                      Check Gmail status again
+                    </button>
+                  </div>
+                </section>
               ) : payload !== null ? (
                 <>
                   {!payload.configured && (

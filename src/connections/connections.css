@@ -47,6 +47,11 @@
   max-width: 54ch;
 }
 
+.cn-head p b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 /* ---------- callback / error banners ---------- */
 
 .cn-banner {
@@ -234,6 +239,7 @@
 
 .cn-pill-ok { color: var(--ok); background: var(--ok-soft); }
 .cn-pill-danger { color: var(--danger); background: var(--danger-soft); }
+.cn-pill-warn { color: var(--gold); background: var(--warn-soft); }
 .cn-pill-accent { color: var(--accent); background: var(--accent-soft); }
 .cn-pill-off {
   color: var(--faint);
@@ -262,6 +268,8 @@
   padding: 8px 11px;
   margin-top: 12px;
 }
+
+.cn-problem b { font-weight: 650; }
 
 /* ---------- health facts ---------- */
 
