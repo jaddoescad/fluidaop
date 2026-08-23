@@ -1,4 +1,5 @@
 import { Fragment, ReactNode, useEffect, useState } from 'react';
+import { ActivitiesPage } from '../activities/ActivitiesPage';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { agentFor } from '../engine';
 import { fmtAge, fmtDue } from '../time';
@@ -29,28 +30,40 @@ import './fleet.css';
  * the person dossier stays one click deeper. Roster lives in the side nav.
  */
 
+type AppPage = 'Board' | 'Activity' | 'Connections';
+
+function pageFromPath(): AppPage {
+  if (window.location.pathname === '/connections') return 'Connections';
+  if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
+  return 'Board';
+}
+
 export function FleetV({ s, act }: VProps) {
   const d = derive(s);
   const [runSel, setRunSel] = useState<RunSubject | null>(null);
-  const [page, setPage] = useState<'Board' | 'Connections'>(() =>
-    window.location.pathname === '/connections' ? 'Connections' : 'Board',
-  );
+  const [page, setPage] = useState<AppPage>(pageFromPath);
 
   useEffect(() => {
     const syncPage = () => {
-      setPage(window.location.pathname === '/connections' ? 'Connections' : 'Board');
+      setPage(pageFromPath());
     };
     window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
   }, []);
 
   const navigate = (label: string) => {
-    if (label !== 'Board' && label !== 'Connections') return;
-    const path = label === 'Connections' ? '/connections' : '/';
+    if (label !== 'Board' && label !== 'Activity' && label !== 'Connections') return;
+    const path =
+      label === 'Connections'
+        ? '/connections'
+        : label === 'Activity'
+          ? '/activity'
+          : '/';
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
     setPage(label);
   };
 
+  if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} />;
   if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} />;
 
   const fname = d.focusPerson?.name ?? null;

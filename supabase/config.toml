@@ -81,6 +81,9 @@ enabled = true
 # The maximum length in bytes of HTTP request headers. (default: 4096)
 # max_header_length = 4096
 
+[functions.fluid-gmail-activities]
+verify_jwt = false
+
 [studio]
 enabled = true
 # Port to use for Supabase Studio.

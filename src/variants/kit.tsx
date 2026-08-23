@@ -1066,7 +1066,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Connections'];
+  const LIVE = ['Board', 'Activity', 'Connections'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);

@@ -5,6 +5,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { NextFunction, Request, Response } from 'express';
+import { fetchGmailActivityBackfill, GmailActivityRow } from './gmailActivities.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -42,6 +43,7 @@ interface GoogleTokenResponse {
 
 interface GmailProfile {
   emailAddress?: string;
+  historyId?: string;
 }
 
 interface PendingAuthorization {
@@ -59,11 +61,27 @@ const healthCheckIntervalMs = readPositiveInt(
 const intendedEmail = (process.env.GMAIL_ALLOWED_EMAIL ?? 'info@paintersottawa.com')
   .trim()
   .toLowerCase();
+const gmailSyncLookbackDays = readPositiveInt(process.env.GMAIL_SYNC_LOOKBACK_DAYS, 30);
+const gmailSyncMaximumMessages = readPositiveInt(process.env.GMAIL_SYNC_MAX_MESSAGES, 500);
+const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
+const hermesBaseUrl = (
+  process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
+).trim().replace(/\/$/, '');
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
 const pendingAuthorizations = new Map<string, PendingAuthorization>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
+const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
+
+interface ActivitySyncResult {
+  accountEmail: string;
+  imported: number;
+  messagesSeen: number;
+  lookbackDays: number;
+  truncated: boolean;
+  completedAt: string;
+}
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -91,12 +109,25 @@ function requireConfigured(): void {
   }
 }
 
+function requireActivityConfigured(): void {
+  requireConfigured();
+  if (!supabaseProjectUrl) {
+    throw new HttpError(503, 'Missing server configuration: SUPABASE_PROJECT_URL');
+  }
+}
+
 function encryptionKey(): Buffer {
   const secret = process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim();
   if (!secret || secret.length < 32) {
     throw new Error('CONNECTION_TOKEN_ENCRYPTION_KEY is not configured');
   }
   return createHash('sha256').update(secret, 'utf8').digest();
+}
+
+function activityFunctionSecret(): string {
+  const root = process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim();
+  if (!root || root.length < 32) throw new Error('CONNECTION_TOKEN_ENCRYPTION_KEY is not configured');
+  return createHash('sha256').update('fluid-activity-sync:v1\0').update(root, 'utf8').digest('hex');
 }
 
 function encryptToken(token: string): string {
@@ -203,6 +234,40 @@ async function fetchGoogleJson<T>(url: string, init: RequestInit): Promise<T> {
   if (!response.ok) {
     const detail = googleResponseError(payload);
     throw new Error(detail ? `Google API ${response.status}: ${detail}` : `Google API ${response.status}`);
+  }
+  return payload as T;
+}
+
+async function activityFunctionJson<T>(
+  action: 'list' | 'detail' | 'upsert',
+  search: Record<string, string>,
+  init?: RequestInit,
+): Promise<T> {
+  requireActivityConfigured();
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-gmail-activities`);
+  url.searchParams.set('action', action);
+  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      payload = raw;
+    }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Supabase activity service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
   }
   return payload as T;
 }
@@ -327,6 +392,120 @@ function checkConnection(connectionId: string): Promise<PublicConnection> {
   });
   activeHealthChecks.set(connectionId, check);
   return check;
+}
+
+async function performActivitySync(connection: StoredConnection): Promise<ActivitySyncResult> {
+  requireActivityConfigured();
+  const startedAt = new Date().toISOString();
+  try {
+    const refreshToken = decryptToken(connection.encryptedRefreshToken);
+    const accessToken = await refreshAccessToken(refreshToken);
+    const profile = await getGmailProfile(accessToken);
+    const accountEmail = profile.emailAddress?.trim().toLowerCase();
+    if (!accountEmail || accountEmail !== connection.email.toLowerCase()) {
+      throw new Error(`Google returned a different mailbox (${accountEmail ?? 'unknown'})`);
+    }
+
+    const backfill = await fetchGmailActivityBackfill(
+      accessToken,
+      accountEmail,
+      gmailSyncLookbackDays,
+      gmailSyncMaximumMessages,
+    );
+    const completedAt = new Date().toISOString();
+    const syncStateBase = {
+      connection_id: connection.id,
+      account_email: accountEmail,
+      last_history_id: profile.historyId ?? null,
+      last_sync_started_at: startedAt,
+      messages_seen: backfill.messagesSeen,
+      last_error: null,
+    };
+    let upserted = 0;
+    for (let index = 0; index < backfill.activities.length; index += 200) {
+      const activities = backfill.activities.slice(index, index + 200);
+      upserted += activities.length;
+      await activityFunctionJson<{ upserted: number }>('upsert', {}, {
+        method: 'POST',
+        body: JSON.stringify({
+          activities,
+          syncState: {
+            ...syncStateBase,
+            last_sync_status: 'running',
+            last_sync_completed_at: null,
+            last_full_sync_at: null,
+            messages_upserted: upserted,
+            updated_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    await activityFunctionJson<{ upserted: number }>('upsert', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        activities: [],
+        syncState: {
+          ...syncStateBase,
+          connection_id: connection.id,
+          account_email: accountEmail,
+          last_sync_status: 'succeeded',
+          last_sync_completed_at: completedAt,
+          last_full_sync_at: completedAt,
+          messages_upserted: backfill.activities.length,
+          updated_at: completedAt,
+        },
+      } satisfies { activities: GmailActivityRow[]; syncState: Record<string, unknown> }),
+    });
+
+    connection.status = 'connected';
+    connection.lastCheckedAt = completedAt;
+    connection.lastHealthyAt = completedAt;
+    connection.updatedAt = completedAt;
+    connection.error = null;
+    await saveStore();
+
+    return {
+      accountEmail,
+      imported: backfill.activities.length,
+      messagesSeen: backfill.messagesSeen,
+      lookbackDays: gmailSyncLookbackDays,
+      truncated: backfill.truncated,
+      completedAt,
+    };
+  } catch (error) {
+    const completedAt = new Date().toISOString();
+    const message = publicGoogleError(error);
+    await activityFunctionJson<{ upserted: number }>('upsert', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        activities: [],
+        syncState: {
+          connection_id: connection.id,
+          account_email: connection.email.toLowerCase(),
+          last_history_id: null,
+          last_sync_status: 'failed',
+          last_sync_started_at: startedAt,
+          last_sync_completed_at: completedAt,
+          last_full_sync_at: null,
+          messages_seen: 0,
+          messages_upserted: 0,
+          last_error: message,
+          updated_at: completedAt,
+        },
+      }),
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function syncActivities(connection: StoredConnection): Promise<ActivitySyncResult> {
+  const running = activeActivitySyncs.get(connection.id);
+  if (running) return running;
+  const sync = performActivitySync(connection).finally(() => {
+    activeActivitySyncs.delete(connection.id);
+  });
+  activeActivitySyncs.set(connection.id, sync);
+  return sync;
 }
 
 async function checkAllConnections(): Promise<void> {
@@ -477,6 +656,82 @@ app.delete('/api/connections/:id', async (req, res, next) => {
     res.status(204).end();
   } catch (error) {
     next(error);
+  }
+});
+
+app.get('/api/activities', async (req, res, next) => {
+  try {
+    const allowedFilters = new Set(['all', 'needs_reply', 'received', 'sent', 'attachments']);
+    const requestedFilter = typeof req.query.filter === 'string' ? req.query.filter : 'all';
+    const filter = allowedFilters.has(requestedFilter) ? requestedFilter : 'all';
+    const limit = Math.max(1, Math.min(200, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      80,
+    )));
+    const payload = await activityFunctionJson<unknown>('list', {
+      accountEmail: intendedEmail,
+      filter,
+      limit: String(limit),
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/activities/:id', async (req, res, next) => {
+  try {
+    if (!/^\d+$/.test(req.params.id)) throw new HttpError(400, 'Invalid activity id');
+    const payload = await activityFunctionJson<unknown>('detail', {
+      accountEmail: intendedEmail,
+      id: req.params.id,
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/activities/sync', async (_req, res, next) => {
+  try {
+    const connection = store.connections.find(
+      (item) => item.provider === 'gmail' && item.email.toLowerCase() === intendedEmail,
+    );
+    if (!connection) throw new HttpError(409, `Connect ${intendedEmail} before syncing Gmail activity.`);
+    const result = await syncActivities(connection);
+    res.json({ sync: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/hermes/status', async (_req, res, next) => {
+  try {
+    const response = await fetch(`${hermesBaseUrl}/api/status`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) {
+      throw new HttpError(502, `Hermes status check returned HTTP ${response.status}`);
+    }
+    const payload: unknown = await response.json();
+    if (payload === null || typeof payload !== 'object') {
+      throw new HttpError(502, 'Hermes returned an invalid status response');
+    }
+    const status = payload as Record<string, unknown>;
+    const profiles = Array.isArray(status.profiles)
+      ? status.profiles.filter((profile): profile is string => typeof profile === 'string')
+      : [];
+    res.json({
+      connected: status.overall === 'ok' && status.gateway_running === true,
+      version: typeof status.version === 'string' ? status.version : null,
+      gatewayState: typeof status.gateway_state === 'string' ? status.gateway_state : 'unknown',
+      activeAgents: typeof status.active_agents === 'number' ? status.active_agents : 0,
+      profiles,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not reach Hermes: ${errorMessage(error)}`));
   }
 });
 

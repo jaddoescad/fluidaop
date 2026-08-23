@@ -34,6 +34,18 @@ The server encrypts the refresh token at rest and checks the live Gmail profile 
 five minutes. A manual **Check now** uses the same refresh-and-profile path. Disconnecting
 revokes the Google grant and removes the local credential.
 
+## Sync Gmail activity
+
+`/activity` is backed by the real `activities` and `gmail_sync_state` tables in Supabase.
+Choose **Sync Gmail** to import the connected account's last 30 days of mail. The import is
+idempotent by Gmail message ID, stores plain text rather than remote email HTML, matches
+counterparties to existing contacts by normalized email, and writes to Supabase through a
+server-authenticated Edge Function. The browser never receives a Supabase secret key.
+
+The Activity page shows received, sent, attachment, unread, and needs-reply views. The
+needs-reply view excludes Gmail categories and headers that identify bulk or automated
+mail; it does not send, label, archive, or otherwise modify Gmail.
+
 ## The five panes
 
 1. **People** — sorted by relationship heat (rises with inbound activity, decays over
