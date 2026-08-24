@@ -1,11 +1,16 @@
 import 'dotenv/config';
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { NextFunction, Request, Response } from 'express';
-import { fetchGmailActivityBackfill, GmailActivityRow } from './gmailActivities.js';
+import {
+  fetchGmailActivityBackfill,
+  fetchGmailActivityChanges,
+  GmailActivityRow,
+  GmailApiError,
+} from './gmailActivities.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -63,14 +68,25 @@ const intendedEmail = (process.env.GMAIL_ALLOWED_EMAIL ?? 'info@paintersottawa.c
   .toLowerCase();
 const gmailSyncLookbackDays = readPositiveInt(process.env.GMAIL_SYNC_LOOKBACK_DAYS, 30);
 const gmailSyncMaximumMessages = readPositiveInt(process.env.GMAIL_SYNC_MAX_MESSAGES, 500);
+const gmailActivitySyncIntervalMs = readPositiveInt(
+  process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
+  5 * 60_000,
+);
 const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
 const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
 ).trim().replace(/\/$/, '');
+const hermesAgentIds = new Set([
+  'email-categorizer',
+  'contractor-invoices',
+  'dripjobs-operations',
+  'meta-ads-reporter',
+]);
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
 const pendingAuthorizations = new Map<string, PendingAuthorization>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
 const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
+const lastActivitySyncAttemptAt = new Map<string, number>();
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -80,7 +96,22 @@ interface ActivitySyncResult {
   messagesSeen: number;
   lookbackDays: number;
   truncated: boolean;
+  mode: 'full' | 'incremental';
   completedAt: string;
+}
+
+interface StoredActivitySyncState {
+  connection_id: string;
+  account_email: string;
+  last_history_id: string | null;
+  last_sync_status: 'idle' | 'running' | 'succeeded' | 'failed';
+  last_sync_started_at: string | null;
+  last_sync_completed_at: string | null;
+  last_full_sync_at: string | null;
+  messages_seen: number;
+  messages_upserted: number;
+  last_error: string | null;
+  updated_at: string;
 }
 
 app.disable('x-powered-by');
@@ -128,6 +159,21 @@ function activityFunctionSecret(): string {
   const root = process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim();
   if (!root || root.length < 32) throw new Error('CONNECTION_TOKEN_ENCRYPTION_KEY is not configured');
   return createHash('sha256').update('fluid-activity-sync:v1\0').update(root, 'utf8').digest('hex');
+}
+
+function hermesHistoryToken(): string {
+  const explicit = process.env.HERMES_HISTORY_TOKEN?.trim();
+  if (explicit) return explicit;
+  const root = process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim();
+  if (!root || root.length < 32) {
+    throw new HttpError(
+      503,
+      'Hermes history needs HERMES_HISTORY_TOKEN or CONNECTION_TOKEN_ENCRYPTION_KEY on the server.',
+    );
+  }
+  return createHmac('sha256', root)
+    .update('fluid-hermes-history-v1', 'utf8')
+    .digest('base64url');
 }
 
 function encryptToken(token: string): string {
@@ -239,7 +285,7 @@ async function fetchGoogleJson<T>(url: string, init: RequestInit): Promise<T> {
 }
 
 async function activityFunctionJson<T>(
-  action: 'list' | 'detail' | 'upsert',
+  action: 'list' | 'signal' | 'history' | 'state' | 'labels' | 'label' | 'agent-history' | 'upsert',
   search: Record<string, string>,
   init?: RequestInit,
 ): Promise<T> {
@@ -397,6 +443,8 @@ function checkConnection(connectionId: string): Promise<PublicConnection> {
 async function performActivitySync(connection: StoredConnection): Promise<ActivitySyncResult> {
   requireActivityConfigured();
   const startedAt = new Date().toISOString();
+  let previousState: StoredActivitySyncState | null = null;
+  let stateLoaded = false;
   try {
     const refreshToken = decryptToken(connection.encryptedRefreshToken);
     const accessToken = await refreshAccessToken(refreshToken);
@@ -406,24 +454,58 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
       throw new Error(`Google returned a different mailbox (${accountEmail ?? 'unknown'})`);
     }
 
-    const backfill = await fetchGmailActivityBackfill(
-      accessToken,
-      accountEmail,
-      gmailSyncLookbackDays,
-      gmailSyncMaximumMessages,
+    const statePayload = await activityFunctionJson<{ sync: StoredActivitySyncState | null }>(
+      'state',
+      { accountEmail },
     );
+    previousState = statePayload.sync;
+    stateLoaded = true;
+
+    let mode: ActivitySyncResult['mode'] = 'incremental';
+    let nextHistoryId = profile.historyId ?? previousState?.last_history_id ?? null;
+    let imported;
+    try {
+      imported = previousState?.last_history_id
+        ? await fetchGmailActivityChanges(
+          accessToken,
+          accountEmail,
+          previousState.last_history_id,
+          gmailSyncMaximumMessages,
+        )
+        : null;
+    } catch (error) {
+      // Gmail history cursors normally last at least a week. If Google has
+      // expired one, rebuild the recent cache and establish a fresh cursor.
+      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+      imported = null;
+    }
+
+    if (imported === null) {
+      mode = 'full';
+      imported = await fetchGmailActivityBackfill(
+        accessToken,
+        accountEmail,
+        gmailSyncLookbackDays,
+        gmailSyncMaximumMessages,
+      );
+      nextHistoryId = profile.historyId ?? nextHistoryId;
+    } else {
+      nextHistoryId = imported.historyId;
+    }
+
     const completedAt = new Date().toISOString();
     const syncStateBase = {
       connection_id: connection.id,
       account_email: accountEmail,
-      last_history_id: profile.historyId ?? null,
+      // Do not advance the cursor until every activity batch is durable.
+      last_history_id: previousState?.last_history_id ?? null,
       last_sync_started_at: startedAt,
-      messages_seen: backfill.messagesSeen,
+      messages_seen: imported.messagesSeen,
       last_error: null,
     };
     let upserted = 0;
-    for (let index = 0; index < backfill.activities.length; index += 200) {
-      const activities = backfill.activities.slice(index, index + 200);
+    for (let index = 0; index < imported.activities.length; index += 200) {
+      const activities = imported.activities.slice(index, index + 200);
       upserted += activities.length;
       await activityFunctionJson<{ upserted: number }>('upsert', {}, {
         method: 'POST',
@@ -433,7 +515,7 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
             ...syncStateBase,
             last_sync_status: 'running',
             last_sync_completed_at: null,
-            last_full_sync_at: null,
+            last_full_sync_at: previousState?.last_full_sync_at ?? null,
             messages_upserted: upserted,
             updated_at: new Date().toISOString(),
           },
@@ -446,12 +528,13 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
         activities: [],
         syncState: {
           ...syncStateBase,
+          last_history_id: nextHistoryId,
           connection_id: connection.id,
           account_email: accountEmail,
           last_sync_status: 'succeeded',
           last_sync_completed_at: completedAt,
-          last_full_sync_at: completedAt,
-          messages_upserted: backfill.activities.length,
+          last_full_sync_at: mode === 'full' ? completedAt : previousState?.last_full_sync_at ?? null,
+          messages_upserted: imported.activities.length,
           updated_at: completedAt,
         },
       } satisfies { activities: GmailActivityRow[]; syncState: Record<string, unknown> }),
@@ -466,34 +549,39 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
 
     return {
       accountEmail,
-      imported: backfill.activities.length,
-      messagesSeen: backfill.messagesSeen,
+      imported: imported.activities.length,
+      messagesSeen: imported.messagesSeen,
       lookbackDays: gmailSyncLookbackDays,
-      truncated: backfill.truncated,
+      truncated: imported.truncated,
+      mode,
       completedAt,
     };
   } catch (error) {
     const completedAt = new Date().toISOString();
     const message = publicGoogleError(error);
-    await activityFunctionJson<{ upserted: number }>('upsert', {}, {
-      method: 'POST',
-      body: JSON.stringify({
-        activities: [],
-        syncState: {
-          connection_id: connection.id,
-          account_email: connection.email.toLowerCase(),
-          last_history_id: null,
-          last_sync_status: 'failed',
-          last_sync_started_at: startedAt,
-          last_sync_completed_at: completedAt,
-          last_full_sync_at: null,
-          messages_seen: 0,
-          messages_upserted: 0,
-          last_error: message,
-          updated_at: completedAt,
-        },
-      }),
-    }).catch(() => undefined);
+    // If the state read itself failed, do not overwrite a cursor we never saw.
+    // A later retry can safely resume from the durable value already in Supabase.
+    if (stateLoaded) {
+      await activityFunctionJson<{ upserted: number }>('upsert', {}, {
+        method: 'POST',
+        body: JSON.stringify({
+          activities: [],
+          syncState: {
+            connection_id: connection.id,
+            account_email: connection.email.toLowerCase(),
+            last_history_id: previousState?.last_history_id ?? null,
+            last_sync_status: 'failed',
+            last_sync_started_at: startedAt,
+            last_sync_completed_at: completedAt,
+            last_full_sync_at: previousState?.last_full_sync_at ?? null,
+            messages_seen: 0,
+            messages_upserted: 0,
+            last_error: message,
+            updated_at: completedAt,
+          },
+        }),
+      }).catch(() => undefined);
+    }
     throw error;
   }
 }
@@ -501,11 +589,33 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
 function syncActivities(connection: StoredConnection): Promise<ActivitySyncResult> {
   const running = activeActivitySyncs.get(connection.id);
   if (running) return running;
+  lastActivitySyncAttemptAt.set(connection.id, Date.now());
   const sync = performActivitySync(connection).finally(() => {
     activeActivitySyncs.delete(connection.id);
   });
   activeActivitySyncs.set(connection.id, sync);
   return sync;
+}
+
+async function syncDueActivities(): Promise<void> {
+  if (configurationProblems().length > 0 || !supabaseProjectUrl) return;
+  const now = Date.now();
+  const due = store.connections.filter((connection) => {
+    const lastAttempt = lastActivitySyncAttemptAt.get(connection.id) ?? 0;
+    return now - lastAttempt >= gmailActivitySyncIntervalMs;
+  });
+  const results = await Promise.allSettled(due.map((connection) => syncActivities(connection)));
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      if (result.value.imported > 0) {
+        console.log(
+          `Gmail activity auto-sync imported ${result.value.imported} update(s) for ${result.value.accountEmail}.`,
+        );
+      }
+    } else {
+      console.warn(`Gmail activity auto-sync failed: ${publicGoogleError(result.reason)}`);
+    }
+  }
 }
 
 async function checkAllConnections(): Promise<void> {
@@ -661,17 +771,40 @@ app.delete('/api/connections/:id', async (req, res, next) => {
 
 app.get('/api/activities', async (req, res, next) => {
   try {
-    const allowedFilters = new Set(['all', 'needs_reply', 'received', 'sent', 'attachments']);
-    const requestedFilter = typeof req.query.filter === 'string' ? req.query.filter : 'all';
-    const filter = allowedFilters.has(requestedFilter) ? requestedFilter : 'all';
-    const limit = Math.max(1, Math.min(200, readPositiveInt(
+    const limit = Math.max(1, Math.min(50, readPositiveInt(
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
-      80,
+      30,
     )));
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) {
+      throw new HttpError(400, 'Activity cursor is incomplete');
+    }
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
+      throw new HttpError(400, 'Activity cursor is invalid');
+    }
     const payload = await activityFunctionJson<unknown>('list', {
       accountEmail: intendedEmail,
-      filter,
       limit: String(limit),
+      ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
+    });
+    res.json({
+      ...(payload && typeof payload === 'object' ? payload : {}),
+      automaticSyncIntervalMs: gmailActivitySyncIntervalMs,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/activities/signals/:signalId', async (req, res, next) => {
+  try {
+    if (!/^\d+$/.test(req.params.signalId)) {
+      throw new HttpError(400, 'Invalid signal id');
+    }
+    const payload = await activityFunctionJson<unknown>('signal', {
+      accountEmail: intendedEmail,
+      signalId: req.params.signalId,
     });
     res.json(payload);
   } catch (error) {
@@ -679,12 +812,28 @@ app.get('/api/activities', async (req, res, next) => {
   }
 });
 
-app.get('/api/activities/:id', async (req, res, next) => {
+app.get('/api/activities/signals/:signalId/history', async (req, res, next) => {
   try {
-    if (!/^\d+$/.test(req.params.id)) throw new HttpError(400, 'Invalid activity id');
-    const payload = await activityFunctionJson<unknown>('detail', {
+    if (!/^\d+$/.test(req.params.signalId)) {
+      throw new HttpError(400, 'Invalid signal id');
+    }
+    const limit = Math.max(1, Math.min(20, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      5,
+    )));
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) {
+      throw new HttpError(400, 'History cursor is incomplete');
+    }
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
+      throw new HttpError(400, 'History cursor is invalid');
+    }
+    const payload = await activityFunctionJson<unknown>('history', {
       accountEmail: intendedEmail,
-      id: req.params.id,
+      signalId: req.params.signalId,
+      limit: String(limit),
+      ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
     });
     res.json(payload);
   } catch (error) {
@@ -700,6 +849,40 @@ app.post('/api/activities/sync', async (_req, res, next) => {
     if (!connection) throw new HttpError(409, `Connect ${intendedEmail} before syncing Gmail activity.`);
     const result = await syncActivities(connection);
     res.json({ sync: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/labels', async (_req, res, next) => {
+  try {
+    const payload = await activityFunctionJson<unknown>('labels', { accountEmail: intendedEmail });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/labels', async (req, res, next) => {
+  try {
+    const payload = await activityFunctionJson<unknown>('label', { accountEmail: intendedEmail }, {
+      method: 'POST',
+      body: JSON.stringify(req.body),
+    });
+    res.status(201).json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/labels/:labelId', async (req, res, next) => {
+  try {
+    if (!/^\d+$/.test(req.params.labelId)) throw new HttpError(400, 'Invalid label id');
+    const payload = await activityFunctionJson<unknown>('label', { accountEmail: intendedEmail }, {
+      method: 'POST',
+      body: JSON.stringify({ ...req.body, id: req.params.labelId }),
+    });
+    res.json(payload);
   } catch (error) {
     next(error);
   }
@@ -732,6 +915,51 @@ app.get('/api/hermes/status', async (_req, res, next) => {
     });
   } catch (error) {
     next(error instanceof HttpError ? error : new HttpError(502, `Could not reach Hermes: ${errorMessage(error)}`));
+  }
+});
+
+app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
+  try {
+    const agentId = req.params.agentId;
+    if (!hermesAgentIds.has(agentId)) throw new HttpError(404, 'Hermes agent not found');
+    const limit = Math.max(1, Math.min(50, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      20,
+    )));
+    if (agentId === 'email-categorizer') {
+      const payload = await activityFunctionJson<unknown>('agent-history', {
+        accountEmail: intendedEmail,
+        limit: String(limit),
+      });
+      res.json(payload);
+      return;
+    }
+    const url = new URL(`${hermesBaseUrl}/api/plugins/fluid-history/runs`);
+    url.searchParams.set('agent', agentId);
+    url.searchParams.set('limit', String(limit));
+    const response = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${hermesHistoryToken()}`,
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    const payload: unknown = await response.json().catch(() => null);
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new HttpError(502, 'Hermes rejected Fluid history authentication.');
+      }
+      if (response.status === 404) {
+        throw new HttpError(502, 'The Fluid history bridge is not available in Hermes.');
+      }
+      throw new HttpError(502, `Hermes history returned HTTP ${response.status}`);
+    }
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new HttpError(502, 'Hermes returned an invalid history response');
+    }
+    res.json(payload);
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes history: ${errorMessage(error)}`));
   }
 });
 
@@ -775,6 +1003,11 @@ const startupCheck = setTimeout(() => {
 }, 5_000);
 startupCheck.unref();
 
+const startupActivitySync = setTimeout(() => {
+  void syncDueActivities();
+}, 10_000);
+startupActivitySync.unref();
+
 const healthTimer = setInterval(
   () => {
     void checkDueConnections();
@@ -782,6 +1015,14 @@ const healthTimer = setInterval(
   Math.min(healthCheckIntervalMs, 30_000),
 );
 healthTimer.unref();
+
+const activitySyncTimer = setInterval(
+  () => {
+    void syncDueActivities();
+  },
+  Math.min(gmailActivitySyncIntervalMs, 30_000),
+);
+activitySyncTimer.unref();
 
 const pendingCleanupTimer = setInterval(() => {
   const now = Date.now();

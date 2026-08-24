@@ -37,14 +37,22 @@ revokes the Google grant and removes the local credential.
 ## Sync Gmail activity
 
 `/activity` is backed by the real `activities` and `gmail_sync_state` tables in Supabase.
-Choose **Sync Gmail** to import the connected account's last 30 days of mail. The import is
-idempotent by Gmail message ID, stores plain text rather than remote email HTML, matches
-counterparties to existing contacts by normalized email, and writes to Supabase through a
-server-authenticated Edge Function. The browser never receives a Supabase secret key.
+The first sync imports the connected account's last 30 days of mail. After that, the server
+automatically checks Gmail's incremental history every five minutes and imports only new
+messages. If Google expires the saved history cursor, Fluid safely rebuilds the recent cache.
+The import is idempotent by Gmail message ID, stores plain text rather than remote email HTML,
+matches counterparties to existing contacts by normalized email, and writes to Supabase through
+a server-authenticated Edge Function. The browser never receives a Supabase secret key.
 
-The Activity page shows received, sent, attachment, unread, and needs-reply views. The
-needs-reply view excludes Gmail categories and headers that identify bulk or automated
-mail; it does not send, label, archive, or otherwise modify Gmail.
+The Activity page refreshes itself while it is open. **Check now** remains available as a
+fallback, but normal operation does not require manually checking the page.
+
+Each Gmail message is its own signal in Activity. The feed uses cursor pagination and loads 30
+signals at a time. Opening a signal loads only that email; its Gmail thread is shown separately as
+optional context, collapsed by default and paginated five emails at a time. Labels and links belong
+to the selected signal, never automatically to its Gmail history. Read/unread and “needs reply”
+inbox states are intentionally not part of the interface. Fluid does not send, label, archive, or
+otherwise modify Gmail.
 
 ## The five panes
 

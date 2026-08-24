@@ -185,8 +185,8 @@
   background: var(--line-2);
 }
 
-.fs-dot-working { background: var(--ok); }
-.fs-dot-waiting { background: var(--gold); }
+.fs-dot-online { background: var(--ok); }
+.fs-dot-offline { background: var(--danger); }
 
 /* ================= the run chat: one clean design =================
    One surface. Three type sizes (15 / 13 / 12). Normal-case labels.

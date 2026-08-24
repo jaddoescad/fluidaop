@@ -1,7 +1,7 @@
 /* Activity — the Zen visual language (near-black neutrals, hairline
-   borders, one lavender accent) applied to a single contained timeline
-   of real Gmail activity. Like Connections, this page flexes down to
-   laptop and tablet widths. */
+   borders, one lavender accent) applied to a single contained feed of
+   real Gmail signals: one email per row. Like Connections, this page
+   flexes down to laptop and tablet widths. */
 
 .v.ac-root {
   min-width: 0;
@@ -37,7 +37,7 @@
   white-space: nowrap;
 }
 
-/* ---------- header: title left, live source right ---------- */
+/* ---------- header: title left, sync action right ---------- */
 
 .ac-head {
   display: flex;
@@ -63,15 +63,27 @@
   max-width: 54ch;
 }
 
-.ac-source {
+.ac-sync-controls {
   display: flex;
   align-items: center;
   gap: 10px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--panel);
-  padding: 8px 10px;
-  min-width: 0;
+}
+
+.ac-auto-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ac-auto-sync i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
 }
 
 .ac-logo {
@@ -89,29 +101,12 @@
 
 .ac-logo svg { display: block; }
 
-.ac-source-text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
+/* per-row source mark — small enough to sit in the feed without shouting */
+.ac-logo-sm {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
 }
-
-.ac-source-text b {
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ac-source-text span {
-  font-size: 11px;
-  color: var(--faint);
-  white-space: nowrap;
-}
-
-.ac-source-text .ac-sync-bad { color: var(--danger); }
 
 /* ---------- buttons: ghost by default, tinted when they matter ---------- */
 
@@ -178,53 +173,11 @@
   border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
 }
 
-/* ---------- count filters ---------- */
-
-.ac-filters {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-
-.ac-filter {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dim);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 4px 11px;
-  white-space: nowrap;
-}
-
-.ac-filter:hover {
-  color: var(--ink);
-  border-color: var(--line-2);
-}
-
-.ac-filter.on {
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-}
-
-.ac-filter-n {
-  font-size: 10.5px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  color: var(--faint);
-}
-
-.ac-filter.on .ac-filter-n { color: var(--accent); }
-
 .ac-refreshing {
+  display: block;
   font-size: 11px;
   color: var(--faint);
-  margin-left: 4px;
+  margin-bottom: 10px;
 }
 
 /* ---------- loading / error / empty states ---------- */
@@ -336,6 +289,14 @@
 .ac-dir-in { color: var(--c-email); background: color-mix(in srgb, var(--c-email) 12%, transparent); }
 .ac-dir-out { color: var(--ok); background: var(--ok-soft); }
 
+/* inside a row's top line the glyph sits beside the name — keep it compact */
+.ac-row-top .ac-dir {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  margin-top: 0;
+}
+
 .ac-row-main {
   flex: 1;
   min-width: 0;
@@ -354,13 +315,29 @@
 .ac-row-person {
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--dim);
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.ac-row.unread .ac-row-person { color: var(--ink); }
+.ac-row-label,
+.ac-classification-pill {
+  color: var(--ac-label);
+  background: color-mix(in srgb, var(--ac-label) 14%, transparent);
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.ac-row-label {
+  flex: none;
+  max-width: 190px;
+  padding: 2px 7px;
+  overflow: hidden;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
 
 .ac-row-line {
   font-size: 12.5px;
@@ -373,11 +350,6 @@
 .ac-row-subject {
   color: var(--dim);
   font-weight: 500;
-}
-
-.ac-row.unread .ac-row-subject {
-  color: var(--ink);
-  font-weight: 600;
 }
 
 .ac-row-preview { color: var(--faint); }
@@ -397,34 +369,6 @@
   white-space: nowrap;
 }
 
-.ac-row.unread .ac-row-time { color: var(--dim); }
-
-.ac-unread-dot {
-  position: relative;
-  flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-/* status chips — text, never colour alone */
-.ac-chip {
-  flex: none;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.03em;
-  border-radius: 999px;
-  padding: 2px 8px;
-  white-space: nowrap;
-}
-
-.ac-chip-reply {
-  color: var(--gold);
-  background: var(--warn-soft);
-  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
-}
-
 .ac-clip {
   position: relative;
   flex: none;
@@ -439,14 +383,36 @@
   font-variant-numeric: tabular-nums;
 }
 
-.ac-truncnote {
-  font-size: 11px;
-  color: var(--faint);
+/* ---------- pagination: a quiet footer, never a scroll trap ---------- */
+
+.ac-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
   padding: 8px 16px;
   border-top: 1px solid var(--line);
 }
 
-/* ---------- detail drawer ---------- */
+.ac-pager-info {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ac-pager-btns {
+  display: flex;
+  gap: 8px;
+}
+
+.ac-btn-sm {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+/* ---------- signal drawer ---------- */
 
 .ac-scrim {
   position: fixed;
@@ -458,7 +424,7 @@
 }
 
 .ac-drawer {
-  width: min(480px, 100%);
+  width: min(520px, 100%);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -493,6 +459,13 @@
   color: var(--faint);
 }
 
+.ac-drawer-meta .ac-dir {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  margin-top: 0;
+}
+
 .ac-x {
   flex: none;
   width: 26px;
@@ -519,6 +492,98 @@
   overflow-wrap: break-word;
 }
 
+/* the SIGNAL section is the drawer's one primary object — a small accent
+   tag names it, everything below the divider is only supporting context */
+.ac-signal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ac-signal-tag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  margin-bottom: 9px;
+}
+
+.ac-signal .ac-parts,
+.ac-signal .ac-body-text,
+.ac-signal .ac-nobody,
+.ac-signal .ac-drawer-loading,
+.ac-signal .ac-drawer-problem {
+  align-self: stretch;
+}
+
+.ac-classification {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: -2px 0 12px;
+}
+
+.ac-classification-pill {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ac-classification-confidence {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.ac-classification p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.ac-evidence {
+  align-self: stretch;
+  margin: -4px 0 14px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
+.ac-evidence-title {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ac-evidence ul {
+  margin: 5px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ac-evidence li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.ac-evidence small {
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* From / To / Cc / Files of the selected signal only — never aggregated
+   from the Gmail thread */
 .ac-parts {
   display: flex;
   flex-direction: column;
@@ -538,7 +603,7 @@
 
 .ac-part dt {
   flex: none;
-  width: 38px;
+  width: 44px;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -556,9 +621,149 @@
   overflow-wrap: break-word;
 }
 
-.ac-drawer-body {
-  flex: 1;
-  min-height: 0;
+.ac-nobody {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--faint);
+}
+
+/* ---------- Gmail history: collapsed context below the signal ---------- */
+
+.ac-hist {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.ac-hist-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.ac-hist-toggle:hover { color: var(--ink); }
+
+.ac-hist-chev {
+  flex: none;
+  color: var(--faint);
+  transition: transform 0.15s ease;
+}
+
+.ac-hist-toggle[aria-expanded='true'] .ac-hist-chev { transform: rotate(90deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ac-hist-chev { transition: none; }
+}
+
+.ac-hist-count {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ac-hist-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+  margin: 8px 0 0;
+}
+
+.ac-hist-none {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.ac-hist-panel { padding-bottom: 6px; }
+
+/* history emails read as background material: dimmer text, thinner
+   chrome, capped body height — visually secondary to the signal above */
+.ac-hist-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: opacity 0.15s ease;
+}
+
+.ac-hist-item {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-2);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 55%, transparent);
+  padding: 9px 11px;
+}
+
+.ac-hist-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.ac-hist-head .ac-dir {
+  width: 15px;
+  height: 15px;
+  border-radius: 5px;
+  margin-top: 0;
+}
+
+.ac-hist-sender {
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.ac-hist-time {
+  margin-left: auto;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ac-hist-subject {
+  font-size: 11.5px;
+  color: var(--dim);
+  margin-top: 5px;
+  overflow-wrap: break-word;
+}
+
+.ac-hist-body {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--dim);
+  max-height: 180px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+  margin-top: 6px;
+}
+
+.ac-hist-item .ac-nobody {
+  font-size: 11.5px;
+  margin-top: 6px;
+}
+
+.ac-hist-pager {
+  margin-top: 10px;
+  padding: 8px 0 0;
 }
 
 .ac-drawer-loading {
@@ -606,7 +811,6 @@
 
 @media (max-width: 560px) {
   .ac-head { flex-direction: column; align-items: stretch; }
-  .ac-source { justify-content: flex-start; }
-  .ac-source .ac-btn { margin-left: auto; }
+  .ac-head .ac-btn { align-self: flex-start; }
   .ac-row-side { flex-direction: column; align-items: flex-end; gap: 4px; }
 }

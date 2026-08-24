@@ -14,10 +14,8 @@ export interface GmailActivityRow {
   preview: string;
   body_text: string | null;
   occurred_at: string;
-  is_unread: boolean;
   has_attachments: boolean;
   attachment_count: number;
-  needs_attention: boolean;
   source_labels: string[];
   source_metadata: Record<string, unknown>;
   updated_at: string;
@@ -29,8 +27,21 @@ export interface GmailBackfillResult {
   truncated: boolean;
 }
 
+export interface GmailIncrementalResult extends GmailBackfillResult {
+  historyId: string;
+}
+
 interface GmailMessageListResponse {
   messages?: { id?: string; threadId?: string }[];
+  nextPageToken?: string;
+}
+
+interface GmailHistoryListResponse {
+  history?: {
+    id?: string;
+    messagesAdded?: { message?: { id?: string; threadId?: string } }[];
+  }[];
+  historyId?: string;
   nextPageToken?: string;
 }
 
@@ -69,6 +80,15 @@ interface ParsedAddress {
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const emailPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
+export class GmailApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   const raw = await response.text();
@@ -89,7 +109,7 @@ async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
         if (typeof message === 'string') detail = message;
       }
     }
-    throw new Error(detail);
+    throw new GmailApiError(response.status, detail);
   }
   return payload as T;
 }
@@ -244,11 +264,9 @@ function toActivity(message: GmailMessage, accountEmail: string, syncedAt: strin
     preview,
     body_text: body || null,
     occurred_at: messageDate(message, headers),
-    is_unread: labels.includes('UNREAD'),
     has_attachments: attachments > 0,
     attachment_count: attachments,
-    needs_attention: false,
-    source_labels: labels,
+    source_labels: labels.filter((label) => label !== 'UNREAD'),
     source_metadata: {
       rfc_message_id: headers.get('message-id') ?? null,
       size_estimate: message.sizeEstimate ?? null,
@@ -272,6 +290,38 @@ async function mapConcurrent<T, R>(items: T[], concurrency: number, task: (item:
   });
   await Promise.all(workers);
   return result;
+}
+
+async function fetchMessages(accessToken: string, ids: string[]): Promise<GmailMessage[]> {
+  const messages = await mapConcurrent(ids, 6, async (id) => {
+    const url = new URL(`${GMAIL_API}/messages/${encodeURIComponent(id)}`);
+    url.searchParams.set('format', 'full');
+    try {
+      return await gmailJson<GmailMessage>(url, accessToken);
+    } catch (error) {
+      // A message can be deleted between history.list and messages.get. It should
+      // not make the rest of a mailbox sync fail.
+      if (error instanceof GmailApiError && error.status === 404) return null;
+      throw error;
+    }
+  });
+  return messages.filter((message): message is GmailMessage => message !== null);
+}
+
+function activitiesFromMessages(
+  messages: GmailMessage[],
+  accountEmail: string,
+): GmailActivityRow[] {
+  const syncedAt = new Date().toISOString();
+  const activities = messages
+    .filter((message) => {
+      const labels = message.labelIds ?? [];
+      return !labels.some((label) => ['SPAM', 'TRASH', 'DRAFT'].includes(label));
+    })
+    .map((message) => toActivity(message, accountEmail, syncedAt))
+    .sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at));
+
+  return activities;
 }
 
 export async function fetchGmailActivityBackfill(
@@ -301,28 +351,65 @@ export async function fetchGmailActivityBackfill(
     pageToken = page.nextPageToken;
   } while (pageToken && ids.length < maximumMessages);
 
-  const messages = await mapConcurrent(ids, 6, async (id) => {
-    const url = new URL(`${GMAIL_API}/messages/${encodeURIComponent(id)}`);
-    url.searchParams.set('format', 'full');
-    return gmailJson<GmailMessage>(url, accessToken);
-  });
-  const syncedAt = new Date().toISOString();
-  const activities = messages
-    .map((message) => toActivity(message, accountEmail, syncedAt))
-    .sort((left, right) => Date.parse(right.occurred_at) - Date.parse(left.occurred_at));
-
-  const handledThreads = new Set<string>();
-  for (const activity of activities) {
-    const thread = activity.external_thread_id ?? activity.external_id;
-    if (handledThreads.has(thread)) continue;
-    handledThreads.add(thread);
-    activity.needs_attention =
-      activity.direction === 'inbound' && activity.source_metadata.automated !== true;
-  }
+  const messages = await fetchMessages(accessToken, ids);
+  const activities = activitiesFromMessages(messages, accountEmail);
 
   return {
     activities,
     messagesSeen: ids.length,
     truncated: Boolean(pageToken),
+  };
+}
+
+export async function fetchGmailActivityChanges(
+  accessToken: string,
+  rawAccountEmail: string,
+  startHistoryId: string,
+  maximumMessages = 2_000,
+): Promise<GmailIncrementalResult> {
+  const accountEmail = rawAccountEmail.trim().toLowerCase();
+  const ids = new Set<string>();
+  let pageToken: string | undefined;
+  let currentHistoryId = startHistoryId;
+  let lastProcessedHistoryId = startHistoryId;
+  let truncated = false;
+
+  do {
+    const url = new URL(`${GMAIL_API}/history`);
+    url.searchParams.set('startHistoryId', startHistoryId);
+    url.searchParams.set('historyTypes', 'messageAdded');
+    url.searchParams.set('maxResults', '500');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const page = await gmailJson<GmailHistoryListResponse>(url, accessToken);
+    currentHistoryId = page.historyId ?? currentHistoryId;
+    const records = page.history ?? [];
+
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      if (!record) continue;
+      for (const added of record.messagesAdded ?? []) {
+        const id = added.message?.id;
+        if (id) ids.add(id);
+      }
+      lastProcessedHistoryId = record.id ?? lastProcessedHistoryId;
+      if (ids.size >= maximumMessages) {
+        truncated = index < records.length - 1 || Boolean(page.nextPageToken);
+        break;
+      }
+    }
+
+    if (truncated) break;
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  const messageIds = [...ids];
+  const messages = await fetchMessages(accessToken, messageIds);
+  return {
+    activities: activitiesFromMessages(messages, accountEmail),
+    messagesSeen: messageIds.length,
+    truncated,
+    // Only advance through records that were actually processed. This prevents
+    // skipping mail if an unusually large history window is split over runs.
+    historyId: truncated ? lastProcessedHistoryId : currentHistoryId,
   };
 }

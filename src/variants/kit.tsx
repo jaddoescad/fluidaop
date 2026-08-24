@@ -1035,6 +1035,7 @@ const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '🤖', label: 'Agents' },
   { icon: '✅', label: 'Approvals' },
   { icon: '⚡', label: 'Activity' },
+  { icon: '🏷️', label: 'Labels' },
   { icon: '🧭', label: 'Automations' },
   { icon: '🔌', label: 'Connections' },
   { icon: '👥', label: 'Contacts' },
@@ -1051,7 +1052,7 @@ export interface AgentInfo {
   emoji: string;
   name: string;
   duty: string;
-  status: 'working' | 'waiting' | 'idle';
+  status: 'online' | 'offline' | 'checking';
   line: string;
 }
 
@@ -1066,7 +1067,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Activity', 'Connections'];
+  const LIVE = ['Board', 'Agents', 'Activity', 'Labels', 'Connections'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);
@@ -1101,7 +1102,7 @@ export function SideNav({
               <span className="fl-nav-agent-top">
                 <span className="fl-nav-ico">{ag.emoji}</span>
                 <b className="fl-nav-agent-name">{ag.name}</b>
-                <span className={`fs-dot fs-dot-${ag.status}`} title={ag.status === 'waiting' ? 'waiting on you' : ag.status} />
+                <span className={`fs-dot fs-dot-${ag.status}`} title={ag.status} />
               </span>
               <span className="fl-nav-agent-line">{ag.line}</span>
             </div>

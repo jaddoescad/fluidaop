@@ -1,0 +1,13 @@
+{
+  "name": "fluid-history",
+  "label": "Fluid History",
+  "description": "Read-only, agent-filtered Hermes cron history for Fluid.",
+  "icon": "History",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/fluid-history",
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

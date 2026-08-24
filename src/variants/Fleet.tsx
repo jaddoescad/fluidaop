@@ -1,12 +1,14 @@
 import { Fragment, ReactNode, useEffect, useState } from 'react';
 import { ActivitiesPage } from '../activities/ActivitiesPage';
+import { AgentsPage } from '../agents/AgentsPage';
+import { HERMES_AGENTS, HermesStatus, loadHermesStatus } from '../agents/hermes';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
+import { LabelsPage } from '../labels/LabelsPage';
 import { agentFor } from '../engine';
-import { fmtAge, fmtDue } from '../time';
+import { fmtAge } from '../time';
 import { ActionCard } from '../types';
 import { derive, DueChip, Empty, PaneHead, RoleTag, VProps } from './shared';
 import {
-  AGENT_EMOJI,
   AGENT_STEPS,
   AgentInfo,
   KitHeader,
@@ -30,10 +32,12 @@ import './fleet.css';
  * the person dossier stays one click deeper. Roster lives in the side nav.
  */
 
-type AppPage = 'Board' | 'Activity' | 'Connections';
+type AppPage = 'Board' | 'Agents' | 'Activity' | 'Labels' | 'Connections';
 
 function pageFromPath(): AppPage {
+  if (window.location.pathname === '/agents') return 'Agents';
   if (window.location.pathname === '/connections') return 'Connections';
+  if (window.location.pathname === '/labels') return 'Labels';
   if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
   return 'Board';
 }
@@ -42,6 +46,7 @@ export function FleetV({ s, act }: VProps) {
   const d = derive(s);
   const [runSel, setRunSel] = useState<RunSubject | null>(null);
   const [page, setPage] = useState<AppPage>(pageFromPath);
+  const [hermesStatus, setHermesStatus] = useState<HermesStatus | null>(null);
 
   useEffect(() => {
     const syncPage = () => {
@@ -51,19 +56,51 @@ export function FleetV({ s, act }: VProps) {
     return () => window.removeEventListener('popstate', syncPage);
   }, []);
 
+  useEffect(() => {
+    if (page !== 'Board') return;
+    let active = true;
+    const refreshHermes = async () => {
+      try {
+        const nextStatus = await loadHermesStatus();
+        if (active) setHermesStatus(nextStatus);
+      } catch {
+        if (active) setHermesStatus(null);
+      }
+    };
+    void refreshHermes();
+    const timer = window.setInterval(() => void refreshHermes(), 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [page]);
+
   const navigate = (label: string) => {
-    if (label !== 'Board' && label !== 'Activity' && label !== 'Connections') return;
+    if (
+      label !== 'Board' &&
+      label !== 'Agents' &&
+      label !== 'Activity' &&
+      label !== 'Labels' &&
+      label !== 'Connections'
+    )
+      return;
     const path =
-      label === 'Connections'
+      label === 'Agents'
+        ? '/agents'
+        : label === 'Connections'
         ? '/connections'
-        : label === 'Activity'
-          ? '/activity'
-          : '/';
+        : label === 'Labels'
+          ? '/labels'
+          : label === 'Activity'
+            ? '/activity'
+            : '/';
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
     setPage(label);
   };
 
+  if (page === 'Agents') return <AgentsPage d={d} onNavigate={navigate} />;
   if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} />;
+  if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} />;
   if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} />;
 
   const fname = d.focusPerson?.name ?? null;
@@ -107,63 +144,19 @@ export function FleetV({ s, act }: VProps) {
     return { key: 'fail', chip: <>✗ failed · {run.agent}</> };
   };
 
-  // ----- side-nav roster, driven by the actual runs -----
-  const openIds = new Set(s.actions.map((a) => a.id));
-  const statsFor = (name: string) => {
-    let working = 0;
-    let needs = 0;
-    for (const [id, run] of Object.entries(s.runs)) {
-      if (run.agent !== name || !openIds.has(id)) continue;
-      if (run.status === 'running') working += 1;
-      if (run.status === 'review' || run.status === 'fail') needs += 1;
-    }
-    const doneToday = s.handled.filter((h) => {
-      const run = s.runs[h.a.id];
-      return run?.agent === name && run.status === 'ok';
-    }).length;
-    return { working, needs, doneToday };
-  };
-  const lineFor = (name: string, idle: string) => {
-    const { working, needs, doneToday } = statsFor(name);
-    const parts: string[] = [];
-    if (working > 0) parts.push(`${working} working`);
-    if (needs > 0) parts.push(`${needs} need${needs === 1 ? 's' : ''} you`);
-    if (doneToday > 0) parts.push(`${doneToday} done today`);
-    return { line: parts.length > 0 ? parts.join(' · ') : idle, working, needs };
-  };
-  const agentRow = (name: string, duty: string, idle: string): AgentInfo => {
-    const { line, working, needs } = lineFor(name, idle);
-    return {
-      emoji: AGENT_EMOJI[name] ?? '🤖',
-      name,
-      duty,
-      status: needs > 0 ? 'waiting' : working > 0 ? 'working' : 'idle',
-      line,
-    };
-  };
   // a triggered/due reminder has moved to Actions — Reminders holds only the future
   const heldRems = d.reminders.filter((r) => !s.actions.some((x) => x.id === `action:rem:${r.id}`));
 
-  const latest = s.signals[s.signals.length - 1];
-  const running = s.seqInstances.filter((i) => i.doneAt === null).sort((a, b) => a.nextAt - b.nextAt);
-  const scout = agentRow('Scout', 'Intake & CRM', `routed ${d.c.signalsToday} signal${d.c.signalsToday === 1 ? '' : 's'} today`);
-  if (scout.status === 'idle' && latest && s.now - latest.at < 30_000) scout.status = 'working';
-  const roster: AgentInfo[] = [
-    scout,
-    agentRow('Scribe', 'Replies & drafts', 'inbox clear'),
-    agentRow('Chaser', 'Follow-ups & nudges', 'calendar clear'),
-    agentRow('Ledger', 'Invoices & payments', 'books are current'),
-    {
-      emoji: '🧭',
-      name: 'Runner',
-      duty: 'Automation runs',
-      status: running.length > 0 ? 'working' : 'idle',
-      line:
-        running.length > 0
-          ? `${running.length} automation${running.length === 1 ? '' : 's'} running · next ${fmtDue(running[0]!.nextAt, s.now)}`
-          : 'no automations running',
-    },
-  ];
+  const roster: AgentInfo[] = HERMES_AGENTS.map((agent) => {
+    const connected = hermesStatus?.connected === true && hermesStatus.profiles.includes(agent.profile);
+    return {
+      emoji: agent.icon,
+      name: agent.name,
+      duty: agent.description,
+      status: connected ? 'online' : hermesStatus === null ? 'checking' : 'offline',
+      line: connected ? `${agent.schedule} · connected` : hermesStatus === null ? 'checking Hermes…' : 'Hermes unavailable',
+    };
+  });
 
   return (
     <div className="v v-flow v-zen v-fleet">
