@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Creator"
+  short_description: "Create safe, discoverable Hermes agents"
+  default_prompt: "Create a new Hermes agent from my business workflow."
