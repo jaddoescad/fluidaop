@@ -9,6 +9,7 @@ export interface HermesStatus {
 
 export interface HermesAgentDefinition {
   id: string;
+  runtimeName: string;
   name: string;
   icon: string;
   description: string;
@@ -16,17 +17,52 @@ export interface HermesAgentDefinition {
   profile: string;
   mode: string;
   steps: string[];
+  enabled: boolean;
+  state: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  lastError: string | null;
+  historyAgentId: string | null;
 }
 
-export const HERMES_AGENTS: HermesAgentDefinition[] = [
+interface HermesAgentRecord {
+  id: string;
+  name: string;
+  profile: string;
+  schedule: string;
+  enabled: boolean;
+  state: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  lastError: string | null;
+  mode: 'agent' | 'script';
+}
+
+interface HermesAgentsPayload {
+  agents: HermesAgentRecord[];
+  fetchedAt: string;
+}
+
+interface AgentPresentation {
+  match: RegExp;
+  name: string;
+  icon: string;
+  description: string;
+  mode: string;
+  steps: string[];
+  historyAgentId: string;
+}
+
+const AGENT_PRESENTATIONS: AgentPresentation[] = [
   {
-    id: 'email-categorizer',
+    match: /fluid email categorizer/i,
     name: 'Email Categorizer',
     icon: '✉️',
     description: 'Categorizes incoming Gmail signals in Fluid and records attachment evidence without changing Gmail.',
-    schedule: 'Every 5 minutes',
-    profile: 'default',
     mode: 'Agent-assisted',
+    historyAgentId: 'email-categorizer',
     steps: [
       'Claim new Gmail signals from the durable Supabase queue',
       'Read the signal and selectively extract relevant attachment text',
@@ -35,13 +71,12 @@ export const HERMES_AGENTS: HermesAgentDefinition[] = [
     ],
   },
   {
-    id: 'contractor-invoices',
+    match: /contractor invoice sync/i,
     name: 'Contractor Invoices',
     icon: '🧾',
     description: 'Processes contractor invoice evidence for the operations workflow.',
-    schedule: 'Every 5 hours',
-    profile: 'default',
     mode: 'Scheduled automation',
+    historyAgentId: 'contractor-invoices',
     steps: [
       'Find new contractor invoice emails and attachments',
       'Extract the contractor, job, amount, and invoice date',
@@ -50,13 +85,12 @@ export const HERMES_AGENTS: HermesAgentDefinition[] = [
     ],
   },
   {
-    id: 'dripjobs-operations',
+    match: /daily dripjobs/i,
     name: 'DripJobs Operations',
     icon: '🛠️',
     description: 'Synchronizes DripJobs sales and job data into the business workspace.',
-    schedule: 'Daily at 6:00 AM',
-    profile: 'default',
     mode: 'Scheduled automation',
+    historyAgentId: 'dripjobs-operations',
     steps: [
       'Connect to the DripJobs workspace',
       'Collect updated leads, jobs, and sales records',
@@ -65,13 +99,12 @@ export const HERMES_AGENTS: HermesAgentDefinition[] = [
     ],
   },
   {
-    id: 'meta-ads-reporter',
+    match: /daily meta ads/i,
     name: 'Meta Ads Reporter',
     icon: '📈',
     description: 'Refreshes campaign data and prepares the daily leads and CPL report.',
-    schedule: 'Daily + every 4 hours',
-    profile: 'default',
     mode: 'Agent + scheduled sync',
+    historyAgentId: 'meta-ads-reporter',
     steps: [
       'Refresh the latest Meta campaign performance',
       'Calculate leads and cost per lead',
@@ -80,6 +113,42 @@ export const HERMES_AGENTS: HermesAgentDefinition[] = [
     ],
   },
 ];
+
+export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinition {
+  const presentation = AGENT_PRESENTATIONS.find((candidate) => candidate.match.test(agent.name));
+  return {
+    ...agent,
+    runtimeName: agent.name,
+    name: presentation?.name ?? agent.name,
+    icon: presentation?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
+    description: presentation?.description ?? `Hermes automation running in the ${agent.profile} profile.`,
+    mode: presentation?.mode ?? (agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent'),
+    steps: presentation?.steps ?? [
+      'Wake on its Hermes schedule',
+      'Load the skills and tools assigned to this job',
+      'Complete the configured workflow',
+      'Record the run result in Hermes',
+    ],
+    historyAgentId: presentation?.historyAgentId ?? null,
+  };
+}
+
+export interface HermesSkill {
+  id: string;
+  name: string;
+  description: string;
+  source: 'bundled' | 'hub' | 'custom' | string;
+  version: string | null;
+  enabled: boolean;
+  profiles: string[];
+  usage: number;
+  usedBy: string[];
+}
+
+interface HermesSkillsPayload {
+  skills: HermesSkill[];
+  fetchedAt: string;
+}
 
 export type HermesRunStatus =
   | 'claimed'
@@ -124,11 +193,44 @@ export async function loadHermesStatus(): Promise<HermesStatus> {
   return (await response.json()) as HermesStatus;
 }
 
+export async function loadHermesAgents(): Promise<HermesAgentDefinition[]> {
+  const response = await fetch('/api/hermes/agents', { headers: { Accept: 'application/json' } });
+  const payload = (await response.json().catch(() => null)) as HermesAgentsPayload | { error?: unknown } | null;
+  if (!response.ok) {
+    const detail = payload !== null && 'error' in payload && typeof payload.error === 'string'
+      ? payload.error
+      : `Hermes agents returned HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+  if (payload === null || !('agents' in payload) || !Array.isArray(payload.agents)) {
+    throw new Error('Hermes returned an invalid agent roster');
+  }
+  return payload.agents.map(presentHermesAgent);
+}
+
+export async function loadHermesSkills(): Promise<HermesSkill[]> {
+  const response = await fetch('/api/hermes/skills', { headers: { Accept: 'application/json' } });
+  const payload = (await response.json().catch(() => null)) as HermesSkillsPayload | { error?: unknown } | null;
+  if (!response.ok) {
+    const detail = payload !== null && 'error' in payload && typeof payload.error === 'string'
+      ? payload.error
+      : `Hermes skills returned HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+  if (payload === null || !('skills' in payload) || !Array.isArray(payload.skills)) {
+    throw new Error('Hermes returned an invalid skill roster');
+  }
+  return payload.skills;
+}
+
 export async function loadHermesHistory(
   agentId: string,
   signal?: AbortSignal,
+  jobId?: string,
 ): Promise<HermesAgentHistory> {
-  const response = await fetch(`/api/hermes/agents/${encodeURIComponent(agentId)}/runs?limit=20`, {
+  const query = new URLSearchParams({ limit: '20' });
+  if (jobId !== undefined) query.set('jobId', jobId);
+  const response = await fetch(`/api/hermes/agents/${encodeURIComponent(agentId)}/runs?${query}`, {
     headers: { Accept: 'application/json' },
     signal,
   });

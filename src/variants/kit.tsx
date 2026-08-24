@@ -1033,6 +1033,7 @@ export function PlaybooksCol({ s, act, onOpen }: { s: State; act: Act; onOpen?: 
 const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '📡', label: 'Board' },
   { icon: '🤖', label: 'Agents' },
+  { icon: '🧩', label: 'Skills' },
   { icon: '✅', label: 'Approvals' },
   { icon: '⚡', label: 'Activity' },
   { icon: '🏷️', label: 'Labels' },
@@ -1049,6 +1050,7 @@ const NAV_FOOT: { icon: string; label: string }[] = [
 
 /** An agent's live status, shown in the side nav roster. */
 export interface AgentInfo {
+  id: string;
   emoji: string;
   name: string;
   duty: string;
@@ -1067,7 +1069,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Agents', 'Activity', 'Labels', 'Connections'];
+  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Connections'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);
@@ -1098,7 +1100,7 @@ export function SideNav({
         <div className="fl-nav-agents">
           <div className="fl-nav-label">Agents</div>
           {roster.map((ag) => (
-            <div key={ag.name} className="fl-nav-agent" title={`${ag.name} — ${ag.duty}`}>
+            <div key={ag.id} className="fl-nav-agent" title={`${ag.name} — ${ag.duty}`}>
               <span className="fl-nav-agent-top">
                 <span className="fl-nav-ico">{ag.emoji}</span>
                 <b className="fl-nav-agent-name">{ag.name}</b>

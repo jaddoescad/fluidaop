@@ -1,9 +1,9 @@
 name: fluid-history
-version: 1.0.0
-description: Read-only, agent-filtered cron history for the Fluid operations dashboard.
+version: 1.1.0
+description: Read-only Hermes automation, skill, and run metadata for the Fluid operations dashboard.
 author: Ottawa Painters
 kind: standalone
 requires_env:
   - name: HERMES_FLUID_HISTORY_SECRET
-    description: Dedicated bearer secret accepted only by the Fluid history endpoint.
+    description: Dedicated bearer secret accepted only by the Fluid metadata endpoints.
     password: true

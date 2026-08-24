@@ -1,8 +1,8 @@
-"""Scoped, read-only Hermes history API for Fluid.
+"""Scoped, read-only Hermes automation API for Fluid.
 
-Mounted by Hermes at ``/api/plugins/fluid-history``. The response intentionally
-contains run metadata only: no cron prompts, email bodies, invoice content, or
-session messages leave Hermes.
+Mounted by Hermes at ``/api/plugins/fluid-history``. Responses intentionally
+contain roster and run metadata only: no prompts, scripts, skill bodies, email
+content, invoice content, or session messages leave Hermes.
 """
 from __future__ import annotations
 
@@ -25,7 +25,11 @@ from hermes_cli.dashboard_auth.token_auth import register_token_route
 
 
 router = APIRouter()
-ROUTE_PATH = "/api/plugins/fluid-history/runs"
+ROUTE_PATHS = (
+    "/api/plugins/fluid-history/agents",
+    "/api/plugins/fluid-history/runs",
+    "/api/plugins/fluid-history/skills",
+)
 REQUIRED_SCOPE = "fluid:history"
 MIN_SECRET_CHARS = 43
 
@@ -79,7 +83,8 @@ class FluidHistoryTokenProvider(DashboardAuthProvider):
 
 
 def _install_auth() -> None:
-    register_token_route(ROUTE_PATH)
+    for path in ROUTE_PATHS:
+        register_token_route(path)
     secret = os.environ.get("HERMES_FLUID_HISTORY_SECRET", "").strip()
     if len(secret) < MIN_SECRET_CHARS:
         return
@@ -125,6 +130,98 @@ def _safe_error(value: Any) -> Optional[str]:
     if not value:
         return None
     return " ".join(str(value).split())[:300]
+
+
+def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+    latest = job.get("latest_execution")
+    if not isinstance(latest, dict):
+        latest = {}
+    return {
+        "id": str(job.get("id") or ""),
+        "name": str(job.get("name") or job.get("id") or "Unnamed automation"),
+        "profile": str(job.get("profile") or job.get("profile_name") or "default"),
+        "schedule": str(job.get("schedule_display") or "Schedule unavailable"),
+        "enabled": bool(job.get("enabled", True)),
+        "state": str(job.get("state") or ("scheduled" if job.get("enabled", True) else "paused")),
+        "nextRunAt": _iso(job.get("next_run_at")),
+        "lastRunAt": _iso(latest.get("started_at") or latest.get("claimed_at")),
+        "lastRunStatus": str(latest.get("status") or "") or None,
+        "lastError": _safe_error(latest.get("error") or job.get("last_error")),
+        "mode": "script" if bool(job.get("no_agent")) else "agent",
+    }
+
+
+def _agents_payload() -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+
+    agents = [
+        _agent_payload(job)
+        for job in ws._list_cron_jobs_sync("all")
+        if str(job.get("id") or "")
+    ]
+    agents.sort(key=lambda agent: (not agent["enabled"], agent["name"].casefold()))
+    return {"agents": agents, "fetchedAt": datetime.now(timezone.utc).isoformat()}
+
+
+def _skills_payload() -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+    from hermes_cli.skills_config import get_disabled_skills
+    from tools.skill_usage import (
+        _read_bundled_manifest_names,
+        _read_hub_installed_names,
+        activity_count,
+        load_usage,
+    )
+    from tools.skills_tool import _find_all_skills
+
+    combined: Dict[str, Dict[str, Any]] = {}
+    for profile_record in ws._cron_profile_dicts():
+        profile = str(profile_record.get("name") or "")
+        if not profile:
+            continue
+        with ws._profile_scope(profile):
+            config = ws.load_config()
+            disabled = get_disabled_skills(config)
+            usage = load_usage()
+            bundled_names = _read_bundled_manifest_names()
+            hub_names = _read_hub_installed_names()
+            for skill in _find_all_skills(skip_disabled=True):
+                name = str(skill.get("name") or "").strip()
+                if not name:
+                    continue
+                provenance = (
+                    "hub" if name in hub_names
+                    else "bundled" if name in bundled_names
+                    else "custom"
+                )
+                entry = combined.setdefault(name, {
+                    "id": name,
+                    "name": name,
+                    "description": str(skill.get("description") or "Hermes skill"),
+                    "source": provenance,
+                    "version": str(skill.get("version") or "") or None,
+                    "enabled": False,
+                    "profiles": [],
+                    "usage": 0,
+                    "usedBy": [],
+                })
+                entry["enabled"] = entry["enabled"] or name not in disabled
+                entry["profiles"].append(profile)
+                entry["usage"] += activity_count(usage.get(name, {}))
+
+    for job in ws._list_cron_jobs_sync("all"):
+        job_name = str(job.get("name") or job.get("id") or "Unnamed automation")
+        for skill_name in job.get("skills") or []:
+            entry = combined.get(str(skill_name))
+            if entry is not None and job_name not in entry["usedBy"]:
+                entry["usedBy"].append(job_name)
+
+    skills = list(combined.values())
+    for skill in skills:
+        skill["profiles"].sort()
+        skill["usedBy"].sort(key=str.casefold)
+    skills.sort(key=lambda skill: (skill["id"] != "agent-creator", skill["name"].casefold()))
+    return {"skills": skills, "fetchedAt": datetime.now(timezone.utc).isoformat()}
 
 
 def _session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
@@ -226,20 +323,27 @@ def _job_runs(job: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
     return rows
 
 
-def _history_payload(agent_id: str, limit: int) -> Dict[str, Any]:
+def _history_payload(agent_id: Optional[str], job_id: Optional[str], limit: int) -> Dict[str, Any]:
     from hermes_cli import web_server as ws
 
-    name_parts = AGENT_JOB_NAME_PARTS[agent_id]
-    jobs = [
-        job for job in ws._list_cron_jobs_sync("all")
-        if any(part in str(job.get("name") or "").casefold() for part in name_parts)
-    ]
+    all_jobs = ws._list_cron_jobs_sync("all")
+    if job_id is not None:
+        jobs = [job for job in all_jobs if str(job.get("id") or "") == job_id]
+        response_agent_id = job_id
+    else:
+        assert agent_id is not None
+        name_parts = AGENT_JOB_NAME_PARTS[agent_id]
+        jobs = [
+            job for job in all_jobs
+            if any(part in str(job.get("name") or "").casefold() for part in name_parts)
+        ]
+        response_agent_id = agent_id
     runs: List[Dict[str, Any]] = []
     for job in jobs:
         runs.extend(_job_runs(job, limit))
     runs.sort(key=lambda run: _epoch(run.get("startedAt")) or 0, reverse=True)
     return {
-        "agentId": agent_id,
+        "agentId": response_agent_id,
         "jobs": [
             {
                 "id": str(job.get("id") or ""),
@@ -253,16 +357,39 @@ def _history_payload(agent_id: str, limit: int) -> Dict[str, Any]:
     }
 
 
+@router.get("/agents")
+async def agents(request: Request) -> Dict[str, Any]:
+    principal = getattr(request.state, "token_principal", None)
+    scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
+    if REQUIRED_SCOPE not in scopes:
+        raise HTTPException(status_code=403, detail="Missing fluid:history scope")
+    return await run_in_threadpool(_agents_payload)
+
+
+@router.get("/skills")
+async def skills(request: Request) -> Dict[str, Any]:
+    principal = getattr(request.state, "token_principal", None)
+    scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
+    if REQUIRED_SCOPE not in scopes:
+        raise HTTPException(status_code=403, detail="Missing fluid:history scope")
+    return await run_in_threadpool(_skills_payload)
+
+
 @router.get("/runs")
 async def runs(
     request: Request,
-    agent: str = Query(...),
+    agent: Optional[str] = Query(None),
+    job: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=50),
 ) -> Dict[str, Any]:
     principal = getattr(request.state, "token_principal", None)
     scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
     if REQUIRED_SCOPE not in scopes:
         raise HTTPException(status_code=403, detail="Missing fluid:history scope")
-    if agent not in AGENT_JOB_NAME_PARTS:
+    if (agent is None) == (job is None):
+        raise HTTPException(status_code=400, detail="Provide exactly one of agent or job")
+    if agent is not None and agent not in AGENT_JOB_NAME_PARTS:
         raise HTTPException(status_code=404, detail="Unknown Fluid agent")
-    return await run_in_threadpool(_history_payload, agent, limit)
+    if job is not None and (not job or len(job) > 128 or not all(char.isalnum() or char in "-_" for char in job)):
+        raise HTTPException(status_code=400, detail="Invalid Hermes job id")
+    return await run_in_threadpool(_history_payload, agent, job, limit)

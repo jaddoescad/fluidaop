@@ -176,6 +176,30 @@ function hermesHistoryToken(): string {
     .digest('base64url');
 }
 
+async function hermesMetadataJson(path: 'agents' | 'skills'): Promise<Record<string, unknown>> {
+  const response = await fetch(`${hermesBaseUrl}/api/plugins/fluid-history/${path}`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${hermesHistoryToken()}`,
+    },
+    signal: AbortSignal.timeout(8_000),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new HttpError(502, 'Hermes rejected Fluid metadata authentication.');
+    }
+    if (response.status === 404) {
+      throw new HttpError(502, 'The Fluid metadata bridge is not available in Hermes.');
+    }
+    throw new HttpError(502, `Hermes ${path} returned HTTP ${response.status}`);
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new HttpError(502, `Hermes returned an invalid ${path} response`);
+  }
+  return payload as Record<string, unknown>;
+}
+
 function encryptToken(token: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(), iv);
@@ -918,15 +942,37 @@ app.get('/api/hermes/status', async (_req, res, next) => {
   }
 });
 
+app.get('/api/hermes/agents', async (_req, res, next) => {
+  try {
+    res.json(await hermesMetadataJson('agents'));
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes agents: ${errorMessage(error)}`));
+  }
+});
+
+app.get('/api/hermes/skills', async (_req, res, next) => {
+  try {
+    res.json(await hermesMetadataJson('skills'));
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes skills: ${errorMessage(error)}`));
+  }
+});
+
 app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
   try {
     const agentId = req.params.agentId;
-    if (!hermesAgentIds.has(agentId)) throw new HttpError(404, 'Hermes agent not found');
+    const jobId = typeof req.query.jobId === 'string' ? req.query.jobId : undefined;
+    if (jobId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
+      throw new HttpError(400, 'Invalid Hermes job id');
+    }
+    if (jobId === undefined && !hermesAgentIds.has(agentId)) {
+      throw new HttpError(404, 'Hermes agent not found');
+    }
     const limit = Math.max(1, Math.min(50, readPositiveInt(
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
       20,
     )));
-    if (agentId === 'email-categorizer') {
+    if (agentId === 'email-categorizer' && jobId === undefined) {
       const payload = await activityFunctionJson<unknown>('agent-history', {
         accountEmail: intendedEmail,
         limit: String(limit),
@@ -935,7 +981,8 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
       return;
     }
     const url = new URL(`${hermesBaseUrl}/api/plugins/fluid-history/runs`);
-    url.searchParams.set('agent', agentId);
+    if (jobId !== undefined) url.searchParams.set('job', jobId);
+    else url.searchParams.set('agent', agentId);
     url.searchParams.set('limit', String(limit));
     const response = await fetch(url, {
       headers: {

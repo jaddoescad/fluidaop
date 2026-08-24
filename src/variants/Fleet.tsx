@@ -1,9 +1,10 @@
 import { Fragment, ReactNode, useEffect, useState } from 'react';
 import { ActivitiesPage } from '../activities/ActivitiesPage';
 import { AgentsPage } from '../agents/AgentsPage';
-import { HERMES_AGENTS, HermesStatus, loadHermesStatus } from '../agents/hermes';
+import { HermesAgentDefinition, HermesStatus, loadHermesAgents, loadHermesStatus } from '../agents/hermes';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
+import { SkillsPage } from '../skills/SkillsPage';
 import { agentFor } from '../engine';
 import { fmtAge } from '../time';
 import { ActionCard } from '../types';
@@ -32,10 +33,11 @@ import './fleet.css';
  * the person dossier stays one click deeper. Roster lives in the side nav.
  */
 
-type AppPage = 'Board' | 'Agents' | 'Activity' | 'Labels' | 'Connections';
+type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Connections';
 
 function pageFromPath(): AppPage {
   if (window.location.pathname === '/agents') return 'Agents';
+  if (window.location.pathname === '/skills') return 'Skills';
   if (window.location.pathname === '/connections') return 'Connections';
   if (window.location.pathname === '/labels') return 'Labels';
   if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
@@ -47,6 +49,7 @@ export function FleetV({ s, act }: VProps) {
   const [runSel, setRunSel] = useState<RunSubject | null>(null);
   const [page, setPage] = useState<AppPage>(pageFromPath);
   const [hermesStatus, setHermesStatus] = useState<HermesStatus | null>(null);
+  const [hermesAgents, setHermesAgents] = useState<HermesAgentDefinition[] | null>(null);
 
   useEffect(() => {
     const syncPage = () => {
@@ -61,10 +64,16 @@ export function FleetV({ s, act }: VProps) {
     let active = true;
     const refreshHermes = async () => {
       try {
-        const nextStatus = await loadHermesStatus();
-        if (active) setHermesStatus(nextStatus);
+        const [nextStatus, nextAgents] = await Promise.all([loadHermesStatus(), loadHermesAgents()]);
+        if (active) {
+          setHermesStatus(nextStatus);
+          setHermesAgents(nextAgents);
+        }
       } catch {
-        if (active) setHermesStatus(null);
+        if (active) {
+          setHermesStatus(null);
+          setHermesAgents(null);
+        }
       }
     };
     void refreshHermes();
@@ -79,6 +88,7 @@ export function FleetV({ s, act }: VProps) {
     if (
       label !== 'Board' &&
       label !== 'Agents' &&
+      label !== 'Skills' &&
       label !== 'Activity' &&
       label !== 'Labels' &&
       label !== 'Connections'
@@ -87,6 +97,8 @@ export function FleetV({ s, act }: VProps) {
     const path =
       label === 'Agents'
         ? '/agents'
+        : label === 'Skills'
+          ? '/skills'
         : label === 'Connections'
         ? '/connections'
         : label === 'Labels'
@@ -99,6 +111,7 @@ export function FleetV({ s, act }: VProps) {
   };
 
   if (page === 'Agents') return <AgentsPage d={d} onNavigate={navigate} />;
+  if (page === 'Skills') return <SkillsPage d={d} onNavigate={navigate} />;
   if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} />;
   if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} />;
   if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} />;
@@ -147,14 +160,25 @@ export function FleetV({ s, act }: VProps) {
   // a triggered/due reminder has moved to Actions — Reminders holds only the future
   const heldRems = d.reminders.filter((r) => !s.actions.some((x) => x.id === `action:rem:${r.id}`));
 
-  const roster: AgentInfo[] = HERMES_AGENTS.map((agent) => {
-    const connected = hermesStatus?.connected === true && hermesStatus.profiles.includes(agent.profile);
+  const roster: AgentInfo[] = (hermesAgents ?? []).map((agent) => {
+    const profileAvailable = hermesStatus?.connected === true && hermesStatus.profiles.includes(agent.profile);
+    const connected = profileAvailable && agent.enabled && agent.lastError === null;
+    const paused = profileAvailable && !agent.enabled;
     return {
+      id: agent.id,
       emoji: agent.icon,
       name: agent.name,
       duty: agent.description,
-      status: connected ? 'online' : hermesStatus === null ? 'checking' : 'offline',
-      line: connected ? `${agent.schedule} · connected` : hermesStatus === null ? 'checking Hermes…' : 'Hermes unavailable',
+      status: connected ? 'online' : paused || hermesStatus === null ? 'checking' : 'offline',
+      line: connected
+        ? `${agent.schedule} · connected`
+        : paused
+          ? `${agent.schedule} · paused`
+          : hermesStatus === null
+            ? 'checking Hermes…'
+            : agent.lastError !== null
+              ? 'needs attention'
+              : 'Hermes unavailable',
     };
   });
 

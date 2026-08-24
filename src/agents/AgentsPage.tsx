@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import {
-  HERMES_AGENTS,
+  HermesAgentDefinition,
   HermesAgentHistory,
   HermesRun,
   HermesRunStatus,
   HermesStatus,
+  loadHermesAgents,
   loadHermesHistory,
   loadHermesStatus,
 } from './hermes';
@@ -22,6 +23,7 @@ export function AgentsPage({
   onNavigate: (label: string) => void;
 }) {
   const [status, setStatus] = useState<HermesStatus | null>(null);
+  const [agents, setAgents] = useState<HermesAgentDefinition[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [history, setHistory] = useState<HermesAgentHistory | null>(null);
@@ -31,7 +33,9 @@ export function AgentsPage({
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await loadHermesStatus());
+      const [nextStatus, nextAgents] = await Promise.all([loadHermesStatus(), loadHermesAgents()]);
+      setStatus(nextStatus);
+      setAgents(nextAgents);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Could not reach Hermes');
@@ -62,10 +66,16 @@ export function AgentsPage({
     }
 
     const controller = new AbortController();
+    const selectedAgent = agents?.find((agent) => agent.id === selectedId);
+    if (selectedAgent === undefined) return;
     setHistory(null);
     setHistoryError(null);
     setHistoryLoading(true);
-    void loadHermesHistory(selectedId, controller.signal)
+    void loadHermesHistory(
+      selectedAgent.historyAgentId ?? selectedAgent.id,
+      controller.signal,
+      selectedAgent.historyAgentId === null ? selectedAgent.id : undefined,
+    )
       .then((nextHistory) => {
         setHistory(nextHistory);
         setHistoryError(null);
@@ -79,10 +89,10 @@ export function AgentsPage({
       });
 
     return () => controller.abort();
-  }, [historyReload, selectedId]);
+  }, [agents, historyReload, selectedId]);
 
   const online = status?.connected === true;
-  const selectedAgent = HERMES_AGENTS.find((agent) => agent.id === selectedId) ?? null;
+  const selectedAgent = agents?.find((agent) => agent.id === selectedId) ?? null;
   const selectedProfiles = history?.jobs.length
     ? Array.from(new Set(history.jobs.map((job) => job.profile))).join(', ')
     : selectedAgent?.profile;
@@ -113,14 +123,39 @@ export function AgentsPage({
                       ? error
                       : status === null
                         ? 'Connecting to the agent gateway…'
-                        : `v${status.version ?? 'unknown'} · ${status.profiles.length} profiles · ${status.activeAgents} active now`}
+                        : `v${status.version ?? 'unknown'} · ${status.profiles.length} profiles · ${agents?.length ?? 0} automations · ${status.activeAgents} active now`}
                   </span>
                 </div>
               </section>
 
+              {error !== null ? (
+                <div className="ag-history-empty ag-history-error" role="alert">
+                  <strong>Agents unavailable</strong>
+                  <p>{error}</p>
+                  <button type="button" onClick={() => void refresh()}>Try again</button>
+                </div>
+              ) : agents === null ? (
+                <div className="ag-history-empty" role="status">
+                  <strong>Loading agents</strong>
+                  <p>Reading the live Hermes automation roster…</p>
+                </div>
+              ) : agents.length === 0 ? (
+                <div className="ag-history-empty">
+                  <strong>No Hermes agents</strong>
+                  <p>Hermes is online, but it is not reporting any automation jobs.</p>
+                </div>
+              ) : (
               <div className="ag-list" aria-label="Hermes agents">
-                {HERMES_AGENTS.map((agent) => {
-                  const connected = online && status.profiles.includes(agent.profile);
+                {agents.map((agent) => {
+                  const profileAvailable = online && status.profiles.includes(agent.profile);
+                  const connected = profileAvailable && agent.enabled && agent.lastError === null;
+                  const stateLabel = !profileAvailable
+                    ? 'Unavailable'
+                    : !agent.enabled
+                      ? 'Paused'
+                      : agent.lastError !== null
+                        ? 'Needs attention'
+                        : 'Connected';
                   return (
                     <button
                       type="button"
@@ -137,7 +172,7 @@ export function AgentsPage({
                       <span className="ag-row-meta">
                         <span>{agent.schedule}</span>
                         <span className={`ag-status${connected ? ' ag-status-connected' : ''}`}>
-                          {connected ? 'Connected' : status === null ? 'Checking' : 'Unavailable'}
+                          {status === null ? 'Checking' : stateLabel}
                         </span>
                       </span>
                       <span className="ag-chevron" aria-hidden="true">›</span>
@@ -145,9 +180,10 @@ export function AgentsPage({
                   );
                 })}
               </div>
+              )}
 
               <p className="ag-note">
-                Fluid reads gateway availability here. Skills, schedules, and safety controls remain managed by Hermes.
+                This list comes directly from Hermes. New automation jobs appear here without a Fluid code change.
               </p>
             </div>
           </main>
