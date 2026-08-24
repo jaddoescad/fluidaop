@@ -13,6 +13,12 @@ const API_URL = (process.env.FLUID_EMAIL_CATEGORIZER_URL || DEFAULT_URL).replace
 const API_SECRET = (process.env.FLUID_EMAIL_CATEGORIZER_SECRET || '').trim();
 const STATE_DIR = resolve(process.env.FLUID_EMAIL_CATEGORIZER_STATE_DIR || '/opt/data/fluid/email-categorizer');
 const GMAIL_READER = resolve(process.env.OTTAWA_GMAIL_READER || '/opt/data/bin/ottawa-gmail-read');
+const GMAIL_READER_LIB_URL = process.env.OTTAWA_GMAIL_READER_LIB_URL ||
+  'file:///opt/data/bin/lib/ottawa-gmail-read.mjs';
+const GMAIL_TOKEN_LIB_URL = process.env.OTTAWA_GMAIL_TOKEN_LIB_URL ||
+  'file:///opt/data/bin/lib/ottawa-customer-rag.mjs';
+const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const EXTRACTABLE_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png']);
 const WORKER = `hermes-${hostname()}`.slice(0, 100);
 
 function option(name, fallback = '') {
@@ -98,6 +104,114 @@ function parseReaderOutput(stdout) {
   throw new Error('Gmail reader returned malformed JSON');
 }
 
+function decodeBase64UrlBytes(value) {
+  const normalized = String(value || '').replaceAll('-', '+').replaceAll('_', '/');
+  try {
+    return Buffer.from(normalized, 'base64');
+  } catch {
+    return Buffer.alloc(0);
+  }
+}
+
+function inferredMimeType(filename, mimeType) {
+  const normalized = String(mimeType || '').trim().toLowerCase().split(';', 1)[0];
+  if (EXTRACTABLE_MIME_TYPES.has(normalized)) return normalized;
+  const lowerName = String(filename || '').trim().toLowerCase();
+  if (lowerName.endsWith('.pdf')) return 'application/pdf';
+  if (lowerName.endsWith('.png')) return 'image/png';
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
+  return normalized || 'application/octet-stream';
+}
+
+function rawAttachmentParts(part, results = []) {
+  if (!part || typeof part !== 'object') return results;
+  const filename = String(part.filename || '').trim();
+  const attachmentId = String(part.body?.attachmentId || '').trim();
+  if (filename || attachmentId) {
+    results.push({
+      attachmentId: attachmentId || null,
+      filename,
+      mimeType: inferredMimeType(filename, part.mimeType),
+      sizeBytes: Number.isFinite(Number(part.body?.size)) ? Number(part.body.size) : null,
+    });
+  }
+  for (const child of part.parts || []) rawAttachmentParts(child, results);
+  return results;
+}
+
+function boundedEnvInteger(name, fallback, minimum, maximum) {
+  const raw = process.env[name];
+  if (raw === undefined || !/^\d+$/.test(raw)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Number(raw)));
+}
+
+async function enrichGenericAttachmentText(state, inspection) {
+  const attachments = Array.isArray(inspection?.attachments) ? inspection.attachments : [];
+  if (attachments.length === 0) return inspection;
+  const maximumAttachments = boundedEnvInteger('HERMES_GMAIL_MAX_ATTACHMENTS', 3, 1, 5);
+  const maximumBytes = boundedEnvInteger('HERMES_GMAIL_MAX_ATTACHMENT_BYTES', 5_000_000, 64_000, 10_000_000);
+  const maximumText = boundedEnvInteger('HERMES_GMAIL_MAX_ATTACHMENT_TEXT', 6_000, 500, 10_000);
+  const candidates = attachments
+    .map((attachment, index) => ({ attachment, index }))
+    .filter(({ attachment }) => {
+      if (typeof attachment?.content_text === 'string' && attachment.content_text.trim()) return false;
+      return EXTRACTABLE_MIME_TYPES.has(inferredMimeType(attachment?.filename, attachment?.mime_type));
+    })
+    .slice(0, maximumAttachments);
+  if (candidates.length === 0) return inspection;
+
+  const [{ googleAccessToken }, { extractAttachmentText }] = await Promise.all([
+    import(GMAIL_TOKEN_LIB_URL),
+    import(GMAIL_READER_LIB_URL),
+  ]);
+  const token = await googleAccessToken(process.env, fetch);
+  const messageId = String(state.signal.external_id);
+  const messageResponse = await fetch(`${GMAIL_API}/messages/${encodeURIComponent(messageId)}?format=full`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const message = await messageResponse.json().catch(() => ({}));
+  if (!messageResponse.ok) throw new Error(`Gmail message attachment read failed with HTTP ${messageResponse.status}`);
+  const rawParts = rawAttachmentParts(message.payload);
+
+  for (const { attachment, index } of candidates) {
+    const exact = rawParts[index] || rawParts.find((part) => part.filename === attachment.filename);
+    const mimeType = inferredMimeType(attachment.filename, exact?.mimeType || attachment.mime_type);
+    attachment.mime_type = mimeType;
+    if (!exact?.attachmentId) {
+      attachment.content_status = 'content_unavailable';
+      continue;
+    }
+    if (exact.sizeBytes !== null && exact.sizeBytes > maximumBytes) {
+      attachment.content_status = 'too_large';
+      continue;
+    }
+    const contentResponse = await fetch(
+      `${GMAIL_API}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(exact.attachmentId)}`,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    const content = await contentResponse.json().catch(() => ({}));
+    if (!contentResponse.ok) {
+      attachment.content_status = `http_${contentResponse.status}`;
+      continue;
+    }
+    const bytes = decodeBase64UrlBytes(content.data);
+    if (bytes.length === 0 || bytes.length > maximumBytes) {
+      attachment.content_status = bytes.length === 0 ? 'empty' : 'too_large';
+      continue;
+    }
+    const extracted = await extractAttachmentText({ bytes, mimeType, maximumText });
+    attachment.content_status = extracted.status;
+    if (extracted.text) attachment.content_text = extracted.text;
+  }
+  return inspection;
+}
+
 function attachmentArrays(value, depth = 0, found = []) {
   if (depth > 6 || !value || typeof value !== 'object') return found;
   if (Array.isArray(value)) {
@@ -130,15 +244,25 @@ function normalizeAttachments(inspection) {
     seen.add(attachmentKey);
     const extractedText = firstString(item, [
       'extractedText', 'extracted_text', 'ocrText', 'ocr_text', 'transcription',
-      'transcript', 'text', 'textContent', 'text_content',
+      'transcript', 'text', 'textContent', 'text_content', 'content_text',
     ]).slice(0, 100_000);
     const rawSize = item.sizeBytes ?? item.size_bytes ?? item.size ?? null;
     const size = Number.parseInt(String(rawSize ?? ''), 10);
-    const requestedStatus = firstString(item, ['status', 'extractionStatus', 'extraction_status']).toLowerCase();
+    const requestedStatus = firstString(item, [
+      'status', 'extractionStatus', 'extraction_status', 'contentStatus', 'content_status',
+    ]).toLowerCase();
     const supportedStatuses = new Set(['metadata', 'extracted', 'no_text', 'unsupported', 'failed']);
     const status = supportedStatuses.has(requestedStatus)
       ? requestedStatus
-      : extractedText ? 'extracted' : 'metadata';
+      : requestedStatus.startsWith('extracted') || extractedText
+        ? 'extracted'
+        : requestedStatus === 'no_text_found'
+          ? 'no_text'
+          : requestedStatus === 'unsupported_type'
+            ? 'unsupported'
+            : /(?:failed|timeout|invalid|http_)/.test(requestedStatus)
+              ? 'failed'
+              : 'metadata';
     const metadata = cleanValue(Object.fromEntries(
       Object.entries(item).filter(([key]) => !/^(data|bytes|raw|base64|bodyData|contentBytes|extractedText|extracted_text|ocrText|ocr_text|transcription|transcript|text|textContent|text_content)$/i.test(key)),
     ));
@@ -184,7 +308,7 @@ async function inspect() {
   if (result.status !== 0) {
     throw new Error(`Gmail reader failed: ${(result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 1000)}`);
   }
-  state.inspection = parseReaderOutput(result.stdout);
+  state.inspection = await enrichGenericAttachmentText(state, parseReaderOutput(result.stdout));
   state.attachments = normalizeAttachments(state.inspection);
   await writeState(state);
   console.log(JSON.stringify({ jobId: state.job.id, attachments: state.attachments, inspection: state.inspection }));
