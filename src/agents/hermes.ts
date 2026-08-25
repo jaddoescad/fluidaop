@@ -51,8 +51,6 @@ interface AgentPresentation {
   icon: string;
   description: string;
   mode: string;
-  steps: string[];
-  historyAgentId: string | null;
 }
 
 const AGENT_PRESENTATIONS: AgentPresentation[] = [
@@ -62,13 +60,6 @@ const AGENT_PRESENTATIONS: AgentPresentation[] = [
     icon: '✉️',
     description: 'Categorizes incoming Gmail signals in Fluid and records attachment evidence without changing Gmail.',
     mode: 'Agent-assisted',
-    historyAgentId: 'email-categorizer',
-    steps: [
-      'Claim new Gmail signals from the durable Supabase queue',
-      'Read the signal and selectively extract relevant attachment text',
-      'Choose one enabled Fluid label with confidence and evidence',
-      'Save the result and audit record in Supabase without writing to Gmail',
-    ],
   },
   {
     match: /fluid customer sync/i,
@@ -76,50 +67,34 @@ const AGENT_PRESENTATIONS: AgentPresentation[] = [
     icon: '👥',
     description: 'Syncs customers from Ottawa Painters Admin to Fluid.',
     mode: 'Scheduled sync',
-    historyAgentId: null,
-    steps: [],
   },
   {
     match: /contractor invoice sync/i,
     name: 'Contractor Invoices',
     icon: '🧾',
-    description: 'Processes contractor invoice evidence for the operations workflow.',
+    description: 'Imports explicit contractor invoice details or defers the invoice for manual review without changing Gmail.',
     mode: 'Scheduled automation',
-    historyAgentId: 'contractor-invoices',
-    steps: [
-      'Find new contractor invoice emails and attachments',
-      'Extract the contractor, job, amount, and invoice date',
-      'Match the evidence to the operations workflow',
-      'Flag anything uncertain for human review',
-    ],
   },
   {
     match: /daily dripjobs/i,
-    name: 'DripJobs Operations',
+    name: 'DripJobs Job Sync',
     icon: '🛠️',
-    description: 'Synchronizes DripJobs sales and job data into the business workspace.',
-    mode: 'Scheduled automation',
-    historyAgentId: 'dripjobs-operations',
-    steps: [
-      'Connect to the DripJobs workspace',
-      'Collect updated leads, jobs, and sales records',
-      'Normalize the records for the Fluid workspace',
-      'Save the sync result and report any failures',
-    ],
+    description: 'Exports active and archived DripJobs jobs, then updates exact-matched amounts and production months.',
+    mode: 'Script-only automation',
   },
   {
-    match: /daily meta ads/i,
-    name: 'Meta Ads Reporter',
+    match: /daily meta ads leads and cpl/i,
+    name: 'Meta Ads Daily Report',
     icon: '📈',
-    description: 'Refreshes campaign data and prepares the daily leads and CPL report.',
-    mode: 'Agent + scheduled sync',
-    historyAgentId: 'meta-ads-reporter',
-    steps: [
-      'Refresh the latest Meta campaign performance',
-      'Calculate leads and cost per lead',
-      'Compare results across active campaigns',
-      'Prepare the daily performance brief',
-    ],
+    description: 'Analyzes Meta Ads results and sends a brief executive Slack update without modifying ads.',
+    mode: 'Scheduled report',
+  },
+  {
+    match: /daily meta ads backend sync/i,
+    name: 'Meta Ads Backend Sync',
+    icon: '↻',
+    description: 'Refreshes the rolling Meta Ads campaign window in the Ottawa Painters backend.',
+    mode: 'Script-only automation',
   },
 ];
 
@@ -132,13 +107,8 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     icon: presentation?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
     description: presentation?.description ?? `Hermes automation running in the ${agent.profile} profile.`,
     mode: presentation?.mode ?? (agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent'),
-    steps: presentation?.steps ?? [
-      'Wake on its Hermes schedule',
-      'Load the skills and tools assigned to this job',
-      'Complete the configured workflow',
-      'Record the run result in Hermes',
-    ],
-    historyAgentId: presentation?.historyAgentId ?? null,
+    steps: [],
+    historyAgentId: null,
   };
 }
 
