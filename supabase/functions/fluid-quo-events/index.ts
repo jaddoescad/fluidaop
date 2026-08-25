@@ -29,15 +29,6 @@ type ActivityInput = {
   updated_at: string;
 };
 
-type ContactInput = {
-  externalId: string | null;
-  name: string;
-  email: string | null;
-  phone: string;
-  normalizedPhone: string;
-  sourceMetadata: Record<string, unknown>;
-};
-
 type ImportRun = {
   id: string;
   connection_id: string;
@@ -50,6 +41,12 @@ type ImportRun = {
   started_at: string;
   completed_at: string | null;
   last_error: string | null;
+};
+
+type ScopePhoneNumber = {
+  id: string;
+  e164: string;
+  label: string | null;
 };
 
 const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
@@ -192,51 +189,10 @@ async function upsertActivities(supabase: SupabaseClient, activities: ActivityIn
   return rows.length;
 }
 
-async function upsertContacts(supabase: SupabaseClient, contacts: ContactInput[]): Promise<number> {
-  let imported = 0;
-  for (const contact of contacts) {
-    const { data: existing, error: findError } = await supabase
-      .from('contacts')
-      .select('id,metadata')
-      .eq('normalized_phone', contact.normalizedPhone)
-      .limit(1)
-      .maybeSingle();
-    if (findError) throw findError;
-    const quoMetadata = {
-      ...(contact.sourceMetadata ?? {}),
-      ...(contact.externalId ? { contactId: contact.externalId } : {}),
-    };
-    if (existing) {
-      const metadata = existing.metadata && typeof existing.metadata === 'object'
-        ? existing.metadata as Record<string, unknown>
-        : {};
-      const { error } = await supabase
-        .from('contacts')
-        .update({ metadata: { ...metadata, quo: quoMetadata }, updated_at: new Date().toISOString() })
-        .eq('id', existing.id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('contacts').insert({
-        id: crypto.randomUUID(),
-        kind: 'other',
-        name: contact.name || contact.phone,
-        email: contact.email,
-        phone: contact.phone,
-        normalized_email: contact.email?.trim().toLowerCase() ?? null,
-        normalized_phone: contact.normalizedPhone,
-        metadata: { quo: quoMetadata },
-      });
-      if (error) throw error;
-    }
-    imported += 1;
-  }
-  return imported;
-}
-
 function validImportBody(value: unknown): value is {
   run: ImportRun;
   activities: ActivityInput[];
-  contacts: ContactInput[];
+  contacts: unknown[];
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const body = value as Record<string, unknown>;
@@ -246,10 +202,91 @@ function validImportBody(value: unknown): value is {
   return true;
 }
 
+function validScopeBody(value: unknown): value is {
+  connectionId: string;
+  phoneNumbers: ScopePhoneNumber[];
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  if (!cleanString(body.connectionId, 200) || !Array.isArray(body.phoneNumbers) || body.phoneNumbers.length > 100) return false;
+  return body.phoneNumbers.every((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const number = item as Record<string, unknown>;
+    return Boolean(cleanString(number.id, 200) && e164(number.e164));
+  });
+}
+
+async function activeScope(supabase: SupabaseClient): Promise<{
+  ids: Set<string>;
+  phones: Set<string>;
+}> {
+  const { data, error } = await supabase
+    .from('quo_phone_scopes')
+    .select('phone_number_id,phone_number_e164')
+    .eq('active', true);
+  if (error) throw error;
+  return {
+    ids: new Set((data ?? []).map((row) => row.phone_number_id)),
+    phones: new Set((data ?? []).map((row) => row.phone_number_e164)),
+  };
+}
+
+function activityIsInScope(
+  activity: ActivityInput,
+  scope: { ids: Set<string>; phones: Set<string> },
+): boolean {
+  const rawPhoneNumberId = activity.source_metadata.phoneNumberId;
+  const phoneNumberId = typeof rawPhoneNumberId === 'string' ? rawPhoneNumberId : null;
+  return Boolean(
+    (phoneNumberId && scope.ids.has(phoneNumberId)) ||
+    scope.phones.has(activity.account_phone),
+  );
+}
+
+async function replaceScope(
+  supabase: SupabaseClient,
+  connectionId: string,
+  phoneNumbers: ScopePhoneNumber[],
+): Promise<void> {
+  const { data: existing, error: existingError } = await supabase
+    .from('quo_phone_scopes')
+    .select('phone_number_id')
+    .eq('connection_id', connectionId);
+  if (existingError) throw existingError;
+
+  if (phoneNumbers.length > 0) {
+    const rows = phoneNumbers.map((number) => ({
+      connection_id: connectionId,
+      phone_number_id: number.id,
+      phone_number_e164: number.e164,
+      label: number.label,
+      active: true,
+      updated_at: new Date().toISOString(),
+    }));
+    const { error } = await supabase
+      .from('quo_phone_scopes')
+      .upsert(rows, { onConflict: 'connection_id,phone_number_id' });
+    if (error) throw error;
+  }
+
+  const selectedIds = new Set(phoneNumbers.map((number) => number.id));
+  const removeIds = (existing ?? [])
+    .map((row) => row.phone_number_id)
+    .filter((id) => !selectedIds.has(id));
+  if (removeIds.length > 0) {
+    const { error } = await supabase
+      .from('quo_phone_scopes')
+      .delete()
+      .eq('connection_id', connectionId)
+      .in('phone_number_id', removeIds);
+    if (error) throw error;
+  }
+}
+
 async function handleInternal(req: Request, supabase: SupabaseClient, action: string): Promise<Response> {
   if (!authorizedInternal(req)) return response({ error: 'Unauthorized' }, 401);
   if (req.method === 'GET' && action === 'status') {
-    const [eventResult, importResult] = await Promise.all([
+    const [eventResult, importResult, scopeResult] = await Promise.all([
       supabase
         .from('quo_webhook_events')
         .select('event_type,processing_status,received_at,processed_at,last_error')
@@ -262,24 +299,42 @@ async function handleInternal(req: Request, supabase: SupabaseClient, action: st
         .order('started_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
+      supabase
+        .from('quo_phone_scopes')
+        .select('phone_number_id,phone_number_e164,label')
+        .eq('active', true)
+        .order('phone_number_e164'),
     ]);
     if (eventResult.error) throw eventResult.error;
     if (importResult.error) throw importResult.error;
+    if (scopeResult.error) throw scopeResult.error;
     return response({
       signingSecretConfigured: Boolean(Deno.env.get('QUO_WEBHOOK_SIGNING_SECRET')?.trim()),
       lastEvent: eventResult.data,
       lastImport: importResult.data,
+      selectedPhoneNumbers: scopeResult.data ?? [],
     });
+  }
+
+  if (req.method === 'POST' && action === 'scope') {
+    const body: unknown = await req.json().catch(() => null);
+    if (!validScopeBody(body)) return response({ error: 'Invalid Quo phone-line scope' }, 400);
+    await replaceScope(supabase, body.connectionId, body.phoneNumbers);
+    return response({ selected: body.phoneNumbers.length });
   }
 
   if (req.method === 'POST' && action === 'backfill') {
     const body: unknown = await req.json().catch(() => null);
     if (!validImportBody(body)) return response({ error: 'Invalid Quo import batch' }, 400);
-    const importedContacts = await upsertContacts(supabase, body.contacts);
-    const importedActivities = await upsertActivities(supabase, body.activities);
+    if (body.contacts.length > 0) {
+      return response({ error: 'Workspace-wide Quo contact imports are disabled' }, 409);
+    }
+    const scope = await activeScope(supabase);
+    const scopedActivities = body.activities.filter((activity) => activityIsInScope(activity, scope));
+    const importedActivities = await upsertActivities(supabase, scopedActivities);
     const { error } = await supabase.from('quo_import_runs').upsert(body.run, { onConflict: 'id' });
     if (error) throw error;
-    return response({ imported: importedContacts + importedActivities });
+    return response({ imported: importedActivities });
   }
 
   return response({ error: 'Not found' }, 404);
@@ -367,6 +422,13 @@ Deno.serve(async (req: Request) => {
       return response({ error: 'Invalid webhook event' }, 400);
     }
 
+    const activity = webhookActivity(payload);
+    const scope = await activeScope(supabase);
+    if (activity === null || !activityIsInScope(activity, scope)) {
+      // Do not retain payloads for phone lines the workspace did not select.
+      return response({ ok: true, ignored: true });
+    }
+
     const existingResult = await supabase
       .from('quo_webhook_events')
       .select('processing_status,attempts')
@@ -398,12 +460,10 @@ Deno.serve(async (req: Request) => {
     if (eventError) throw eventError;
 
     try {
-      const activity = webhookActivity(payload);
-      const status = activity === null ? 'ignored' : 'processed';
-      if (activity !== null) await upsertActivities(supabase, [activity]);
+      await upsertActivities(supabase, [activity]);
       const { error } = await supabase
         .from('quo_webhook_events')
-        .update({ processing_status: status, processed_at: new Date().toISOString(), last_error: null })
+        .update({ processing_status: 'processed', processed_at: new Date().toISOString(), last_error: null })
         .eq('event_id', eventId);
       if (error) throw error;
       return response({ ok: true });

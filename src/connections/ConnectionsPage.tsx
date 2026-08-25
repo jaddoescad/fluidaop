@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import '../variants/flow.css';
@@ -35,6 +35,7 @@ interface QuoConnection {
   id: string;
   provider: 'quo';
   phoneNumbers: QuoPhoneNumber[];
+  selectedPhoneNumberIds: string[];
   status: 'connected' | 'error' | 'checking';
   createdAt: string;
   updatedAt: string;
@@ -160,6 +161,11 @@ function fmtFuture(iso: string | null, now: number): string {
   if (diff < 90_000) return 'in about a minute';
   if (diff < 3_600_000) return `in about ${Math.round(diff / 60_000)} minutes`;
   return `at ${new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+function fmtPhone(phone: string): string {
+  const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(phone);
+  return match ? `(${match[1]}) ${match[2]}-${match[3]}` : phone;
 }
 
 /** "every 5 minutes" — worded from the interval the server actually returns. */
@@ -374,12 +380,12 @@ function ConnectedCard({
   );
 }
 
-function QuoWebhookLine({ webhook, now }: { webhook: QuoConnection['webhook']; now: number }) {
+function QuoWebhookSection({ webhook, now }: { webhook: QuoConnection['webhook']; now: number }) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   if (webhook.state === 'receiving') {
     return (
-      <p className="cn-webhook cn-webhook-ok">
+      <p className="cn-manage-ok">
         <i className="cn-dot" />
         Receiving events
         {webhook.lastEventAt !== null && <span> · last event {fmtPast(webhook.lastEventAt, now, 'never')}</span>}
@@ -397,11 +403,11 @@ function QuoWebhookLine({ webhook, now }: { webhook: QuoConnection['webhook']; n
     }
   };
   return (
-    <div className="cn-webhook cn-webhook-pending" role="status">
-      <p><i className="cn-dot cn-dot-breathe" /> Setup needed — add this URL as the webhook in Quo</p>
+    <>
+      <p className="cn-manage-note">Add this URL as the webhook in Quo to start receiving calls and texts.</p>
       <div className="cn-webhook-url-row">
         <code className="cn-webhook-url">{webhook.url || 'Supabase webhook URL unavailable'}</code>
-        {webhook.url && (
+        {webhook.url !== '' && (
           <button type="button" className="cn-btn cn-btn-sm" onClick={() => void copy()}>
             {copied ? 'Copied' : 'Copy'}
           </button>
@@ -409,11 +415,11 @@ function QuoWebhookLine({ webhook, now }: { webhook: QuoConnection['webhook']; n
         <span aria-live="polite" className="cn-sr">{copied ? 'Copied to clipboard' : ''}</span>
       </div>
       {copyError && <p className="cn-hint">Couldn’t copy — select the URL and copy it manually.</p>}
-    </div>
+    </>
   );
 }
 
-type ImportKind = 'contacts' | 'messages' | 'calls';
+type ImportKind = 'messages' | 'calls';
 type ImportFileState =
   | { phase: 'idle' }
   | { phase: 'selected'; file: File }
@@ -422,14 +428,13 @@ type ImportFileState =
   | { phase: 'error'; file: File; message: string };
 
 const IMPORT_ROWS: { kind: ImportKind; title: string; hint: string }[] = [
-  { kind: 'contacts', title: 'Contacts', hint: 'CSV exported from Quo → Contacts' },
   { kind: 'messages', title: 'Message logs', hint: 'CSV exported from Quo → Messages' },
   { kind: 'calls', title: 'Call logs', hint: 'CSV exported from Quo → Calls' },
 ];
 
-function QuoImportPanel({ panelId, connectionId }: { panelId: string; connectionId: string }) {
+function QuoImportPanel({ connectionId }: { connectionId: string }) {
   const [rows, setRows] = useState<Record<ImportKind, ImportFileState>>({
-    contacts: { phase: 'idle' }, messages: { phase: 'idle' }, calls: { phase: 'idle' },
+    messages: { phase: 'idle' }, calls: { phase: 'idle' },
   });
   const pickFile = (kind: ImportKind, file: File | null) => {
     setRows((current) => ({
@@ -467,8 +472,8 @@ function QuoImportPanel({ panelId, connectionId }: { panelId: string; connection
     }
   };
   return (
-    <div id={panelId} className="cn-import" role="group" aria-label="Import Quo history from CSV exports">
-      <p className="cn-import-note">Upload CSV exports from Quo. Each file imports independently.</p>
+    <div className="cn-import">
+      <p className="cn-manage-note">Upload CSV exports from Quo. Each file imports independently.</p>
       {IMPORT_ROWS.map(({ kind, title, hint }) => {
         const state = rows[kind];
         const inputId = `cn-import-${connectionId}-${kind}`;
@@ -521,76 +526,99 @@ function ConnectedQuoCard({
   now,
   busy,
   confirming,
-  importOpen,
+  manageOpen,
   onCheck,
   onDisconnect,
   onConfirmChange,
-  onToggleImport,
+  onManageChange,
+  onScopeSave,
 }: {
   c: QuoConnection;
   now: number;
   busy: boolean;
   confirming: boolean;
-  importOpen: boolean;
+  manageOpen: boolean;
   onCheck: () => void;
   onDisconnect: () => void;
   onConfirmChange: (open: boolean) => void;
-  onToggleImport: () => void;
+  onManageChange: (open: boolean) => void;
+  onScopeSave: (phoneNumberIds: string[]) => Promise<void>;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuWrapRef = useRef<HTMLDivElement | null>(null);
-  const manageRef = useRef<HTMLButtonElement | null>(null);
-  const menuItemRef = useRef<HTMLButtonElement | null>(null);
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (!menuOpen) return;
-    menuItemRef.current?.focus();
-    const onDown = (event: PointerEvent) => {
-      if (menuWrapRef.current !== null && !menuWrapRef.current.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setMenuOpen(false);
-        manageRef.current?.focus();
-      }
-    };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [menuOpen]);
+  const [scopeDraft, setScopeDraft] = useState<string[]>(c.selectedPhoneNumberIds);
+  const [scopeError, setScopeError] = useState<string | null>(null);
   useEffect(() => {
     if (confirming) cancelRef.current?.focus();
   }, [confirming]);
+  useEffect(() => {
+    setScopeDraft(c.selectedPhoneNumberIds);
+    setScopeError(null);
+  }, [c.selectedPhoneNumberIds]);
   const checking = busy || c.status === 'checking';
-  const single = c.phoneNumbers.length === 1;
-  const identity = single ? c.phoneNumbers[0]?.e164 ?? 'Quo' : 'Quo';
+  const selectedNumbers = c.phoneNumbers.filter((number) => c.selectedPhoneNumberIds.includes(number.id));
+  const selectedCount = selectedNumbers.length;
+  const lineSummary = selectedCount === 0
+    ? 'Capture off'
+    : selectedCount === 1
+      ? selectedNumbers[0]?.label || (selectedNumbers[0] ? fmtPhone(selectedNumbers[0].e164) : '1 phone line')
+      : `${selectedCount} phone lines`;
+  const scopeChanged = [...scopeDraft].sort().join(',') !== [...c.selectedPhoneNumberIds].sort().join(',');
+  const panelId = `cn-quo-manage-${c.id}`;
+  const toggleScope = (id: string) => {
+    setScopeDraft((current) => current.includes(id)
+      ? current.filter((currentId) => currentId !== id)
+      : [...current, id]);
+    setScopeError(null);
+  };
+  const saveScope = async () => {
+    setScopeError(null);
+    try {
+      await onScopeSave(scopeDraft);
+    } catch (error) {
+      setScopeError(errText(error));
+    }
+  };
   return (
-    <section className="cn-card" aria-label={`Quo — ${c.phoneNumbers.map((number) => number.e164).join(', ')}`}>
+    <section className="cn-card" aria-label={`Quo — ${lineSummary}`}>
       <div className="cn-card-head">
         <QuoLogo />
         <div className="cn-who">
-          <b>{identity}</b>
-          <span>{single ? 'Quo' : `${c.phoneNumbers.length} phone numbers`}</span>
+          <b>Quo</b>
+          <span>Business phone &amp; SMS</span>
         </div>
         <StatusPill status={c.status} />
       </div>
-      {!single && (
-        <ul className="cn-numbers">
-          {c.phoneNumbers.map((number) => (
-            <li key={number.id}>
-              <span className="cn-number">{number.e164}</span>
-              {number.label !== null && <span className="cn-number-label">{number.label}</span>}
-            </li>
-          ))}
-        </ul>
-      )}
+      <div className="cn-quo-summary">
+        <span>{lineSummary}</span>
+        {selectedCount === 0 ? (
+          <button
+            type="button"
+            className="cn-cue"
+            aria-expanded={manageOpen}
+            aria-controls={panelId}
+            onClick={() => onManageChange(true)}
+          >
+            <i className="cn-dot" /> Choose a phone line
+          </button>
+        ) : c.webhook.state === 'receiving' ? (
+          <span className="cn-quo-live">
+            <i className="cn-dot" /> Receiving events
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="cn-cue"
+            aria-expanded={manageOpen}
+            aria-controls={panelId}
+            onClick={() => onManageChange(true)}
+          >
+            <i className="cn-dot" /> Finish webhook setup
+          </button>
+        )}
+      </div>
       {c.status === 'error' && (
         <p className="cn-problem">{c.error ?? 'The last health check failed. Try a manual check, or reconnect.'}</p>
       )}
-      <QuoWebhookLine webhook={c.webhook} now={now} />
       {confirming ? (
         <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
           <p>Disconnect <b>Quo</b>? Fluid loses access to this workspace’s calls and texts immediately. Nothing in Quo itself is deleted.</p>
@@ -602,24 +630,78 @@ function ConnectedQuoCard({
           </div>
         </div>
       ) : (
-        <div className="cn-card-foot">
-          <dl className="cn-meta">
-            <div className="cn-meta-item"><dt>Last checked</dt><dd title={fmtAbs(c.lastCheckedAt)}>{fmtPast(c.lastCheckedAt, now, 'not yet')}</dd></div>
-            <div className="cn-meta-item"><dt>Next check</dt><dd title={fmtAbs(c.nextCheckAt)}>{fmtFuture(c.nextCheckAt, now)}</dd></div>
-          </dl>
-          <div className="cn-actions">
-            <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>{checking ? 'Checking…' : 'Check now'}</button>
-            <button type="button" className="cn-btn" aria-expanded={importOpen} aria-controls={`cn-import-${c.id}`} onClick={onToggleImport}>Import history</button>
-            <div className="cn-menu-wrap" ref={menuWrapRef}>
-              <button ref={manageRef} type="button" className="cn-btn cn-btn-icon" aria-label="Manage Quo" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
-                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="3" cy="8" r="1.4" fill="currentColor" /><circle cx="8" cy="8" r="1.4" fill="currentColor" /><circle cx="13" cy="8" r="1.4" fill="currentColor" /></svg>
+        <>
+          <div className="cn-card-foot">
+            <dl className="cn-meta">
+              <div className="cn-meta-item"><dt>Last checked</dt><dd title={fmtAbs(c.lastCheckedAt)}>{fmtPast(c.lastCheckedAt, now, 'not yet')}</dd></div>
+              <div className="cn-meta-item"><dt>Next check</dt><dd title={fmtAbs(c.nextCheckAt)}>{fmtFuture(c.nextCheckAt, now)}</dd></div>
+            </dl>
+            <div className="cn-actions">
+              <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>{checking ? 'Checking…' : 'Check now'}</button>
+              <button
+                type="button"
+                className="cn-btn"
+                aria-expanded={manageOpen}
+                aria-controls={panelId}
+                onClick={() => onManageChange(!manageOpen)}
+              >
+                Manage
+                <svg className="cn-chev" viewBox="0 0 10 10" width="9" height="9" aria-hidden="true" focusable="false">
+                  <path d="M1.5 3.5 5 7l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
-              {menuOpen && <div className="cn-menu" role="menu"><button ref={menuItemRef} type="button" role="menuitem" className="cn-menu-item cn-menu-item-danger" onClick={() => { setMenuOpen(false); onConfirmChange(true); }}>Disconnect…</button></div>}
             </div>
           </div>
-        </div>
+          {manageOpen && (
+            <div id={panelId} className="cn-manage">
+              <section aria-label="Phone lines">
+                <h3 className="cn-manage-label">Captured phone lines</h3>
+                <p className="cn-manage-note">Only checked lines can enter Activity. Unchecked lines are ignored during imports and webhook delivery.</p>
+                <div className="cn-scope-options" role="group" aria-label="Choose Quo phone lines to capture">
+                  {c.phoneNumbers.map((number) => (
+                    <label className="cn-scope-option" key={number.id}>
+                      <input
+                        type="checkbox"
+                        checked={scopeDraft.includes(number.id)}
+                        disabled={busy}
+                        onChange={() => toggleScope(number.id)}
+                      />
+                      <span className="cn-scope-copy">
+                        <b>{number.label || 'Unnamed line'}</b>
+                        <span>{fmtPhone(number.e164)}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="cn-scope-actions">
+                  <button type="button" className="cn-btn cn-btn-sm cn-btn-primary" disabled={busy || !scopeChanged} onClick={() => void saveScope()}>
+                    {busy ? 'Saving…' : 'Save phone lines'}
+                  </button>
+                  <span>{scopeDraft.length === 0 ? 'No calls or texts will be captured.' : `${scopeDraft.length} selected`}</span>
+                </div>
+                {scopeError !== null && <p className="cn-import-status cn-import-status-err" role="alert">{scopeError}</p>}
+              </section>
+              {selectedCount > 0 && (
+                <section aria-label="Webhook">
+                  <h3 className="cn-manage-label">Webhook</h3>
+                  <QuoWebhookSection webhook={c.webhook} now={now} />
+                </section>
+              )}
+              {selectedCount > 0 && (
+                <section aria-label="Import history">
+                  <h3 className="cn-manage-label">Import history</h3>
+                  <QuoImportPanel connectionId={c.id} />
+                </section>
+              )}
+              <section aria-label="Disconnect">
+                <button type="button" className="cn-btn cn-btn-sm cn-btn-danger" onClick={() => onConfirmChange(true)}>
+                  Disconnect…
+                </button>
+              </section>
+            </div>
+          )}
+        </>
       )}
-      {importOpen && <QuoImportPanel panelId={`cn-import-${c.id}`} connectionId={c.id} />}
     </section>
   );
 }
@@ -629,9 +711,11 @@ function ConnectedQuoCard({
 export function ConnectionsPage({
   d,
   onNavigate,
+  header,
 }: {
   d: Derived;
   onNavigate: (label: string) => void;
+  header: ReactNode;
 }) {
   const [payload, setPayload] = useState<ConnectionsPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -643,7 +727,7 @@ export function ConnectionsPage({
   const [quoConnecting, setQuoConnecting] = useState(false);
   const [quoApiKey, setQuoApiKey] = useState('');
   const [confirmId, setConfirmId] = useState<string | null>(null);
-  const [importOpenId, setImportOpenId] = useState<string | null>(null);
+  const [manageOpenId, setManageOpenId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(async (silent: boolean) => {
@@ -732,11 +816,42 @@ export function ConnectionsPage({
       setPayload((current) => current === null
         ? current
         : { ...current, connections: [...current.connections.filter((item) => item.provider !== 'quo'), connection] });
-      setNotice({ tone: 'ok', text: 'Quo connected.', detail: `${connection.phoneNumbers.length} phone number${connection.phoneNumbers.length === 1 ? '' : 's'} available.` });
+      setManageOpenId(connection.id);
+      setNotice({ tone: 'ok', text: 'Quo connected.', detail: 'Choose which phone line Fluid is allowed to capture.' });
     } catch (error) {
       setActionError(`Couldn’t connect Quo: ${errText(error)}.`);
     } finally {
       setQuoConnecting(false);
+    }
+  };
+
+  const saveQuoScope = async (c: QuoConnection, phoneNumberIds: string[]) => {
+    setBusyId(c.id);
+    setActionError(null);
+    try {
+      const { connection } = await api<{ connection: QuoConnection }>(
+        `/api/connections/quo/${encodeURIComponent(c.id)}/scope`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phoneNumberIds }),
+        },
+      );
+      setPayload((current) => current === null
+        ? current
+        : { ...current, connections: current.connections.map((item) => item.id === connection.id ? connection : item) });
+      setNotice({
+        tone: 'ok',
+        text: phoneNumberIds.length === 0 ? 'Quo capture is off.' : 'Quo phone-line scope saved.',
+        detail: phoneNumberIds.length === 0
+          ? 'No Quo calls or texts will enter Activity.'
+          : `Only ${phoneNumberIds.length} selected phone line${phoneNumberIds.length === 1 ? '' : 's'} can enter Activity.`,
+      });
+    } catch (error) {
+      setActionError(`Couldn’t save Quo phone lines: ${errText(error)}.`);
+      throw error;
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -795,6 +910,7 @@ export function ConnectionsPage({
       <div className="fl-shell">
         <SideNav d={d} active="Connections" onNav={onNavigate} />
         <div className="fl-frame">
+          {header}
           <main className="cn-main">
             <div className="cn-inner">
               <header className="cn-head">
@@ -913,17 +1029,27 @@ export function ConnectionsPage({
                           <div className="cn-who"><b>Quo</b><span>Business phone &amp; SMS</span></div>
                           <StatusPill status="off" />
                         </div>
-                        <p className="cn-card-text">Paste your Quo workspace API key. Fluid stores it encrypted on the server.</p>
-                        <div className="cn-field">
-                          <label htmlFor="quo-api-key" className="cn-field-label">API key</label>
-                          <input id="quo-api-key" type="password" autoComplete="off" spellCheck={false} className="cn-key-input" placeholder="Paste API key" value={quoApiKey} onChange={(event) => setQuoApiKey(event.target.value)} disabled={!payload.quo.configured || quoConnecting} />
-                        </div>
-                        <div className="cn-actions">
-                          <button type="button" className="cn-btn cn-btn-primary" onClick={() => void connectQuo()} disabled={!payload.quo.configured || quoConnecting || quoApiKey.trim() === ''}>
-                            {quoConnecting ? 'Connecting…' : 'Connect Quo'}
+                        <p className="cn-card-text">Bring the business phone into Fluid — calls and texts, one workspace.</p>
+                        <form
+                          className="cn-connect-row"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            if (payload.quo.configured && !quoConnecting && quoApiKey.trim() !== '') void connectQuo();
+                          }}
+                        >
+                          <label htmlFor="quo-api-key" className="cn-sr">Quo API key</label>
+                          <input id="quo-api-key" type="password" autoComplete="off" spellCheck={false} className="cn-key-input" placeholder="Quo API key" value={quoApiKey} onChange={(event) => setQuoApiKey(event.target.value)} disabled={!payload.quo.configured || quoConnecting} />
+                          <button type="submit" className="cn-btn cn-btn-primary" disabled={!payload.quo.configured || quoConnecting || quoApiKey.trim() === ''}>
+                            {quoConnecting ? 'Connecting…' : 'Connect'}
                           </button>
-                        </div>
-                        <p className="cn-hint">The key never comes back to this browser.</p>
+                        </form>
+                        <p className="cn-keynote">
+                          <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true" focusable="false">
+                            <rect x="2.2" y="5.2" width="7.6" height="5.3" rx="1.4" fill="currentColor" />
+                            <path d="M4 5V3.8a2 2 0 0 1 4 0V5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+                          </svg>
+                          Stored encrypted on the server
+                        </p>
                       </section>}
                     </section>
                   )}
@@ -949,11 +1075,12 @@ export function ConnectionsPage({
                           now={now}
                           busy={busyId === c.id}
                           confirming={confirmId === c.id}
-                          importOpen={importOpenId === c.id}
+                          manageOpen={manageOpenId === c.id}
                           onCheck={() => void checkNow(c.id)}
                           onDisconnect={() => void disconnect(c)}
                           onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
-                          onToggleImport={() => setImportOpenId((id) => id === c.id ? null : c.id)}
+                          onManageChange={(open) => setManageOpenId(open ? c.id : null)}
+                          onScopeSave={(phoneNumberIds) => saveQuoScope(c, phoneNumberIds)}
                         />
                       ))}
                       <p className="cn-quiet">Automatic health checks {interval}.</p>

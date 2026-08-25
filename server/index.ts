@@ -40,6 +40,7 @@ interface StoredGmailConnection extends StoredConnectionBase {
 interface StoredQuoConnection extends StoredConnectionBase {
   provider: 'quo';
   phoneNumbers: QuoPhoneNumber[];
+  selectedPhoneNumberIds: string[];
   encryptedApiKey: string;
 }
 
@@ -289,6 +290,16 @@ async function loadStore(): Promise<void> {
       throw new Error('unsupported data format');
     }
     store = { version: 1, connections: parsed.connections as StoredConnection[] };
+    let migrated = false;
+    for (const connection of store.connections) {
+      if (connection.provider === 'quo' && !Array.isArray(connection.selectedPhoneNumberIds)) {
+        // Older connections discovered every accessible line but did not distinguish
+        // discovery from capture consent. Default safely to no active lines.
+        connection.selectedPhoneNumberIds = [];
+        migrated = true;
+      }
+    }
+    if (migrated) await saveStore();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw new Error(`Could not read connection store at ${storePath}: ${errorMessage(error)}`);
@@ -349,7 +360,13 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
   } catch {
     // The API-key connection remains usable if webhook setup is incomplete.
   }
-  return { ...common, provider: 'quo', phoneNumbers: connection.phoneNumbers, webhook };
+  return {
+    ...common,
+    provider: 'quo',
+    phoneNumbers: connection.phoneNumbers,
+    selectedPhoneNumberIds: connection.selectedPhoneNumberIds,
+    webhook,
+  };
 }
 
 function originFor(req: Request): string {
@@ -433,6 +450,11 @@ async function getQuoPhoneNumbers(apiKey: string): Promise<QuoPhoneNumber[]> {
   return numbers;
 }
 
+function selectedQuoPhoneNumbers(connection: StoredQuoConnection): QuoPhoneNumber[] {
+  const selected = new Set(connection.selectedPhoneNumberIds);
+  return connection.phoneNumbers.filter((number) => selected.has(number.id));
+}
+
 async function activityFunctionJson<T>(
   action: 'list' | 'signal' | 'history' | 'state' | 'labels' | 'label' | 'agent-history' | 'upsert',
   search: Record<string, string>,
@@ -474,7 +496,7 @@ function quoWebhookUrl(): string {
 }
 
 async function quoFunctionJson<T>(
-  action: 'status' | 'backfill',
+  action: 'status' | 'backfill' | 'scope',
   init?: RequestInit,
 ): Promise<T> {
   requireDatabaseConfigured();
@@ -504,6 +526,13 @@ async function quoFunctionJson<T>(
     throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
   }
   return payload as T;
+}
+
+async function syncQuoScope(connection: StoredQuoConnection, phoneNumbers: QuoPhoneNumber[]): Promise<void> {
+  await quoFunctionJson('scope', {
+    method: 'POST',
+    body: JSON.stringify({ connectionId: connection.id, phoneNumbers }),
+  });
 }
 
 async function customerFunctionJson<T>(
@@ -648,7 +677,11 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
         throw new Error(`Google returned a different mailbox (${actualEmail ?? 'unknown'})`);
       }
     } else {
-      connection.phoneNumbers = await getQuoPhoneNumbers(decryptToken(connection.encryptedApiKey));
+      const phoneNumbers = await getQuoPhoneNumbers(decryptToken(connection.encryptedApiKey));
+      const availableIds = new Set(phoneNumbers.map((number) => number.id));
+      connection.selectedPhoneNumberIds = connection.selectedPhoneNumberIds.filter((id) => availableIds.has(id));
+      connection.phoneNumbers = phoneNumbers;
+      await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
     }
     const checkedAt = new Date().toISOString();
     connection.status = 'connected';
@@ -1007,6 +1040,8 @@ app.post('/api/connections/quo/connect', async (req, res, next) => {
       id: existing?.id ?? 'quo:workspace',
       provider: 'quo',
       phoneNumbers,
+      selectedPhoneNumberIds: (existing?.selectedPhoneNumberIds ?? [])
+        .filter((id) => phoneNumbers.some((number) => number.id === id)),
       status: 'connected',
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -1015,10 +1050,37 @@ app.post('/api/connections/quo/connect', async (req, res, next) => {
       error: null,
       encryptedApiKey: encryptToken(apiKey),
     };
+    await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
     if (existing) Object.assign(existing, connection);
     else store.connections.push(connection);
     await saveStore();
     res.status(existing ? 200 : 201).json({ connection: await toPublicConnection(connection) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/connections/quo/:id/scope', async (req, res, next) => {
+  try {
+    const connection = store.connections.find(
+      (item): item is StoredQuoConnection => item.provider === 'quo' && item.id === req.params.id,
+    );
+    if (!connection) throw new HttpError(404, 'Quo connection not found');
+    const rawIds = req.body?.phoneNumberIds;
+    if (!Array.isArray(rawIds) || rawIds.length > connection.phoneNumbers.length) {
+      throw new HttpError(400, 'Choose valid Quo phone lines');
+    }
+    const selectedIds = [...new Set(rawIds.filter((id): id is string => typeof id === 'string' && id.trim() !== ''))];
+    const availableIds = new Set(connection.phoneNumbers.map((number) => number.id));
+    if (selectedIds.some((id) => !availableIds.has(id))) {
+      throw new HttpError(400, 'One or more selected Quo phone lines are unavailable');
+    }
+    const selectedNumbers = connection.phoneNumbers.filter((number) => selectedIds.includes(number.id));
+    await syncQuoScope(connection, selectedNumbers);
+    connection.selectedPhoneNumberIds = selectedIds;
+    connection.updatedAt = new Date().toISOString();
+    await saveStore();
+    res.json({ connection: await toPublicConnection(connection) });
   } catch (error) {
     next(error);
   }
@@ -1041,11 +1103,16 @@ app.post(
       const rawKind = typeof req.query.kind === 'string' ? req.query.kind : '';
       kind = rawKind === 'contacts' || rawKind === 'messages' || rawKind === 'calls' ? rawKind : null;
       if (!kind) throw new HttpError(400, 'Import kind must be contacts, messages, or calls');
+      if (kind === 'contacts') {
+        throw new HttpError(409, 'Quo contact exports are workspace-wide. Import message or call history after choosing a phone line instead.');
+      }
       filename = typeof req.headers['x-fluid-filename'] === 'string'
         ? decodeURIComponent(req.headers['x-fluid-filename']).replace(/[\r\n]/g, '').slice(0, 240)
         : filename;
       if (typeof req.body !== 'string') throw new HttpError(400, 'Upload a CSV file');
-      const parsed = parseQuoExport(kind, req.body, connection.phoneNumbers);
+      const selectedNumbers = selectedQuoPhoneNumbers(connection);
+      if (selectedNumbers.length === 0) throw new HttpError(409, 'Choose at least one Quo phone line before importing history');
+      const parsed = parseQuoExport(kind, req.body, selectedNumbers);
       let rowsImported = 0;
       const batches = Math.max(1, Math.ceil(Math.max(parsed.activities.length, parsed.contacts.length) / 400));
       for (let index = 0; index < batches; index += 1) {
@@ -1152,6 +1219,10 @@ app.delete('/api/connections/:id', async (req, res, next) => {
       } catch (error) {
         console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
       }
+    } else {
+      await syncQuoScope(connection, []).catch((error) => {
+        console.warn(`Quo capture scope could not be cleared remotely: ${publicQuoError(error)}`);
+      });
     }
     store.connections.splice(index, 1);
     await saveStore();
