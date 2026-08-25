@@ -342,6 +342,37 @@ async function activityFunctionJson<T>(
   return payload as T;
 }
 
+async function customerFunctionJson<T>(
+  action: 'status' | 'people',
+  search: Record<string, string> = {},
+): Promise<T> {
+  requireActivityConfigured();
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-customer-sync`);
+  url.searchParams.set('action', action);
+  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      payload = raw;
+    }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Supabase people service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
 function googleResponseError(payload: unknown): string | null {
   if (typeof payload === 'string') return payload.slice(0, 240);
   if (!payload || typeof payload !== 'object') return null;
@@ -816,6 +847,37 @@ app.get('/api/activities', async (req, res, next) => {
       ...(payload && typeof payload === 'object' ? payload : {}),
       automaticSyncIntervalMs: gmailActivitySyncIntervalMs,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/people', async (req, res, next) => {
+  try {
+    const allowedRoles = new Set(['customer', 'employee', 'painter']);
+    const role = typeof req.query.role === 'string' ? req.query.role.trim().toLowerCase() : 'customer';
+    if (!allowedRoles.has(role)) throw new HttpError(400, 'Invalid people role');
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const rawOffset = typeof req.query.offset === 'string' ? req.query.offset : '0';
+    if (!/^\d+$/.test(rawOffset)) throw new HttpError(400, 'Invalid people offset');
+    const offset = Math.min(100_000, Number.parseInt(rawOffset, 10));
+    const payload = await customerFunctionJson<unknown>('people', {
+      role,
+      limit: String(limit),
+      offset: String(offset),
+    });
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/people/sync-status', async (_req, res, next) => {
+  try {
+    res.json(await customerFunctionJson<unknown>('status'));
   } catch (error) {
     next(error);
   }

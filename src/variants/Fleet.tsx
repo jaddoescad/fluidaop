@@ -4,6 +4,7 @@ import { AgentsPage } from '../agents/AgentsPage';
 import { HermesAgentDefinition, HermesStatus, loadHermesAgents, loadHermesStatus } from '../agents/hermes';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
+import { PeoplePage } from '../people/PeoplePage';
 import { SkillsPage } from '../skills/SkillsPage';
 import { agentFor } from '../engine';
 import { fmtAge } from '../time';
@@ -33,13 +34,14 @@ import './fleet.css';
  * the person dossier stays one click deeper. Roster lives in the side nav.
  */
 
-type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Connections';
+type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Connections' | 'People';
 
 function pageFromPath(): AppPage {
   if (window.location.pathname === '/agents') return 'Agents';
   if (window.location.pathname === '/skills') return 'Skills';
   if (window.location.pathname === '/connections') return 'Connections';
   if (window.location.pathname === '/labels') return 'Labels';
+  if (window.location.pathname === '/people') return 'People';
   if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
   return 'Board';
 }
@@ -91,6 +93,7 @@ export function FleetV({ s, act }: VProps) {
       label !== 'Skills' &&
       label !== 'Activity' &&
       label !== 'Labels' &&
+      label !== 'People' &&
       label !== 'Connections'
     )
       return;
@@ -103,6 +106,8 @@ export function FleetV({ s, act }: VProps) {
         ? '/connections'
         : label === 'Labels'
           ? '/labels'
+          : label === 'People'
+            ? '/people'
           : label === 'Activity'
             ? '/activity'
             : '/';
@@ -114,6 +119,7 @@ export function FleetV({ s, act }: VProps) {
   if (page === 'Skills') return <SkillsPage d={d} onNavigate={navigate} />;
   if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} />;
   if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} />;
+  if (page === 'People') return <PeoplePage d={d} onNavigate={navigate} />;
   if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} />;
 
   const fname = d.focusPerson?.name ?? null;

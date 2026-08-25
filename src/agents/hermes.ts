@@ -52,7 +52,7 @@ interface AgentPresentation {
   description: string;
   mode: string;
   steps: string[];
-  historyAgentId: string;
+  historyAgentId: string | null;
 }
 
 const AGENT_PRESENTATIONS: AgentPresentation[] = [
@@ -68,6 +68,20 @@ const AGENT_PRESENTATIONS: AgentPresentation[] = [
       'Read the signal and selectively extract relevant attachment text',
       'Choose one enabled Fluid label with confidence and evidence',
       'Save the result and audit record in Supabase without writing to Gmail',
+    ],
+  },
+  {
+    match: /fluid customer sync/i,
+    name: 'Customer Sync',
+    icon: '👥',
+    description: 'Syncs Ottawa Painters customers into canonical Fluid people and connects exact matching signals without merging customers.',
+    mode: 'Scheduled sync',
+    historyAgentId: null,
+    steps: [
+      'Read customer records changed in Ottawa Painters Admin',
+      'Create or refresh one canonical person for each source customer',
+      'Preserve shared emails and phone numbers without automatically merging people',
+      'Connect signals by source contact or an unambiguous exact email match',
     ],
   },
   {

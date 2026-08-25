@@ -1039,7 +1039,7 @@ const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '🏷️', label: 'Labels' },
   { icon: '🧭', label: 'Automations' },
   { icon: '🔌', label: 'Connections' },
-  { icon: '👥', label: 'Contacts' },
+  { icon: '👥', label: 'People' },
   { icon: '📊', label: 'Insights' },
 ];
 
@@ -1069,7 +1069,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Connections'];
+  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Connections', 'People'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);
