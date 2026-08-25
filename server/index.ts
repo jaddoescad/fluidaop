@@ -56,7 +56,7 @@ interface PublicGmailConnection extends Omit<StoredGmailConnection, 'encryptedRe
 }
 
 interface QuoWebhookStatus {
-  state: 'receiving' | 'pending';
+  state: 'receiving' | 'ready' | 'pending';
   url: string;
   lastEventAt: string | null;
   signingSecretConfigured: boolean;
@@ -352,7 +352,7 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
     }>('status');
     const lastEventAt = status.lastEvent?.received_at ?? null;
     webhook = {
-      state: status.signingSecretConfigured && lastEventAt ? 'receiving' : 'pending',
+      state: status.signingSecretConfigured ? (lastEventAt ? 'receiving' : 'ready') : 'pending',
       url: quoWebhookUrl(),
       lastEventAt,
       signingSecretConfigured: Boolean(status.signingSecretConfigured),

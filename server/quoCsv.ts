@@ -153,6 +153,11 @@ function timestamp(raw: string): string | null {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
+function truncateText(value: string, maximum: number): string {
+  const truncated = value.slice(0, maximum);
+  return /[\uD800-\uDBFF]$/.test(truncated) ? truncated.slice(0, -1) : truncated;
+}
+
 function stableId(prefix: string, row: CsvRow): string {
   const canonical = Object.keys(row).sort().map((key) => `${key}\0${row[key] ?? ''}`).join('\0');
   return `${prefix}:csv:${createHash('sha256').update(canonical).digest('hex').slice(0, 32)}`;
@@ -176,7 +181,7 @@ function resolveParticipants(
   const explicitAccount = e164(value(row, 'phone number', 'business number', 'company number', 'workspace number', 'line'));
   const account = connectedNumbers.find((number) =>
     number.e164 === explicitAccount || number.e164 === from || to.includes(number.e164)
-  ) ?? (connectedNumbers.length === 1 ? connectedNumbers[0] : undefined);
+  );
   if (!account) return null;
   const direction = directionOf(value(row, 'direction', 'type'), from, businessPhones);
   if (!direction) return null;
@@ -236,7 +241,7 @@ function parseMessage(row: CsvRow, numbers: QuoPhoneNumber[], now: string): QuoA
     source: 'quo',
     account_email: null,
     account_phone: participants.account.e164,
-    external_id: externalId.slice(0, 240),
+    external_id: truncateText(externalId, 240),
     external_thread_id: conversationId(participants.account, participants.actor),
     event_type: participants.direction === 'inbound' ? 'message.received' : 'message.sent',
     direction: participants.direction,
@@ -249,8 +254,8 @@ function parseMessage(row: CsvRow, numbers: QuoPhoneNumber[], now: string): QuoA
     to_phones: participants.to,
     cc_emails: [],
     subject: 'Text message',
-    preview: body.slice(0, 240),
-    body_text: body ? body.slice(0, 100_000) : null,
+    preview: truncateText(body, 240),
+    body_text: body ? truncateText(body, 100_000) : null,
     occurred_at: occurredAt,
     has_attachments: mediaCount > 0,
     attachment_count: mediaCount,
@@ -274,7 +279,7 @@ function parseCall(row: CsvRow, numbers: QuoPhoneNumber[], now: string): QuoActi
     source: 'quo',
     account_email: null,
     account_phone: participants.account.e164,
-    external_id: externalId.slice(0, 240),
+    external_id: truncateText(externalId, 240),
     external_thread_id: conversationId(participants.account, participants.actor),
     event_type: 'call.completed',
     direction: participants.direction,
@@ -329,7 +334,7 @@ export function parseQuoExport(
 
   const warnings: string[] = [];
   if (rowsSkipped > 0) {
-    warnings.push(`${rowsSkipped} row${rowsSkipped === 1 ? '' : 's'} lacked a usable phone number, direction, or timestamp.`);
+    warnings.push(`${rowsSkipped} row${rowsSkipped === 1 ? '' : 's'} were outside the selected phone lines or lacked a usable direction or timestamp.`);
   }
   return { activities, contacts, rowsSeen: rows.length, rowsSkipped, warnings };
 }

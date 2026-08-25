@@ -56,6 +56,14 @@ function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+  return 'Unexpected function error';
+}
+
 function databaseSecret(): string {
   const current = Deno.env.get('SUPABASE_SECRET_KEYS');
   if (current) {
@@ -91,6 +99,11 @@ function cleanString(value: unknown, maximum: number): string | null {
   if (typeof value !== 'string') return null;
   const cleaned = value.trim();
   return cleaned && cleaned.length <= maximum ? cleaned : null;
+}
+
+function truncateText(value: string, maximum: number): string {
+  const truncated = value.slice(0, maximum);
+  return /[\uD800-\uDBFF]$/.test(truncated) ? truncated.slice(0, -1) : truncated;
 }
 
 function e164(value: unknown): string | null {
@@ -379,7 +392,7 @@ function webhookActivity(payload: Record<string, unknown>): ActivityInput | null
     to_phones: to,
     cc_emails: [],
     subject: 'Text message',
-    preview: text.slice(0, 240),
+    preview: truncateText(text, 240),
     body_text: text || null,
     occurred_at: new Date(occurredAt).toISOString(),
     has_attachments: media.length > 0,
@@ -480,6 +493,6 @@ Deno.serve(async (req: Request) => {
     }
   } catch (error) {
     console.error(error);
-    return response({ error: error instanceof Error ? error.message : 'Unexpected function error' }, 500);
+    return response({ error: authorizedInternal(req) ? errorMessage(error) : 'Unexpected function error' }, 500);
   }
 });

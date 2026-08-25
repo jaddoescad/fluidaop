@@ -44,7 +44,7 @@ interface QuoConnection {
   nextCheckAt: string | null;
   error: string | null;
   webhook: {
-    state: 'receiving' | 'pending';
+    state: 'receiving' | 'ready' | 'pending';
     url: string;
     lastEventAt: string | null;
     signingSecretConfigured: boolean;
@@ -392,6 +392,14 @@ function QuoWebhookSection({ webhook, now }: { webhook: QuoConnection['webhook']
       </p>
     );
   }
+  if (webhook.state === 'ready') {
+    return (
+      <p className="cn-manage-ok">
+        <i className="cn-dot" />
+        Webhook ready <span> · waiting for the first event</span>
+      </p>
+    );
+  }
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(webhook.url);
@@ -603,6 +611,10 @@ function ConnectedQuoCard({
         ) : c.webhook.state === 'receiving' ? (
           <span className="cn-quo-live">
             <i className="cn-dot" /> Receiving events
+          </span>
+        ) : c.webhook.state === 'ready' ? (
+          <span className="cn-quo-live">
+            <i className="cn-dot" /> Webhook ready
           </span>
         ) : (
           <button
