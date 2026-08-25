@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useState } from 'react';
 import { HermesSkill, HermesStatus, loadHermesSkills, loadHermesStatus } from '../agents/hermes';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
@@ -9,9 +9,11 @@ import './skills.css';
 export function SkillsPage({
   d,
   onNavigate,
+  header,
 }: {
   d: Derived;
   onNavigate: (label: string) => void;
+  header: ReactNode;
 }) {
   const [status, setStatus] = useState<HermesStatus | null>(null);
   const [skills, setSkills] = useState<HermesSkill[] | null>(null);
@@ -52,6 +54,7 @@ export function SkillsPage({
       <div className="fl-shell">
         <SideNav d={d} active="Skills" onNav={onNavigate} />
         <div className="fl-frame">
+          {header}
           <main className="sk-main">
             <div className="sk-inner">
               <header className="sk-head">

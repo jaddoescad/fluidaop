@@ -1,6 +1,7 @@
 import { ReactNode, useEffect, useRef, useState } from 'react';
 import { CHANNEL_LABEL } from '../data';
 import { agentFor } from '../engine';
+import { HermesStatus } from '../agents/hermes';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, MIN } from '../time';
 import { ActionCard, AgentRun, Person, Signal, State } from '../types';
 import { Act } from '../useFluid';
@@ -1036,9 +1037,9 @@ const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '🧩', label: 'Skills' },
   { icon: '⚡', label: 'Activity' },
   { icon: '🏷️', label: 'Labels' },
-  { icon: '🧭', label: 'Automations' },
+  { icon: '◷', label: 'Schedules' },
   { icon: '🔌', label: 'Connections' },
-  { icon: '👥', label: 'People' },
+  { icon: '👥', label: 'Contacts' },
   { icon: '📊', label: 'Insights' },
 ];
 
@@ -1068,7 +1069,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Connections', 'People'];
+  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);
@@ -1116,7 +1117,36 @@ export function SideNav({
   );
 }
 
-export function KitHeader({ s, act, d }: { s: State; act: Act; d: Derived }) {
+export function KitHeader({
+  s,
+  act,
+  d,
+  hermesStatus,
+  hermesError,
+}: {
+  s: State;
+  act: Act;
+  d: Derived;
+  hermesStatus: HermesStatus | null;
+  hermesError: string | null;
+}) {
+  const hermesState = hermesError !== null
+    ? hermesStatus === null ? 'unavailable' : 'degraded'
+    : hermesStatus === null
+      ? 'checking'
+      : hermesStatus.connected
+        ? 'online'
+        : hermesStatus.gatewayState === 'running'
+          ? 'degraded'
+          : 'offline';
+  const hermesTitle = hermesError !== null
+    ? `Hermes is ${hermesState}: ${hermesError}`
+    : hermesStatus === null
+      ? 'Checking the Hermes gateway and scheduler'
+      : hermesState === 'online'
+        ? 'Hermes gateway and scheduler are available'
+        : `Hermes gateway is ${hermesStatus.gatewayState}`;
+
   return (
     <header className="fl-top">
       <label className="fl-search" title="Search — not wired up in this concept build">
@@ -1138,13 +1168,17 @@ export function KitHeader({ s, act, d }: { s: State; act: Act; d: Derived }) {
       <div className="fl-ctl">
         <span
           className="fl-hermes"
-          title={s.paused ? 'Hermes is paused — agents are holding' : 'Hermes is running your agents in the background'}
+          title={hermesTitle}
         >
-          <span className={`sim-dot${s.paused ? ' sim-paused' : ''}`} />
-          Hermes · {s.paused ? 'holding' : 'online'}
+          <span className={`sim-dot hermes-dot-${hermesState}`} />
+          Hermes · {hermesState}
         </span>
-        <button className="fl-pause" onClick={act.togglePause}>
-          {s.paused ? '▶ Resume' : '⏸ Pause'}
+        <button
+          className="fl-pause"
+          onClick={act.togglePause}
+          title="Pause or resume the local board feed; Hermes schedules are not changed"
+        >
+          {s.paused ? '▶ Resume board' : '⏸ Pause board'}
         </button>
       </div>
       <button

@@ -1,4 +1,4 @@
-import { CSSProperties, useEffect, useState } from 'react';
+import { CSSProperties, ReactNode, useEffect, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import '../variants/flow.css';
@@ -8,7 +8,7 @@ import './labels.css';
 const LABEL_NAME_MAX = 40;
 const COLORS = ['#43c78f', '#f4587a', '#e0aa45', '#9d97f5', '#4cc4b8', '#e07bb4', '#d3a24b', '#8a8a96'];
 
-type LabelKind = 'urgency' | 'email';
+type LabelKind = 'urgency' | 'topic';
 
 interface Label {
   id: number;
@@ -40,13 +40,13 @@ const SECTIONS: SectionCopy[] = [
     descPlaceholder: 'Describe when this priority applies…',
   },
   {
-    kind: 'email',
-    title: 'Email labels',
+    kind: 'topic',
+    title: 'Topic labels',
     blurb:
-      'What an email is about. The email categorizer reads the enabled email labels and their ' +
-      'descriptions to sort incoming mail into these topics.',
-    createLabel: 'New email label',
-    descPlaceholder: 'Tell the categorizer what this label covers…',
+      'What a signal is about across Gmail emails, Quo messages, and calls. Signal Triage uses ' +
+      'these descriptions as its complete business vocabulary.',
+    createLabel: 'New topic label',
+    descPlaceholder: 'Tell Signal Triage what this topic covers…',
   },
 ];
 
@@ -80,9 +80,11 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export function LabelsPage({
   d,
   onNavigate,
+  header,
 }: {
   d: Derived;
   onNavigate: (label: string) => void;
+  header: ReactNode;
 }) {
   const [labels, setLabels] = useState<Label[]>([]);
   const [loading, setLoading] = useState(true);
@@ -271,6 +273,7 @@ export function LabelsPage({
       <div className="fl-shell">
         <SideNav d={d} active="Labels" onNav={onNavigate} />
         <div className="fl-frame">
+          {header}
           <main className="lb-main">
             <div className="lb-inner">
               <header className="lb-head">

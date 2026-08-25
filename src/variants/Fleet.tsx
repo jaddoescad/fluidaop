@@ -1,11 +1,12 @@
-import { Fragment, ReactNode, useEffect, useState } from 'react';
+import { Fragment, ReactNode, useCallback, useEffect, useState } from 'react';
 import { ActivitiesPage } from '../activities/ActivitiesPage';
 import { AgentsPage } from '../agents/AgentsPage';
-import { HermesAgentDefinition, HermesStatus, loadHermesAgents, loadHermesStatus } from '../agents/hermes';
+import { HermesAgentDefinition, HermesStatus, loadHermesSchedules, loadHermesStatus } from '../agents/hermes';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
 import { PeoplePage } from '../people/PeoplePage';
 import { SkillsPage } from '../skills/SkillsPage';
+import { SchedulesPage } from '../schedules/SchedulesPage';
 import { agentFor } from '../engine';
 import { fmtAge } from '../time';
 import { ActionCard } from '../types';
@@ -34,14 +35,15 @@ import './fleet.css';
  * the person dossier stays one click deeper. Roster lives in the side nav.
  */
 
-type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Connections' | 'People';
+type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts';
 
 function pageFromPath(): AppPage {
   if (window.location.pathname === '/agents') return 'Agents';
   if (window.location.pathname === '/skills') return 'Skills';
+  if (window.location.pathname === '/schedules' || window.location.pathname === '/automations') return 'Schedules';
   if (window.location.pathname === '/connections') return 'Connections';
   if (window.location.pathname === '/labels') return 'Labels';
-  if (window.location.pathname === '/people') return 'People';
+  if (window.location.pathname === '/contacts' || window.location.pathname === '/people') return 'Contacts';
   if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
   return 'Board';
 }
@@ -51,7 +53,9 @@ export function FleetV({ s, act }: VProps) {
   const [runSel, setRunSel] = useState<RunSubject | null>(null);
   const [page, setPage] = useState<AppPage>(pageFromPath);
   const [hermesStatus, setHermesStatus] = useState<HermesStatus | null>(null);
-  const [hermesAgents, setHermesAgents] = useState<HermesAgentDefinition[] | null>(null);
+  const [hermesSchedules, setHermesSchedules] = useState<HermesAgentDefinition[] | null>(null);
+  const [hermesError, setHermesError] = useState<string | null>(null);
+  const hermesAgents = hermesSchedules?.filter((schedule) => schedule.runtimeMode === 'agent') ?? null;
 
   useEffect(() => {
     const syncPage = () => {
@@ -61,30 +65,43 @@ export function FleetV({ s, act }: VProps) {
     return () => window.removeEventListener('popstate', syncPage);
   }, []);
 
+  const refreshHermes = useCallback(async () => {
+    const [statusResult, schedulesResult] = await Promise.allSettled([
+      loadHermesStatus(),
+      loadHermesSchedules(),
+    ]);
+
+    setHermesStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
+    setHermesSchedules(schedulesResult.status === 'fulfilled' ? schedulesResult.value : null);
+    const failure = schedulesResult.status === 'rejected'
+      ? schedulesResult.reason
+      : statusResult.status === 'rejected'
+        ? statusResult.reason
+        : null;
+    setHermesError(
+      failure === null
+        ? null
+        : failure instanceof Error
+          ? failure.message
+          : 'Could not reach Hermes',
+    );
+  }, []);
+
   useEffect(() => {
-    if (page !== 'Board') return;
-    let active = true;
-    const refreshHermes = async () => {
-      try {
-        const [nextStatus, nextAgents] = await Promise.all([loadHermesStatus(), loadHermesAgents()]);
-        if (active) {
-          setHermesStatus(nextStatus);
-          setHermesAgents(nextAgents);
-        }
-      } catch {
-        if (active) {
-          setHermesStatus(null);
-          setHermesAgents(null);
-        }
-      }
-    };
     void refreshHermes();
     const timer = window.setInterval(() => void refreshHermes(), 60_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [page]);
+    return () => window.clearInterval(timer);
+  }, [refreshHermes]);
+
+  const appHeader = (
+    <KitHeader
+      s={s}
+      act={act}
+      d={d}
+      hermesStatus={hermesStatus}
+      hermesError={hermesError}
+    />
+  );
 
   const navigate = (label: string) => {
     if (
@@ -93,7 +110,8 @@ export function FleetV({ s, act }: VProps) {
       label !== 'Skills' &&
       label !== 'Activity' &&
       label !== 'Labels' &&
-      label !== 'People' &&
+      label !== 'Schedules' &&
+      label !== 'Contacts' &&
       label !== 'Connections'
     )
       return;
@@ -102,12 +120,14 @@ export function FleetV({ s, act }: VProps) {
         ? '/agents'
         : label === 'Skills'
           ? '/skills'
+        : label === 'Schedules'
+          ? '/schedules'
         : label === 'Connections'
         ? '/connections'
         : label === 'Labels'
           ? '/labels'
-          : label === 'People'
-            ? '/people'
+          : label === 'Contacts'
+            ? '/contacts'
           : label === 'Activity'
             ? '/activity'
             : '/';
@@ -115,12 +135,23 @@ export function FleetV({ s, act }: VProps) {
     setPage(label);
   };
 
-  if (page === 'Agents') return <AgentsPage d={d} onNavigate={navigate} />;
-  if (page === 'Skills') return <SkillsPage d={d} onNavigate={navigate} />;
-  if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} />;
-  if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} />;
-  if (page === 'People') return <PeoplePage d={d} onNavigate={navigate} />;
-  if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} />;
+  if (page === 'Agents') return <AgentsPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Skills') return <SkillsPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Schedules') return (
+    <SchedulesPage
+      d={d}
+      onNavigate={navigate}
+      header={appHeader}
+      status={hermesStatus}
+      schedules={hermesSchedules}
+      error={hermesError}
+      onRefresh={refreshHermes}
+    />
+  );
+  if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Contacts') return <PeoplePage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} header={appHeader} />;
 
   const fname = d.focusPerson?.name ?? null;
   const personOf = (id: string) => s.people.find((x) => x.id === id);
@@ -193,7 +224,7 @@ export function FleetV({ s, act }: VProps) {
       <div className="fl-shell">
         <SideNav d={d} roster={roster} active="Board" onNav={navigate} />
         <div className="fl-frame">
-          <KitHeader s={s} act={act} d={d} />
+          {appHeader}
           <main className="fl-cols">
             <PeopleCol s={s} act={act} d={d} />
             <SignalsCol

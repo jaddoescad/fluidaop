@@ -16,6 +16,7 @@ export interface HermesAgentDefinition {
   schedule: string;
   profile: string;
   mode: string;
+  runtimeMode: 'agent' | 'script';
   steps: string[];
   enabled: boolean;
   state: string;
@@ -70,6 +71,7 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     icon: contract?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
     description: contract?.summary ?? unavailableDescription,
     mode: agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent',
+    runtimeMode: agent.mode,
     steps: contract?.steps ?? [],
     historyAgentId: null,
   };
@@ -135,8 +137,8 @@ export async function loadHermesStatus(): Promise<HermesStatus> {
   return (await response.json()) as HermesStatus;
 }
 
-export async function loadHermesAgents(): Promise<HermesAgentDefinition[]> {
-  const response = await fetch('/api/hermes/agents', { headers: { Accept: 'application/json' } });
+export async function loadHermesSchedules(): Promise<HermesAgentDefinition[]> {
+  const response = await fetch('/api/hermes/schedules', { headers: { Accept: 'application/json' } });
   const payload = (await response.json().catch(() => null)) as HermesAgentsPayload | { error?: unknown } | null;
   if (!response.ok) {
     const detail = payload !== null && 'error' in payload && typeof payload.error === 'string'
@@ -148,6 +150,11 @@ export async function loadHermesAgents(): Promise<HermesAgentDefinition[]> {
     throw new Error('Hermes returned an invalid agent roster');
   }
   return payload.agents.map(presentHermesAgent);
+}
+
+export async function loadHermesAgents(): Promise<HermesAgentDefinition[]> {
+  const schedules = await loadHermesSchedules();
+  return schedules.filter((schedule) => schedule.runtimeMode === 'agent');
 }
 
 export async function loadHermesSkills(): Promise<HermesSkill[]> {

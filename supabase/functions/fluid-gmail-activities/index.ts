@@ -1,4 +1,4 @@
-import { createClient } from 'npm:@supabase/supabase-js@2.95.0';
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
 
 type ActivityRow = {
   source: 'gmail';
@@ -90,6 +90,71 @@ function positiveId(raw: string | null): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
   const parsed = Number.parseInt(raw, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function validUuid(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function uuidCursorFrom(url: URL): { createdAt: string; id: string } | null | false {
+  const rawCreatedAt = url.searchParams.get('cursorAt');
+  const rawId = url.searchParams.get('cursorId');
+  if (rawCreatedAt === null && rawId === null) return null;
+  const timestamp = rawCreatedAt === null ? Number.NaN : Date.parse(rawCreatedAt);
+  if (!validUuid(rawId) || !Number.isFinite(timestamp)) return false;
+  return { createdAt: new Date(timestamp).toISOString(), id: rawId };
+}
+
+function contactSummary(person: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!person || !validUuid(person.id)) return null;
+  return {
+    id: person.id,
+    displayName: typeof person.display_name === 'string' ? person.display_name : 'Contact',
+    primaryEmail: typeof person.primary_email === 'string' ? person.primary_email : null,
+    primaryPhone: typeof person.primary_phone === 'string' ? person.primary_phone : null,
+    entityType: person.entity_type === 'business' ? 'business' : 'person',
+  };
+}
+
+async function activityEnrichment(
+  supabase: SupabaseClient,
+  activityIds: number[],
+): Promise<{
+  labelsByActivity: Map<number, unknown[]>;
+  contactByActivity: Map<number, Record<string, unknown>>;
+}> {
+  if (activityIds.length === 0) {
+    return { labelsByActivity: new Map(), contactByActivity: new Map() };
+  }
+  const [labelsResult, contactsResult] = await Promise.all([
+    supabase
+      .from('signal_labels')
+      .select('activity_id,label_kind,confidence,reason,updated_at,label:labels!signal_labels_label_id_fkey(key,name,color,kind)')
+      .eq('agent_key', 'signal-triage')
+      .in('activity_id', activityIds),
+    supabase
+      .from('activity_people')
+      .select('activity_id,matched_by,confidence,person:people!activity_people_person_id_fkey(id,display_name,primary_email,primary_phone,entity_type,status)')
+      .eq('relationship', 'counterparty')
+      .in('activity_id', activityIds),
+  ]);
+  if (labelsResult.error) throw labelsResult.error;
+  if (contactsResult.error) throw contactsResult.error;
+  const labelsByActivity = new Map<number, unknown[]>();
+  for (const label of (labelsResult.data ?? []) as Array<Record<string, any>>) {
+    const current = labelsByActivity.get(label.activity_id) ?? [];
+    current.push(label);
+    labelsByActivity.set(label.activity_id, current);
+  }
+  const contactByActivity = new Map<number, Record<string, unknown>>();
+  for (const link of (contactsResult.data ?? []) as Array<Record<string, any>>) {
+    const rawPerson = Array.isArray(link.person) ? link.person[0] : link.person;
+    if (!rawPerson || rawPerson.status !== 'active' || contactByActivity.has(link.activity_id)) continue;
+    const summary = contactSummary(rawPerson as Record<string, unknown>);
+    if (summary) contactByActivity.set(link.activity_id, summary);
+  }
+  return { labelsByActivity, contactByActivity };
 }
 
 function cursorFrom(url: URL): { occurredAt: string; id: number } | null | false {
@@ -193,20 +258,11 @@ Deno.serve(async (req: Request) => {
       const hasMore = fetched.length > limit;
       const rawSignals = fetched.slice(0, limit);
       const signalIds = rawSignals.map((signal) => signal.id);
-      const classificationResult = signalIds.length === 0
-        ? { data: [], error: null }
-        : await supabase
-          .from('signal_labels')
-          .select('activity_id,confidence,reason,updated_at,label:labels!signal_labels_label_id_fkey(key,name,color)')
-          .eq('agent_key', 'email-categorizer')
-          .in('activity_id', signalIds);
-      if (classificationResult.error) throw classificationResult.error;
-      const classificationBySignal = new Map(
-        (classificationResult.data ?? []).map((classification) => [classification.activity_id, classification]),
-      );
+      const enrichment = await activityEnrichment(supabase, signalIds);
       const signals = rawSignals.map((signal) => ({
         ...signal,
-        classification: classificationBySignal.get(signal.id) ?? null,
+        classifications: enrichment.labelsByActivity.get(signal.id) ?? [],
+        contact: enrichment.contactByActivity.get(signal.id) ?? null,
       }));
       const last = signals[signals.length - 1];
       return response({
@@ -234,22 +290,22 @@ Deno.serve(async (req: Request) => {
       if (error) throw error;
       if (!data) return response({ error: 'Signal not found' }, 404);
 
-      const [classificationResult, attachmentsResult] = await Promise.all([
-        supabase
-          .from('signal_labels')
-          .select('confidence,reason,updated_at,label:labels!signal_labels_label_id_fkey(key,name,color)')
-          .eq('activity_id', signalId)
-          .eq('agent_key', 'email-categorizer')
-          .maybeSingle(),
+      const [enrichment, attachmentsResult, transcriptResult] = await Promise.all([
+        activityEnrichment(supabase, [signalId]),
         supabase
           .from('signal_attachment_evidence')
           .select('attachment_key,filename,mime_type,size_bytes,extraction_status,extraction_method,updated_at')
           .eq('activity_id', signalId)
-          .eq('agent_key', 'email-categorizer')
+          .eq('agent_key', 'signal-triage')
           .order('id', { ascending: true }),
+        supabase
+          .from('activity_call_transcripts')
+          .select('status,dialogue,transcript_text,unavailable_reason,transcript_created_at,updated_at')
+          .eq('activity_id', signalId)
+          .maybeSingle(),
       ]);
-      if (classificationResult.error) throw classificationResult.error;
       if (attachmentsResult.error) throw attachmentsResult.error;
+      if (transcriptResult.error) throw transcriptResult.error;
 
       let historyCount = 0;
       if (data.external_thread_id) {
@@ -266,8 +322,10 @@ Deno.serve(async (req: Request) => {
       return response({
         signal: {
           ...data,
-          classification: classificationResult.data,
+          classifications: enrichment.labelsByActivity.get(signalId) ?? [],
+          contact: enrichment.contactByActivity.get(signalId) ?? null,
           attachmentEvidence: attachmentsResult.data ?? [],
+          transcript: transcriptResult.data,
         },
         historyCount,
       });
@@ -324,7 +382,13 @@ Deno.serve(async (req: Request) => {
 
       const fetched = messagesResult.data ?? [];
       const hasMore = fetched.length > limit;
-      const messages = fetched.slice(0, limit);
+      const rawMessages = fetched.slice(0, limit);
+      const enrichment = await activityEnrichment(supabase, rawMessages.map((message) => message.id));
+      const messages = rawMessages.map((message) => ({
+        ...message,
+        classifications: enrichment.labelsByActivity.get(message.id) ?? [],
+        contact: enrichment.contactByActivity.get(message.id) ?? null,
+      }));
       const last = messages[messages.length - 1];
       return response({
         messages,
@@ -347,11 +411,10 @@ Deno.serve(async (req: Request) => {
     }
 
     if (req.method === 'GET' && action === 'labels') {
-      if (!accountEmail) return response({ error: 'accountEmail is required' }, 400);
       const { data, error } = await supabase
         .from('labels')
         .select('id,kind,key,name,description,color,enabled,sort_order,created_at,updated_at')
-        .eq('account_email', accountEmail)
+        .eq('workspace_key', 'ottawa-painters')
         .order('kind', { ascending: false })
         .order('sort_order', { ascending: true })
         .order('id', { ascending: true });
@@ -359,26 +422,348 @@ Deno.serve(async (req: Request) => {
       return response({ labels: data ?? [] });
     }
 
+    if (req.method === 'GET' && action === 'contact-roles') {
+      const { data, error } = await supabase
+        .from('contact_role_definitions')
+        .select('key,name,description,enabled,sort_order')
+        .eq('workspace_key', 'ottawa-painters')
+        .eq('enabled', true)
+        .order('sort_order')
+        .order('key');
+      if (error) throw error;
+      return response({ roles: data ?? [] });
+    }
+
+    if (req.method === 'GET' && action === 'contact-search') {
+      const rawQuery = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+      const queryText = rawQuery.replace(/[,%()]/g, ' ').replace(/\s+/g, ' ').trim();
+      const fields = ['display_name', 'primary_email', 'primary_phone'] as const;
+      const baseSelect = 'id,display_name,primary_email,primary_phone,entity_type';
+      const results = queryText
+        ? await Promise.all(fields.map((field) => supabase
+          .from('people')
+          .select(baseSelect)
+          .eq('workspace_key', 'ottawa-painters')
+          .eq('status', 'active')
+          .ilike(field, `%${queryText}%`)
+          .order('display_name')
+          .limit(20)))
+        : [await supabase
+          .from('people')
+          .select(baseSelect)
+          .eq('workspace_key', 'ottawa-painters')
+          .eq('status', 'active')
+          .order('updated_at', { ascending: false })
+          .limit(20)];
+      const failure = results.map((result) => result.error).find(Boolean);
+      if (failure) throw failure;
+      const unique = new Map<string, Record<string, unknown>>();
+      for (const result of results) {
+        for (const person of result.data ?? []) unique.set(person.id, person);
+      }
+      const contacts = [...unique.values()]
+        .sort((left, right) => String(left.display_name).localeCompare(String(right.display_name)))
+        .slice(0, 20)
+        .map((person) => contactSummary(person));
+      return response({ contacts });
+    }
+
+    if (req.method === 'GET' && action === 'contacts') {
+      const limit = cleanLimit(url.searchParams.get('limit'), 30, 100);
+      const cursor = uuidCursorFrom(url);
+      if (cursor === false) return response({ error: 'Invalid Contact cursor' }, 400);
+      const role = cleanText(url.searchParams.get('role'), 100);
+      const status = url.searchParams.get('status') === 'archived' ? 'archived' : 'active';
+      if (role && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(role)) {
+        return response({ error: 'Invalid Contact role' }, 400);
+      }
+
+      const select = role
+        ? 'id,display_name,primary_email,primary_phone,status,entity_type,created_at,updated_at,roles:person_roles!inner(role_key,active)'
+        : 'id,display_name,primary_email,primary_phone,status,entity_type,created_at,updated_at,roles:person_roles(role_key,active)';
+      let query = supabase
+        .from('people')
+        .select(select, { count: 'exact' })
+        .eq('workspace_key', 'ottawa-painters')
+        .eq('status', status)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+      if (role) {
+        query = query.eq('person_roles.role_key', role).eq('person_roles.active', true);
+      }
+      if (cursor) {
+        query = query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`);
+      }
+      const { data, error, count } = await query;
+      if (error) throw error;
+      const fetched = data ?? [];
+      const hasMore = fetched.length > limit;
+      const rawContacts = fetched.slice(0, limit);
+      const personIds = rawContacts.map((contact) => contact.id);
+      const activityResult = personIds.length === 0
+        ? { data: [], error: null }
+        : await supabase
+          .from('contact_activity_stats')
+          .select('person_id,linked_signal_count,last_signal_at')
+          .eq('workspace_key', 'ottawa-painters')
+          .in('person_id', personIds);
+      if (activityResult.error) throw activityResult.error;
+      const stats = new Map<string, { count: number; lastSignalAt: string | null }>();
+      for (const row of activityResult.data ?? []) {
+        stats.set(row.person_id, {
+          count: Number(row.linked_signal_count ?? 0),
+          lastSignalAt: row.last_signal_at ?? null,
+        });
+      }
+      const contacts = rawContacts.map((contact) => ({
+        id: contact.id,
+        displayName: contact.display_name,
+        primaryEmail: contact.primary_email,
+        primaryPhone: contact.primary_phone,
+        status: contact.status,
+        entityType: contact.entity_type,
+        roles: [...new Set((Array.isArray(contact.roles) ? contact.roles : [])
+          .filter((entry) => entry.active)
+          .map((entry) => entry.role_key))],
+        linkedSignalCount: stats.get(contact.id)?.count ?? 0,
+        lastSignalAt: stats.get(contact.id)?.lastSignalAt ?? null,
+        createdAt: contact.created_at,
+        updatedAt: contact.updated_at,
+      }));
+      const last = contacts[contacts.length - 1];
+      return response({
+        contacts,
+        count: count ?? 0,
+        nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+      });
+    }
+
+    if (req.method === 'GET' && action === 'contact') {
+      const contactId = url.searchParams.get('contactId');
+      if (!validUuid(contactId)) return response({ error: 'Valid contactId is required' }, 400);
+      const [personResult, rolesResult, claimsResult, sourcesResult] = await Promise.all([
+        supabase
+          .from('people')
+          .select('id,display_name,primary_email,primary_phone,status,entity_type,created_at,updated_at')
+          .eq('workspace_key', 'ottawa-painters')
+          .eq('id', contactId)
+          .maybeSingle(),
+        supabase
+          .from('person_roles')
+          .select('role_key,source_system,source_record_type,source_record_id,active,first_seen_at,last_seen_at')
+          .eq('person_id', contactId)
+          .eq('active', true)
+          .order('role_key'),
+        supabase
+          .from('person_identity_claims')
+          .select('id,identity_id,source_system,source_record_type,source_record_id,confidence,is_primary,active,first_seen_at,last_seen_at')
+          .eq('person_id', contactId)
+          .eq('active', true)
+          .order('is_primary', { ascending: false })
+          .order('id'),
+        supabase
+          .from('person_sources')
+          .select('source_system,source_record_type,source_record_id,source_created_at,source_updated_at,first_synced_at,last_synced_at')
+          .eq('person_id', contactId)
+          .order('last_synced_at', { ascending: false }),
+      ]);
+      const failure = [personResult, rolesResult, claimsResult, sourcesResult]
+        .map((result) => result.error).find(Boolean);
+      if (failure) throw failure;
+      if (!personResult.data) return response({ error: 'Contact not found' }, 404);
+      const identityIds = [...new Set((claimsResult.data ?? []).map((claim) => claim.identity_id))];
+      const identityResult = identityIds.length === 0
+        ? { data: [], error: null }
+        : await supabase
+          .from('identities')
+          .select('id,kind,display_value,display_name,classification,first_seen_at,last_seen_at')
+          .in('id', identityIds);
+      if (identityResult.error) throw identityResult.error;
+      const identityById = new Map((identityResult.data ?? []).map((identity) => [identity.id, identity]));
+      const person = personResult.data;
+      return response({
+        contact: {
+          id: person.id,
+          displayName: person.display_name,
+          primaryEmail: person.primary_email,
+          primaryPhone: person.primary_phone,
+          status: person.status,
+          entityType: person.entity_type,
+          createdAt: person.created_at,
+          updatedAt: person.updated_at,
+        },
+        roles: rolesResult.data ?? [],
+        identifiers: (claimsResult.data ?? []).flatMap((claim) => {
+          const identity = identityById.get(claim.identity_id);
+          return identity ? [{
+            id: identity.id,
+            kind: identity.kind,
+            value: identity.display_value,
+            displayName: identity.display_name,
+            classification: identity.classification,
+            confidence: claim.confidence,
+            primary: claim.is_primary,
+            source: {
+              system: claim.source_system,
+              recordType: claim.source_record_type,
+              recordId: claim.source_record_id,
+            },
+            firstSeenAt: claim.first_seen_at,
+            lastSeenAt: claim.last_seen_at,
+          }] : [];
+        }),
+        sources: sourcesResult.data ?? [],
+      });
+    }
+
+    if (req.method === 'GET' && action === 'contact-activities') {
+      const contactId = url.searchParams.get('contactId');
+      const limit = cleanLimit(url.searchParams.get('limit'), 30, 50);
+      const cursor = cursorFrom(url);
+      if (!validUuid(contactId) || cursor === false) {
+        return response({ error: 'Valid contactId and cursor are required' }, 400);
+      }
+      let query = supabase
+        .from('activities')
+        .select('id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,subject,preview,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,links:activity_people!inner(person_id,relationship)')
+        .eq('activity_people.person_id', contactId)
+        .eq('activity_people.relationship', 'counterparty')
+        .order('occurred_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+      if (cursor) {
+        query = query.or(`occurred_at.lt.${cursor.occurredAt},and(occurred_at.eq.${cursor.occurredAt},id.lt.${cursor.id})`);
+      }
+      const { data, error } = await query;
+      if (error) throw error;
+      const fetched = data ?? [];
+      const hasMore = fetched.length > limit;
+      const rawSignals = fetched.slice(0, limit).map(({ links: _links, ...signal }) => signal);
+      const enrichment = await activityEnrichment(supabase, rawSignals.map((signal) => signal.id));
+      const signals = rawSignals.map((signal) => ({
+        ...signal,
+        classifications: enrichment.labelsByActivity.get(signal.id) ?? [],
+        contact: enrichment.contactByActivity.get(signal.id) ?? null,
+      }));
+      const last = signals[signals.length - 1];
+      return response({
+        signals,
+        nextCursor: hasMore && last ? { occurredAt: last.occurred_at, id: last.id } : null,
+      });
+    }
+
+    if (req.method === 'GET' && action === 'contact-suggestions') {
+      const limit = cleanLimit(url.searchParams.get('limit'), 30, 100);
+      const cursor = uuidCursorFrom(url);
+      if (cursor === false) return response({ error: 'Invalid suggestion cursor' }, 400);
+      let query = supabase
+        .from('contact_suggestions')
+        .select('id,identity_id,activity_id,suggestion_type,status,proposed_entity_type,proposed_role_key,proposed_display_name,confidence,reason,evidence,source_revision,created_at,updated_at,identity:identities!contact_suggestions_identity_id_fkey(id,kind,display_value,display_name,classification),activity:activities!contact_suggestions_activity_id_fkey(id,source,event_type,direction,subject,preview,occurred_at)', { count: 'exact' })
+        .eq('workspace_key', 'ottawa-painters')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(limit + 1);
+      if (cursor) {
+        query = query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`);
+      }
+      const { data, error, count } = await query;
+      if (error) throw error;
+      const fetched = data ?? [];
+      const hasMore = fetched.length > limit;
+      const rawSuggestions = fetched.slice(0, limit);
+      const identityIds = [...new Set(rawSuggestions.map((suggestion) => suggestion.identity_id))];
+      const claimsResult = identityIds.length === 0
+        ? { data: [], error: null }
+        : await supabase
+          .from('person_identity_claims')
+          .select('identity_id,person_id,confidence,source_system,person:people!person_identity_claims_person_id_fkey(id,display_name,primary_email,primary_phone,status)')
+          .eq('active', true)
+          .in('identity_id', identityIds);
+      if (claimsResult.error) throw claimsResult.error;
+      const candidatesByIdentity = new Map<string, unknown[]>();
+      const candidateKeys = new Set<string>();
+      for (const claim of claimsResult.data ?? []) {
+        const candidate = Array.isArray(claim.person) ? claim.person[0] : claim.person;
+        if (!candidate || candidate.status !== 'active') continue;
+        const candidateKey = `${claim.identity_id}:${candidate.id}`;
+        if (candidateKeys.has(candidateKey)) continue;
+        candidateKeys.add(candidateKey);
+        const current = candidatesByIdentity.get(claim.identity_id) ?? [];
+        current.push({
+          contact: contactSummary(candidate as Record<string, unknown>),
+          confidence: claim.confidence,
+          sourceSystem: claim.source_system,
+        });
+        candidatesByIdentity.set(claim.identity_id, current);
+      }
+      const suggestions = rawSuggestions.map((suggestion) => ({
+        ...suggestion,
+        candidates: candidatesByIdentity.get(suggestion.identity_id) ?? [],
+      }));
+      const last = suggestions[suggestions.length - 1];
+      return response({
+        suggestions,
+        count: count ?? 0,
+        nextCursor: hasMore && last ? { createdAt: last.created_at, id: last.id } : null,
+      });
+    }
+
+    if (req.method === 'POST' && action === 'resolve-contact-suggestion') {
+      const body: unknown = await req.json().catch(() => null);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return response({ error: 'A valid resolution body is required' }, 400);
+      }
+      const input = body as Record<string, unknown>;
+      const suggestionId = input.suggestionId;
+      const resolution = input.action;
+      const contactId = input.contactId;
+      if (!validUuid(suggestionId) || !['create', 'link', 'ignore'].includes(String(resolution)) ||
+        (resolution === 'link' && !validUuid(contactId)) ||
+        (resolution !== 'link' && contactId !== undefined && contactId !== null)) {
+        return response({ error: 'Invalid suggestion resolution' }, 400);
+      }
+      const { data, error } = await supabase.rpc('resolve_contact_suggestion', {
+        p_suggestion_id: suggestionId,
+        p_action: resolution,
+        p_contact_id: resolution === 'link' ? contactId : null,
+      });
+      if (error) {
+        if (error.message.includes('no longer pending')) return response({ error: 'Suggestion is no longer pending' }, 409);
+        if (error.message.includes('already belongs')) return response({ error: error.message }, 409);
+        throw error;
+      }
+      return response({ result: data });
+    }
+
     if (req.method === 'GET' && action === 'agent-history') {
       const limit = cleanLimit(url.searchParams.get('limit'), 20, 50);
+      const requestedAgent = url.searchParams.get('agentKey') === 'email-categorizer'
+        ? 'email-categorizer'
+        : 'signal-triage';
       const { data, error } = await supabase
         .from('agent_runs')
-        .select('id,status,model,error,started_at,finished_at')
-        .eq('agent_key', 'email-categorizer')
+        .select('id,status,model,error,started_at,finished_at,input_revision')
+        .eq('agent_key', requestedAgent)
         .order('finished_at', { ascending: false })
         .limit(limit);
       if (error) throw error;
       return response({
-        agentId: 'email-categorizer',
+        agentId: requestedAgent,
         jobs: [{
-          id: 'email-categorizer',
-          name: 'Fluid Email Categorizer — database only — every 5 minutes',
+          id: requestedAgent,
+          name: requestedAgent === 'signal-triage'
+            ? 'Fluid Signal Triage — database only — every minute'
+            : 'Fluid Email Categorizer — historical audit',
           profile: 'default',
         }],
         runs: (data ?? []).map((run) => ({
           id: run.id,
-          jobId: 'email-categorizer',
-          jobName: 'Fluid Email Categorizer — database only — every 5 minutes',
+          jobId: requestedAgent,
+          jobName: requestedAgent === 'signal-triage'
+            ? 'Fluid Signal Triage — database only — every minute'
+            : 'Fluid Email Categorizer — historical audit',
           profile: 'default',
           status: run.status,
           source: 'supabase-agent-audit',
@@ -395,14 +780,13 @@ Deno.serve(async (req: Request) => {
     }
 
     if (req.method === 'POST' && action === 'label') {
-      if (!accountEmail) return response({ error: 'accountEmail is required' }, 400);
       const body: unknown = await req.json().catch(() => null);
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         return response({ error: 'A valid label body is required' }, 400);
       }
       const input = body as Record<string, unknown>;
       const id = input.id === undefined ? null : positiveId(String(input.id));
-      const kind = input.kind === 'urgency' || input.kind === 'email' ? input.kind : null;
+      const kind = input.kind === 'urgency' || input.kind === 'topic' ? input.kind : null;
       const name = cleanText(input.name, 80);
       const description = typeof input.description === 'string' && input.description.length <= 500
         ? input.description.trim()
@@ -420,7 +804,17 @@ Deno.serve(async (req: Request) => {
         if (!key) return response({ error: 'Label name must contain a letter or number' }, 400);
         const { data, error } = await supabase
           .from('labels')
-          .insert({ account_email: accountEmail, kind, key, name, description, color, enabled, sort_order: 900 })
+          .insert({
+            workspace_key: 'ottawa-painters',
+            account_email: accountEmail || null,
+            kind,
+            key,
+            name,
+            description,
+            color,
+            enabled,
+            sort_order: 900,
+          })
           .select('id,kind,key,name,description,color,enabled,sort_order,created_at,updated_at')
           .single();
         if (error) {
@@ -433,7 +827,7 @@ Deno.serve(async (req: Request) => {
       const { data, error } = await supabase
         .from('labels')
         .update({ kind, name, description, color, enabled, updated_at: new Date().toISOString() })
-        .eq('account_email', accountEmail)
+        .eq('workspace_key', 'ottawa-painters')
         .eq('id', id)
         .select('id,kind,key,name,description,color,enabled,sort_order,created_at,updated_at')
         .maybeSingle();
@@ -449,23 +843,14 @@ Deno.serve(async (req: Request) => {
       const body: unknown = await req.json();
       if (!validPayload(body)) return response({ error: 'Invalid activity payload' }, 400);
 
-      const emails = [...new Set(body.activities.map((item) => item.actor_email).filter((email): email is string => Boolean(email)))];
-      const contactByEmail = new Map<string, string>();
-      for (const emailBatch of chunks(emails, 100)) {
-        const { data, error } = await supabase
-          .from('contacts')
-          .select('id,normalized_email')
-          .in('normalized_email', emailBatch);
-        if (error) throw error;
-        for (const contact of data ?? []) {
-          if (contact.normalized_email) contactByEmail.set(contact.normalized_email, contact.id);
-        }
-      }
-
-      const rows = body.activities.map((activity) => ({
-        ...activity,
-        contact_id: activity.actor_email ? contactByEmail.get(activity.actor_email) ?? null : null,
-      }));
+      // Exact identity resolution belongs to the database resolver. Ingestion
+      // must never pick the first source Contact that happens to share an
+      // email, because shared identifiers are explicit review conflicts.
+      const rows = body.activities.map((activity) => {
+        const row = { ...activity };
+        delete row.contact_id;
+        return row;
+      });
       for (const rowBatch of chunks(rows, 200)) {
         const { error } = await supabase
           .from('activities')

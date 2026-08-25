@@ -340,6 +340,16 @@
   text-overflow: ellipsis;
 }
 
+.ac-row-contact::after {
+  content: 'Contact';
+  margin-left: 6px;
+  color: var(--faint);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .ac-row-label,
 .ac-classification-pill {
   color: var(--ac-label);
@@ -611,6 +621,37 @@
 .ac-evidence small {
   color: var(--faint);
   white-space: nowrap;
+}
+
+.ac-call-detail {
+  align-self: stretch;
+}
+
+.ac-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ac-transcript li {
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+
+.ac-transcript span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.ac-transcript p {
+  margin: 3px 0 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 /* From / To / Cc / Files of the selected signal only — never aggregated

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -119,6 +119,7 @@ const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
 ).trim().replace(/\/$/, '');
 const hermesAgentIds = new Set([
+  'signal-triage',
   'email-categorizer',
   'contractor-invoices',
   'dripjobs-operations',
@@ -163,6 +164,11 @@ app.use(express.json({ limit: '16kb' }));
 function readPositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function encryptionProblems(): string[] {
@@ -456,11 +462,26 @@ function selectedQuoPhoneNumbers(connection: StoredQuoConnection): QuoPhoneNumbe
 }
 
 async function activityFunctionJson<T>(
-  action: 'list' | 'signal' | 'history' | 'state' | 'labels' | 'label' | 'agent-history' | 'upsert',
+  action:
+    | 'list'
+    | 'signal'
+    | 'history'
+    | 'state'
+    | 'labels'
+    | 'label'
+    | 'agent-history'
+    | 'upsert'
+    | 'contacts'
+    | 'contact'
+    | 'contact-activities'
+    | 'contact-suggestions'
+    | 'resolve-contact-suggestion'
+    | 'contact-roles'
+    | 'contact-search',
   search: Record<string, string>,
   init?: RequestInit,
 ): Promise<T> {
-  requireActivityConfigured();
+  requireDatabaseConfigured();
   const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-gmail-activities`);
   url.searchParams.set('action', action);
   for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
@@ -496,7 +517,7 @@ function quoWebhookUrl(): string {
 }
 
 async function quoFunctionJson<T>(
-  action: 'status' | 'backfill' | 'scope',
+  action: 'status' | 'backfill' | 'scope' | 'transcript' | 'transcript-candidates' | 'enrich-contacts',
   init?: RequestInit,
 ): Promise<T> {
   requireDatabaseConfigured();
@@ -533,6 +554,117 @@ async function syncQuoScope(connection: StoredQuoConnection, phoneNumbers: QuoPh
     method: 'POST',
     body: JSON.stringify({ connectionId: connection.id, phoneNumbers }),
   });
+}
+
+function connectedQuo(): StoredQuoConnection {
+  const connection = store.connections.find(
+    (item): item is StoredQuoConnection => item.provider === 'quo',
+  );
+  if (!connection) throw new HttpError(409, 'Connect Quo before running maintenance');
+  if (selectedQuoPhoneNumbers(connection).length === 0) {
+    throw new HttpError(409, 'Choose at least one Quo phone line before running maintenance');
+  }
+  return connection;
+}
+
+async function runQuoContactEnrichment(): Promise<Record<string, number>> {
+  const connection = connectedQuo();
+  const apiKey = decryptToken(connection.encryptedApiKey);
+  let pageToken: string | null = null;
+  let pages = 0;
+  let seen = 0;
+  let matched = 0;
+  let evidence = 0;
+  let namesUpdated = 0;
+  do {
+    const search = new URLSearchParams({ maxResults: '50' });
+    if (pageToken) search.set('pageToken', pageToken);
+    const payload = await fetchQuoJson<{
+      data?: unknown[];
+      nextPageToken?: string | null;
+    }>(`/contacts?${search.toString()}`, apiKey);
+    const contacts = Array.isArray(payload.data) ? payload.data : [];
+    const result = await quoFunctionJson<{
+      seen?: number;
+      matched?: number;
+      evidence?: number;
+      namesUpdated?: number;
+    }>('enrich-contacts', {
+      method: 'POST',
+      body: JSON.stringify({ contacts }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    seen += result.seen ?? contacts.length;
+    matched += result.matched ?? 0;
+    evidence += result.evidence ?? 0;
+    namesUpdated += result.namesUpdated ?? 0;
+    pageToken = typeof payload.nextPageToken === 'string' && payload.nextPageToken.trim()
+      ? payload.nextPageToken
+      : null;
+    pages += 1;
+  } while (pageToken && pages < 500);
+  if (pageToken) throw new Error('Quo contact pagination exceeded the bounded 500-page limit');
+  return { pages, seen, matched, evidence, namesUpdated };
+}
+
+async function runQuoTranscriptBackfill(): Promise<Record<string, number>> {
+  const connection = connectedQuo();
+  const apiKey = decryptToken(connection.encryptedApiKey);
+  let checked = 0;
+  let available = 0;
+  let unavailable = 0;
+  for (let batch = 0; batch < 20; batch += 1) {
+    const candidates = await quoFunctionJson<{
+      calls?: Array<{ id?: number; external_id?: string }>;
+    }>('transcript-candidates');
+    const calls = (candidates.calls ?? []).filter((call) =>
+      typeof call.id === 'number' && typeof call.external_id === 'string' && /^AC[A-Za-z0-9_-]+$/.test(call.external_id)
+    );
+    if (calls.length === 0) break;
+    for (const call of calls) {
+      const callId = call.external_id as string;
+      checked += 1;
+      try {
+        const transcript = await fetchQuoJson<{ data?: Record<string, unknown> }>(
+          `/call-transcripts/${encodeURIComponent(callId)}`,
+          apiKey,
+        );
+        if (!transcript.data) throw new Error('Quo returned an empty transcript response');
+        await quoFunctionJson('transcript', {
+          method: 'POST',
+          body: JSON.stringify({ callId, data: transcript.data }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        available += 1;
+      } catch (error) {
+        const message = errorMessage(error);
+        if (!/Quo API (400|403|404)/.test(message)) throw error;
+        await quoFunctionJson('transcript', {
+          method: 'POST',
+          body: JSON.stringify({
+            callId,
+            status: 'unavailable',
+            reason: 'Quo has no retrievable transcript for this call. Older calls may predate transcription.',
+          }),
+        });
+        unavailable += 1;
+      }
+    }
+    if (calls.length < 100) break;
+  }
+  return { checked, available, unavailable };
+}
+
+function authorizedHermesAutomation(req: Request): boolean {
+  const supplied = req.headers['x-fluid-agent-secret'];
+  return typeof supplied === 'string' && supplied.length >= 43 &&
+    safeEqual(activityFunctionSecret(), supplied);
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 async function customerFunctionJson<T>(
@@ -1086,6 +1218,24 @@ app.put('/api/connections/quo/:id/scope', async (req, res, next) => {
   }
 });
 
+app.post('/api/internal/quo/contact-enrichment', async (req, res, next) => {
+  try {
+    if (!authorizedHermesAutomation(req)) throw new HttpError(401, 'Unauthorized');
+    res.json({ result: await runQuoContactEnrichment() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/internal/quo/transcript-backfill', async (req, res, next) => {
+  try {
+    if (!authorizedHermesAutomation(req)) throw new HttpError(401, 'Unauthorized');
+    res.json({ result: await runQuoTranscriptBackfill() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post(
   '/api/connections/quo/:id/import',
   express.text({ type: ['text/csv', 'application/csv', 'text/plain'], limit: '50mb' }),
@@ -1260,24 +1410,147 @@ app.get('/api/activities', async (req, res, next) => {
   }
 });
 
+async function contactsPayload(req: Request): Promise<unknown> {
+  const limit = Math.max(1, Math.min(100, readPositiveInt(
+    typeof req.query.limit === 'string' ? req.query.limit : undefined,
+    30,
+  )));
+  const role = typeof req.query.role === 'string' ? req.query.role.trim().toLowerCase() : '';
+  if (role && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(role)) {
+    throw new HttpError(400, 'Invalid Contact role');
+  }
+  const status = req.query.status === 'archived' ? 'archived' : 'active';
+  const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+  const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+  if ((cursorAt === undefined) !== (cursorId === undefined)) {
+    throw new HttpError(400, 'Contact cursor is incomplete');
+  }
+  if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !isUuid(cursorId))) {
+    throw new HttpError(400, 'Contact cursor is invalid');
+  }
+  return activityFunctionJson<unknown>('contacts', {
+    limit: String(limit),
+    status,
+    ...(role ? { role } : {}),
+    ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
+  });
+}
+
+app.get('/api/contacts', async (req, res, next) => {
+  try {
+    res.json(await contactsPayload(req));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Compatibility alias while every existing client migrates from People to Contacts.
 app.get('/api/people', async (req, res, next) => {
   try {
-    const allowedRoles = new Set(['customer', 'employee', 'painter']);
-    const role = typeof req.query.role === 'string' ? req.query.role.trim().toLowerCase() : 'customer';
-    if (!allowedRoles.has(role)) throw new HttpError(400, 'Invalid people role');
+    const payload = await contactsPayload(req);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const record = payload as Record<string, unknown>;
+      res.json({ ...record, people: record.contacts });
+      return;
+    }
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/contacts/roles', async (_req, res, next) => {
+  try {
+    res.json(await activityFunctionJson<unknown>('contact-roles', {}));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/contacts/search', async (req, res, next) => {
+  try {
+    const query = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    res.json(await activityFunctionJson<unknown>('contact-search', { q: query }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/contacts/:id/activities', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Contact id');
+    const limit = Math.max(1, Math.min(50, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) {
+      throw new HttpError(400, 'Contact Activity cursor is incomplete');
+    }
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
+      throw new HttpError(400, 'Contact Activity cursor is invalid');
+    }
+    res.json(await activityFunctionJson<unknown>('contact-activities', {
+      contactId: req.params.id,
+      limit: String(limit),
+      ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/contacts/:id', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Contact id');
+    res.json(await activityFunctionJson<unknown>('contact', { contactId: req.params.id }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/contact-suggestions', async (req, res, next) => {
+  try {
     const limit = Math.max(1, Math.min(100, readPositiveInt(
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
       30,
     )));
-    const rawOffset = typeof req.query.offset === 'string' ? req.query.offset : '0';
-    if (!/^\d+$/.test(rawOffset)) throw new HttpError(400, 'Invalid people offset');
-    const offset = Math.min(100_000, Number.parseInt(rawOffset, 10));
-    const payload = await customerFunctionJson<unknown>('people', {
-      role,
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) {
+      throw new HttpError(400, 'Suggestion cursor is incomplete');
+    }
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !isUuid(cursorId))) {
+      throw new HttpError(400, 'Suggestion cursor is invalid');
+    }
+    res.json(await activityFunctionJson<unknown>('contact-suggestions', {
       limit: String(limit),
-      offset: String(offset),
-    });
-    res.json(payload);
+      ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/contact-suggestions/:id/resolve', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid suggestion id');
+    const action = req.body?.action;
+    const contactId = req.body?.contactId;
+    if (!['create', 'link', 'ignore'].includes(action) ||
+      (action === 'link' && !isUuid(contactId)) ||
+      (action !== 'link' && contactId !== undefined)) {
+      throw new HttpError(400, 'Invalid suggestion resolution');
+    }
+    res.json(await activityFunctionJson<unknown>('resolve-contact-suggestion', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        suggestionId: req.params.id,
+        action,
+        ...(action === 'link' ? { contactId } : {}),
+      }),
+    }));
   } catch (error) {
     next(error);
   }
@@ -1420,6 +1693,14 @@ app.get('/api/hermes/agents', async (_req, res, next) => {
   }
 });
 
+app.get('/api/hermes/schedules', async (_req, res, next) => {
+  try {
+    res.json(await hermesMetadataJson('agents'));
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes schedules: ${errorMessage(error)}`));
+  }
+});
+
 app.get('/api/hermes/skills', async (_req, res, next) => {
   try {
     res.json(await hermesMetadataJson('skills'));
@@ -1442,9 +1723,10 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
       20,
     )));
-    if (agentId === 'email-categorizer' && jobId === undefined) {
+    if ((agentId === 'email-categorizer' || agentId === 'signal-triage') && jobId === undefined) {
       const payload = await activityFunctionJson<unknown>('agent-history', {
         accountEmail: intendedEmail,
+        agentKey: agentId,
         limit: String(limit),
       });
       res.json(payload);

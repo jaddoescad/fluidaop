@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import {
@@ -18,9 +18,11 @@ import './agents.css';
 export function AgentsPage({
   d,
   onNavigate,
+  header,
 }: {
   d: Derived;
   onNavigate: (label: string) => void;
+  header: ReactNode;
 }) {
   const [status, setStatus] = useState<HermesStatus | null>(null);
   const [agents, setAgents] = useState<HermesAgentDefinition[] | null>(null);
@@ -102,12 +104,13 @@ export function AgentsPage({
       <div className="fl-shell">
         <SideNav d={d} active="Agents" onNav={onNavigate} />
         <div className="fl-frame">
+          {header}
           <main className="ag-main">
             <div className="ag-inner">
               <header className="ag-head">
                 <div>
                   <h1>Agents</h1>
-                  <p>Your Ottawa Painters automations, connected through Hermes.</p>
+                  <p>Your Ottawa Painters AI workers — the Hermes jobs that reason with a model. Timing and script jobs live in Schedules.</p>
                 </div>
                 <button type="button" className="ag-refresh" onClick={() => void refresh()}>
                   Refresh
@@ -123,7 +126,7 @@ export function AgentsPage({
                       ? error
                       : status === null
                         ? 'Connecting to the agent gateway…'
-                        : `v${status.version ?? 'unknown'} · ${status.profiles.length} profiles · ${agents?.length ?? 0} automations · ${status.activeAgents} active now`}
+                        : `v${status.version ?? 'unknown'} · ${status.profiles.length} profiles · ${agents?.length ?? 0} agents · ${status.activeAgents} active now`}
                   </span>
                 </div>
               </section>
@@ -137,12 +140,12 @@ export function AgentsPage({
               ) : agents === null ? (
                 <div className="ag-history-empty" role="status">
                   <strong>Loading agents</strong>
-                  <p>Reading the live Hermes automation roster…</p>
+                  <p>Reading the live Hermes agent roster…</p>
                 </div>
               ) : agents.length === 0 ? (
                 <div className="ag-history-empty">
                   <strong>No Hermes agents</strong>
-                  <p>Hermes is online, but it is not reporting any automation jobs.</p>
+                  <p>Hermes is online, but it is not reporting any agent-mode jobs. Script-only jobs appear under Schedules.</p>
                 </div>
               ) : (
               <div className="ag-list" aria-label="Hermes agents">
@@ -183,7 +186,7 @@ export function AgentsPage({
               )}
 
               <p className="ag-note">
-                This list comes directly from Hermes. New automation jobs appear here without a Fluid code change.
+                This list comes directly from Hermes and shows only agent-mode jobs — AI workers that reason on each run. New agents appear here without a Fluid code change; script jobs and all timing live in Schedules.
               </p>
             </div>
           </main>

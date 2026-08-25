@@ -890,6 +890,22 @@
   animation: none;
 }
 
+.v .sim-dot.hermes-dot-checking {
+  background: var(--faint);
+  animation: none;
+}
+
+.v .sim-dot.hermes-dot-degraded {
+  background: var(--warn);
+  animation: none;
+}
+
+.v .sim-dot.hermes-dot-offline,
+.v .sim-dot.hermes-dot-unavailable {
+  background: var(--danger);
+  animation: none;
+}
+
 @keyframes vbreathe {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 45%, transparent); }
   50% { box-shadow: 0 0 0 5px transparent; }

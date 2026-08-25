@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { Derived } from '../variants/shared';
 import { SideNav } from '../variants/kit';
 import '../variants/flow.css';
@@ -26,6 +26,7 @@ interface Cursor {
 }
 
 interface SignalClassification {
+  label_kind: 'topic' | 'urgency';
   confidence: number | null;
   reason: string;
   updated_at: string;
@@ -34,6 +35,29 @@ interface SignalClassification {
     name: string;
     color: string;
   } | null;
+}
+
+interface ContactSummary {
+  id: string;
+  displayName: string;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+  entityType: 'person' | 'business';
+}
+
+interface CallTranscript {
+  status: 'available' | 'unavailable';
+  dialogue: Array<{
+    content?: string;
+    identifier?: string;
+    userId?: string;
+    start?: number;
+    end?: number;
+  }>;
+  transcript_text: string | null;
+  unavailable_reason: string | null;
+  transcript_created_at: string | null;
+  updated_at: string;
 }
 
 interface AttachmentEvidence {
@@ -71,13 +95,15 @@ interface SignalSummary {
   call_status: string | null;
   duration_seconds: number | null;
   contact_id: string | null;
-  classification?: SignalClassification | null;
+  classifications?: SignalClassification[];
+  contact?: ContactSummary | null;
 }
 
 interface SignalDetail extends SignalSummary {
   body_text: string | null;
   source_metadata?: Record<string, unknown>;
   attachmentEvidence?: AttachmentEvidence[];
+  transcript?: CallTranscript | null;
 }
 
 interface SyncState {
@@ -182,17 +208,22 @@ function groupByDay(rows: SignalSummary[], now: number): { label: string; items:
   return groups;
 }
 
-// ---------- people ----------
+// ---------- contacts ----------
 
 /** The counterparty of a signal as one short scannable name. */
 function personOf(signal: SignalSummary): string {
-  if (signal.actor_name !== null && signal.actor_name !== '') return signal.actor_name;
+  if (signal.contact?.displayName) return signal.contact.displayName;
   if (signal.source === 'gmail') {
     if (signal.actor_email !== null && signal.actor_email !== '') return signal.actor_email;
-    if (signal.direction === 'inbound') return signal.from_email ?? 'Unknown sender';
-    return signal.to_emails[0] ?? 'Unknown recipient';
+    if (signal.direction === 'inbound' && signal.from_email) return signal.from_email;
+    if (signal.direction === 'outbound' && signal.to_emails[0]) return signal.to_emails[0];
+    return 'Unknown';
   }
-  return signal.actor_phone ?? 'Unknown number';
+  return signal.actor_phone || 'Unknown';
+}
+
+function classificationOf(signal: SignalSummary, kind: 'topic' | 'urgency') {
+  return signal.classifications?.find((classification) => classification.label_kind === kind) ?? null;
 }
 
 /** Who wrote a specific email. */
@@ -584,6 +615,8 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
   const body = detail?.body_text ?? null;
   const hasBody = body !== null && body.trim() !== '';
   const isCall = s.event_type === 'call.completed';
+  const triageLabels = s.classifications?.filter((classification) => classification.label !== null) ?? [];
+  const triageDecision = triageLabels[0] ?? null;
 
   return (
     <div className="ac-scrim" onClick={onClose}>
@@ -613,23 +646,30 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
         <section className="ac-signal" aria-label="Selected signal">
           <span className="ac-signal-tag">Signal</span>
           <h2 className="ac-drawer-subject">{subject}</h2>
-          {s.classification?.label && (
-            <div
-              className="ac-classification"
-              style={{ ['--ac-label' as string]: s.classification.label.color }}
-            >
-              <span className="ac-classification-pill">{s.classification.label.name}</span>
-              {s.classification.confidence !== null && (
+          {triageLabels.length > 0 && (
+            <div className="ac-classification">
+              {triageLabels.map((classification) => classification.label && (
+                <span
+                  key={classification.label_kind}
+                  className="ac-classification-pill"
+                  style={{ ['--ac-label' as string]: classification.label.color }}
+                  title={classification.label_kind === 'topic' ? 'Topic' : 'Urgency'}
+                >
+                  {classification.label.name}
+                </span>
+              ))}
+              {triageDecision?.confidence !== null && triageDecision?.confidence !== undefined && (
                 <span className="ac-classification-confidence">
-                  {Math.round(s.classification.confidence * 100)}% confidence
+                  {Math.round(triageDecision.confidence * 100)}% confidence
                 </span>
               )}
-              {s.classification.reason !== '' && (
-                <p>{s.classification.reason}</p>
+              {triageDecision?.reason && (
+                <p>{triageDecision.reason}</p>
               )}
             </div>
           )}
           <dl className="ac-parts">
+            {s.contact && <div className="ac-part"><dt>Contact</dt><dd>{s.contact.displayName}</dd></div>}
             {s.source === 'gmail' ? <>
               <div className="ac-part"><dt>From</dt><dd>{fromLine(s)}</dd></div>
               <div className="ac-part"><dt>To</dt><dd>{s.to_emails.length > 0 ? s.to_emails.join(', ') : '—'}</dd></div>
@@ -664,8 +704,30 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
             <p className="ac-drawer-loading" role="status">
               Loading the signal…
             </p>
+          ) : isCall && detail?.transcript?.status === 'available' ? (
+            <div className="ac-call-detail">
+              <span className="ac-evidence-title">Call transcript</span>
+              {detail.transcript.dialogue.length > 0 ? (
+                <ol className="ac-transcript">
+                  {detail.transcript.dialogue.map((turn, index) => (
+                    <li key={`${turn.start ?? index}-${index}`}>
+                      <span>{turn.identifier || turn.userId || `Speaker ${index + 1}`}</span>
+                      <p>{turn.content || '—'}</p>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <pre className="ac-body-text">{detail.transcript.transcript_text || 'No dialogue was returned.'}</pre>
+              )}
+            </div>
           ) : isCall ? (
-            <div className="ac-call-detail"><p className="ac-nobody">No transcript or summary is available for this call.</p></div>
+            <div className="ac-call-detail">
+              <p className="ac-nobody">
+                {detail?.transcript?.status === 'unavailable'
+                  ? 'A transcript is not available for this call.'
+                  : 'The transcript has not arrived yet.'}
+              </p>
+            </div>
           ) : hasBody ? (
             <pre className="ac-body-text">{body}</pre>
           ) : (
@@ -692,9 +754,11 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
 export function ActivitiesPage({
   d,
   onNavigate,
+  header,
 }: {
   d: Derived;
   onNavigate: (label: string) => void;
+  header: ReactNode;
 }) {
   const [payload, setPayload] = useState<ActivitiesPayload | null>(null);
   const [pageStack, setPageStack] = useState<(Cursor | null)[]>([null]);
@@ -824,6 +888,7 @@ export function ActivitiesPage({
       <div className="fl-shell">
         <SideNav d={d} active="Activity" onNav={onNavigate} />
         <div className="fl-frame">
+          {header}
           <main className="ac-main">
             <div className="ac-inner">
               <header className="ac-head">
@@ -920,19 +985,29 @@ export function ActivitiesPage({
                               <span className="ac-row-main">
                                 <span className="ac-row-top">
                                   <DirectionMark direction={signal.direction} call={signal.event_type === 'call.completed'} />
-                                  <span className="ac-row-person">{personOf(signal)}</span>
+                                  <span
+                                    className={`ac-row-person${signal.contact ? ' ac-row-contact' : ''}`}
+                                    title={signal.contact ? 'Linked Contact' : undefined}
+                                  >
+                                    {personOf(signal)}
+                                  </span>
                                   {signal.has_attachments && (
                                     <AttachmentClip count={signal.attachment_count} />
                                   )}
                                   {signal.event_type === 'call.completed' && signal.call_status && <CallStatusPill status={signal.call_status} />}
-                                  {signal.classification?.label && (
-                                    <span
-                                      className="ac-row-label"
-                                      style={{ ['--ac-label' as string]: signal.classification.label.color }}
-                                    >
-                                      {signal.classification.label.name}
-                                    </span>
-                                  )}
+                                  {(['topic', 'urgency'] as const).map((kind) => {
+                                    const classification = classificationOf(signal, kind);
+                                    return classification?.label ? (
+                                      <span
+                                        key={kind}
+                                        className="ac-row-label"
+                                        style={{ ['--ac-label' as string]: classification.label.color }}
+                                        title={kind === 'topic' ? 'Topic' : 'Urgency'}
+                                      >
+                                        {classification.label.name}
+                                      </span>
+                                    ) : null;
+                                  })}
                                 </span>
                                 <RowLine signal={signal} />
                               </span>
