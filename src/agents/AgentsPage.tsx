@@ -224,17 +224,19 @@ export function AgentsPage({
               <div><dt>Mode</dt><dd>{selectedAgent.mode}</dd></div>
             </dl>
 
-            <section className="ag-detail-section">
-              <h3>How it runs</h3>
-              <ol className="ag-sequence">
-                {selectedAgent.steps.map((step, index) => (
-                  <li key={step}>
-                    <span>{index + 1}</span>
-                    <p>{step}</p>
-                  </li>
-                ))}
-              </ol>
-            </section>
+            {selectedAgent.steps.length > 0 ? (
+              <section className="ag-detail-section">
+                <h3>How it runs</h3>
+                <ol className="ag-sequence">
+                  {selectedAgent.steps.map((step, index) => (
+                    <li key={step}>
+                      <span>{index + 1}</span>
+                      <p>{step}</p>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
 
             <section className="ag-detail-section">
               <div className="ag-detail-heading">

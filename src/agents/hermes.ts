@@ -74,15 +74,10 @@ const AGENT_PRESENTATIONS: AgentPresentation[] = [
     match: /fluid customer sync/i,
     name: 'Customer Sync',
     icon: '👥',
-    description: 'Syncs Ottawa Painters customers into canonical Fluid people and connects exact matching signals without merging customers.',
+    description: 'Syncs customers from Ottawa Painters Admin to Fluid.',
     mode: 'Scheduled sync',
     historyAgentId: null,
-    steps: [
-      'Read customer records changed in Ottawa Painters Admin',
-      'Create or refresh one canonical person for each source customer',
-      'Preserve shared emails and phone numbers without automatically merging people',
-      'Connect signals by source contact or an unambiguous exact email match',
-    ],
+    steps: [],
   },
   {
     match: /contractor invoice sync/i,
