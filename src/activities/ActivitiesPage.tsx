@@ -48,27 +48,35 @@ interface AttachmentEvidence {
 
 interface SignalSummary {
   id: number;
-  source: 'gmail';
-  account_email: string;
+  source: 'gmail' | 'quo';
+  account_email: string | null;
+  account_phone: string | null;
   external_id: string;
   external_thread_id: string | null;
+  event_type: 'email.received' | 'email.sent' | 'message.received' | 'message.sent' | 'call.completed';
   direction: 'inbound' | 'outbound';
   actor_name: string | null;
   actor_email: string | null;
+  actor_phone: string | null;
   from_email: string | null;
+  from_phone: string | null;
   to_emails: string[];
+  to_phones: string[];
   cc_emails: string[];
   subject: string;
   preview: string;
   occurred_at: string;
   has_attachments: boolean;
   attachment_count: number;
+  call_status: string | null;
+  duration_seconds: number | null;
   contact_id: string | null;
   classification?: SignalClassification | null;
 }
 
 interface SignalDetail extends SignalSummary {
   body_text: string | null;
+  source_metadata?: Record<string, unknown>;
   attachmentEvidence?: AttachmentEvidence[];
 }
 
@@ -179,17 +187,25 @@ function groupByDay(rows: SignalSummary[], now: number): { label: string; items:
 /** The counterparty of a signal as one short scannable name. */
 function personOf(signal: SignalSummary): string {
   if (signal.actor_name !== null && signal.actor_name !== '') return signal.actor_name;
-  if (signal.actor_email !== null && signal.actor_email !== '') return signal.actor_email;
-  if (signal.direction === 'inbound') return signal.from_email ?? 'Unknown sender';
-  return signal.to_emails[0] ?? 'Unknown recipient';
+  if (signal.source === 'gmail') {
+    if (signal.actor_email !== null && signal.actor_email !== '') return signal.actor_email;
+    if (signal.direction === 'inbound') return signal.from_email ?? 'Unknown sender';
+    return signal.to_emails[0] ?? 'Unknown recipient';
+  }
+  return signal.actor_phone ?? 'Unknown number';
 }
 
 /** Who wrote a specific email. */
 function senderOf(signal: SignalSummary): string {
+  if (signal.source === 'quo') {
+    return signal.direction === 'outbound'
+      ? signal.account_phone ?? 'Quo'
+      : signal.actor_name ?? signal.actor_phone ?? 'Unknown number';
+  }
   if (signal.direction === 'outbound') {
     return signal.from_email !== null && signal.from_email !== ''
       ? signal.from_email
-      : signal.account_email;
+      : signal.account_email ?? 'Gmail';
   }
   if (signal.actor_name !== null && signal.actor_name !== '') return signal.actor_name;
   if (signal.actor_email !== null && signal.actor_email !== '') return signal.actor_email;
@@ -204,7 +220,13 @@ function fromLine(signal: SignalSummary): string {
     if (name !== '' && email !== '') return `${name} <${email}>`;
   }
   if (email !== '') return email;
-  return signal.direction === 'outbound' ? signal.account_email : 'Unknown sender';
+  return signal.direction === 'outbound' ? signal.account_email ?? 'Gmail' : 'Unknown sender';
+}
+
+function counterpartyPhone(signal: SignalSummary, side: 'from' | 'to'): string {
+  const wantActor = (side === 'from') === (signal.direction === 'inbound');
+  if (wantActor) return signal.actor_phone ?? 'Unknown number';
+  return signal.account_phone ?? 'Quo number';
 }
 
 // ---------- small pieces ----------
@@ -213,11 +235,38 @@ function fromLine(signal: SignalSummary): string {
  * The logo of the tool an activity came from, drawn inline — no remote
  * image. Gmail is the only source today; new sources add a case here.
  */
-function SourceLogo({ source, small = false }: { source: 'gmail'; small?: boolean }) {
+function EventTypeMark({ eventType }: { eventType: SignalSummary['event_type'] }) {
+  if (eventType.startsWith('email.')) return null;
+  const isCall = eventType === 'call.completed';
+  return (
+    <span className={`ac-evt ${isCall ? 'ac-evt-call' : 'ac-evt-msg'}`} title={isCall ? 'Phone call' : 'Text message'}>
+      <svg viewBox="0 0 14 14" width="9" height="9" aria-hidden="true">
+        {isCall
+          ? <path d="M3 2.6c.4-.5 1-.8 1.6-.6l1.4.5c.5.2.8.7.7 1.2l-.3 1.4c-.1.4-.4.7-.8.8-.5.1-.8.5-.7 1 .3 1.4 1.4 2.5 2.8 2.8.5.1.9-.2 1-.7.1-.4.4-.7.8-.8l1.4-.3c.5-.1 1 .2 1.2.7l.5 1.4c.2.6-.1 1.2-.6 1.6-2.9 2-6.9 1.7-9.4-.8S1 5.5 3 2.6Z" fill="currentColor" />
+          : <path d="M2 3.5h10a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H6.4L3.5 12.6c-.3.3-.9.1-.9-.3V10.5H2a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" strokeWidth="1.1" />}
+      </svg>
+      <span className="ac-sr">{isCall ? 'Phone call' : 'Text message'}</span>
+    </span>
+  );
+}
+
+function SourceLogo({ source, eventType, small = false }: { source: SignalSummary['source']; eventType: SignalSummary['event_type']; small?: boolean }) {
+  if (source === 'quo') {
+    return (
+      <span className={`ac-logo ac-logo-quo${small ? ' ac-logo-sm' : ''}`} title="From Quo">
+        <svg viewBox="0 0 24 24" width={small ? 15 : 18} height={small ? 15 : 18} aria-hidden="true">
+          <circle cx="9" cy="12" r="6.2" fill="#fff" />
+          <circle cx="15" cy="12" r="6.2" fill="#fff" opacity="0.82" />
+        </svg>
+        <span className="ac-sr">From Quo</span>
+        <EventTypeMark eventType={eventType} />
+      </span>
+    );
+  }
   return (
     <span
       className={`ac-logo${small ? ' ac-logo-sm' : ''}`}
-      title={source === 'gmail' ? 'From Gmail' : undefined}
+      title="From Gmail"
     >
       <svg
         viewBox="52 42 88 66"
@@ -232,14 +281,14 @@ function SourceLogo({ source, small = false }: { source: 'gmail'; small?: boolea
         <path fill="#ea4335" d="M72 74V48l24 18 24-18v26L96 92" />
         <path fill="#c5221f" d="M52 51v8l20 15V48l-5.6-4.2c-5.94-4.45-14.4-.22-14.4 7.2" />
       </svg>
-      <span className="ac-sr">{source === 'gmail' ? 'From Gmail' : ''}</span>
+      <span className="ac-sr">From Gmail</span>
     </span>
   );
 }
 
-function DirectionMark({ direction }: { direction: 'inbound' | 'outbound' }) {
+function DirectionMark({ direction, call = false }: { direction: 'inbound' | 'outbound'; call?: boolean }) {
   const inbound = direction === 'inbound';
-  const text = inbound ? 'Received' : 'Sent';
+  const text = call ? (inbound ? 'Incoming' : 'Outgoing') : (inbound ? 'Received' : 'Sent');
   return (
     <span className={`ac-dir ${inbound ? 'ac-dir-in' : 'ac-dir-out'}`} title={text}>
       <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true" focusable="false">
@@ -266,6 +315,42 @@ function DirectionMark({ direction }: { direction: 'inbound' | 'outbound' }) {
       <span className="ac-sr">{text}</span>
     </span>
   );
+}
+
+function callDurationLabel(seconds: number | null): string | null {
+  if (seconds === null || seconds <= 0) return null;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
+}
+
+function callStatusLabel(status: string | null): string {
+  const labels: Record<string, string> = {
+    completed: 'Completed', missed: 'Missed', voicemail: 'Voicemail', no_answer: 'No answer', failed: 'Failed',
+  };
+  return status ? labels[status] ?? status.replace(/_/g, ' ') : 'Completed';
+}
+
+function CallStatusPill({ status }: { status: string }) {
+  if (status === 'completed') return null;
+  const warning = status === 'voicemail' || status === 'no_answer';
+  return <span className={`ac-row-label ac-call-pill${warning ? ' ac-call-pill-warn' : ''}`}>{callStatusLabel(status)}</span>;
+}
+
+function RowLine({ signal }: { signal: SignalSummary }) {
+  if (signal.source === 'gmail') {
+    return (
+      <span className="ac-row-line">
+        <span className="ac-row-subject">{signal.subject !== '' ? signal.subject : '(no subject)'}</span>
+        {signal.preview !== '' && <span className="ac-row-preview"> — {signal.preview}</span>}
+      </span>
+    );
+  }
+  if (signal.event_type !== 'call.completed') {
+    return <span className="ac-row-line"><span className="ac-row-subject">{signal.preview || '(empty message)'}</span></span>;
+  }
+  const label = signal.direction === 'inbound' ? 'Incoming call' : 'Outgoing call';
+  return <span className="ac-row-line"><span className="ac-row-subject">{label}{signal.preview ? ` — ${signal.preview}` : ''}</span></span>;
 }
 
 function AttachmentClip({ count }: { count: number }) {
@@ -295,7 +380,7 @@ function HistoryItem({ message }: { message: SignalDetail }) {
   return (
     <li className="ac-hist-item">
       <header className="ac-hist-head">
-        <DirectionMark direction={message.direction} />
+        <DirectionMark direction={message.direction} call={message.event_type === 'call.completed'} />
         <span className="ac-hist-sender">{senderOf(message)}</span>
         <time className="ac-hist-time" dateTime={message.occurred_at}>
           {fmtFull(message.occurred_at)}
@@ -306,7 +391,7 @@ function HistoryItem({ message }: { message: SignalDetail }) {
         <pre className="ac-body-text ac-hist-body">{body}</pre>
       ) : (
         <p className="ac-nobody">
-          No plain-text body was stored for this email
+          No plain-text body was stored for this {message.source === 'gmail' ? 'email' : 'message'}
           {message.preview !== '' ? ` — only the preview: “${message.preview}”` : '.'}
         </p>
       )}
@@ -320,7 +405,7 @@ function HistoryItem({ message }: { message: SignalDetail }) {
  * here is a signal, and labels and links will apply to the selected
  * signal only.
  */
-function GmailHistory({ signalId, count }: { signalId: number; count: number }) {
+function ConversationHistory({ signalId, source, count }: { signalId: number; source: 'gmail' | 'quo'; count: number }) {
   const [open, setOpen] = useState(false);
   const [pageStack, setPageStack] = useState<(Cursor | null)[]>([null]);
   const [messages, setMessages] = useState<SignalDetail[] | null>(null);
@@ -331,6 +416,8 @@ function GmailHistory({ signalId, count }: { signalId: number; count: number }) 
   const cursor = pageStack[pageStack.length - 1] ?? null;
   const page = pageStack.length;
   const totalPages = Math.max(1, Math.ceil(count / HISTORY_PAGE_SIZE));
+  const noun = source === 'gmail' ? 'email' : 'message';
+  const title = source === 'gmail' ? 'Gmail history' : 'Conversation history';
 
   useEffect(() => {
     if (!open) return;
@@ -359,7 +446,7 @@ function GmailHistory({ signalId, count }: { signalId: number; count: number }) 
   const panelId = `ac-hist-panel-${signalId}`;
 
   return (
-    <section className="ac-hist" aria-label="Gmail history">
+    <section className="ac-hist" aria-label={title}>
       <button
         type="button"
         className="ac-hist-toggle"
@@ -384,9 +471,9 @@ function GmailHistory({ signalId, count }: { signalId: number; count: number }) 
             strokeLinejoin="round"
           />
         </svg>
-        Gmail history
+        {title}
         <span className="ac-hist-count">
-          {count} other email{count === 1 ? '' : 's'}
+          {count} other {noun}{count === 1 ? '' : 's'}
         </span>
       </button>
       {open && (
@@ -396,19 +483,19 @@ function GmailHistory({ signalId, count }: { signalId: number; count: number }) 
           </p>
           {error !== null ? (
             <p className="ac-drawer-problem" role="alert">
-              Couldn’t load the Gmail history: {error}
+              Couldn’t load the history: {error}
             </p>
           ) : messages === null ? (
             <p className="ac-drawer-loading" role="status">
               Loading the history…
             </p>
           ) : messages.length === 0 ? (
-            <p className="ac-drawer-loading">No other emails were found.</p>
+            <p className="ac-drawer-loading">No other {noun}s were found.</p>
           ) : (
             <ol
               className={`ac-hist-list${loading ? ' ac-feed-stale' : ''}`}
               aria-busy={loading}
-              aria-label={`${messages.length} emails from the same Gmail thread, newest first`}
+              aria-label={`${messages.length} ${noun}s from the same conversation, newest first`}
             >
               {messages.map((m) => (
                 <HistoryItem key={m.id} message={m} />
@@ -450,6 +537,12 @@ function GmailHistory({ signalId, count }: { signalId: number; count: number }) 
 
 // ---------- signal drawer ----------
 
+function signalHeadline(signal: SignalSummary): string {
+  if (signal.source === 'gmail') return signal.subject || '(no subject)';
+  if (signal.event_type !== 'call.completed') return personOf(signal);
+  return signal.direction === 'inbound' ? 'Incoming call' : 'Outgoing call';
+}
+
 function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () => void }) {
   const [detail, setDetail] = useState<SignalDetail | null>(null);
   const [historyCount, setHistoryCount] = useState<number | null>(null);
@@ -487,9 +580,10 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
   // the feed summary carries every field but the body, so the signal is
   // readable immediately while the detail request fills in the body
   const s = detail ?? signal;
-  const subject = s.subject !== '' ? s.subject : '(no subject)';
+  const subject = signalHeadline(s);
   const body = detail?.body_text ?? null;
   const hasBody = body !== null && body.trim() !== '';
+  const isCall = s.event_type === 'call.completed';
 
   return (
     <div className="ac-scrim" onClick={onClose}>
@@ -504,10 +598,10 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
       >
         <header className="ac-drawer-head">
           <div className="ac-drawer-meta">
-            <SourceLogo source="gmail" small />
-            <DirectionMark direction={s.direction} />
+            <SourceLogo source={s.source} eventType={s.event_type} small />
+            <DirectionMark direction={s.direction} call={isCall} />
             <span className="ac-drawer-when">
-              {s.direction === 'inbound' ? 'Received' : 'Sent'} ·{' '}
+              {isCall ? (s.direction === 'inbound' ? 'Incoming' : 'Outgoing') : (s.direction === 'inbound' ? 'Received' : 'Sent')} ·{' '}
               <time dateTime={s.occurred_at}>{fmtFull(s.occurred_at)}</time>
             </span>
           </div>
@@ -536,28 +630,18 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
             </div>
           )}
           <dl className="ac-parts">
-            <div className="ac-part">
-              <dt>From</dt>
-              <dd>{fromLine(s)}</dd>
-            </div>
-            <div className="ac-part">
-              <dt>To</dt>
-              <dd>{s.to_emails.length > 0 ? s.to_emails.join(', ') : '—'}</dd>
-            </div>
-            {s.cc_emails.length > 0 && (
-              <div className="ac-part">
-                <dt>Cc</dt>
-                <dd>{s.cc_emails.join(', ')}</dd>
-              </div>
-            )}
-            {s.has_attachments && (
-              <div className="ac-part">
-                <dt>Files</dt>
-                <dd>
-                  {s.attachment_count} attachment{s.attachment_count === 1 ? '' : 's'}
-                </dd>
-              </div>
-            )}
+            {s.source === 'gmail' ? <>
+              <div className="ac-part"><dt>From</dt><dd>{fromLine(s)}</dd></div>
+              <div className="ac-part"><dt>To</dt><dd>{s.to_emails.length > 0 ? s.to_emails.join(', ') : '—'}</dd></div>
+              {s.cc_emails.length > 0 && <div className="ac-part"><dt>Cc</dt><dd>{s.cc_emails.join(', ')}</dd></div>}
+              {s.has_attachments && <div className="ac-part"><dt>Files</dt><dd>{s.attachment_count} attachment{s.attachment_count === 1 ? '' : 's'}</dd></div>}
+            </> : <>
+              <div className="ac-part"><dt>From</dt><dd>{counterpartyPhone(s, 'from')}</dd></div>
+              <div className="ac-part"><dt>To</dt><dd>{counterpartyPhone(s, 'to')}</dd></div>
+              {isCall && <div className="ac-part"><dt>Status</dt><dd>{callStatusLabel(s.call_status)}</dd></div>}
+              {isCall && <div className="ac-part"><dt>Duration</dt><dd>{callDurationLabel(s.duration_seconds) ?? '—'}</dd></div>}
+              {!isCall && s.has_attachments && <div className="ac-part"><dt>Media</dt><dd>{s.attachment_count} item{s.attachment_count === 1 ? '' : 's'}</dd></div>}
+            </>}
           </dl>
           {detail?.attachmentEvidence && detail.attachmentEvidence.length > 0 && (
             <div className="ac-evidence" aria-label="Attachment evidence stored by Hermes">
@@ -580,21 +664,23 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
             <p className="ac-drawer-loading" role="status">
               Loading the signal…
             </p>
+          ) : isCall ? (
+            <div className="ac-call-detail"><p className="ac-nobody">No transcript or summary is available for this call.</p></div>
           ) : hasBody ? (
             <pre className="ac-body-text">{body}</pre>
           ) : (
             <p className="ac-nobody">
-              No plain-text body was stored for this email
+              No plain-text body was stored for this {s.source === 'gmail' ? 'email' : 'message'}
               {s.preview !== '' ? ` — only the preview: “${s.preview}”` : '.'}
             </p>
           )}
         </section>
 
-        {historyCount !== null &&
+        {historyCount !== null && !isCall &&
           (historyCount > 0 ? (
-            <GmailHistory signalId={signal.id} count={historyCount} />
+            <ConversationHistory signalId={signal.id} source={s.source} count={historyCount} />
           ) : (
-            <p className="ac-hist-none">No other emails in this Gmail thread.</p>
+            <p className="ac-hist-none">No other {s.source === 'gmail' ? 'emails in this Gmail thread' : 'messages in this conversation'}.</p>
           ))}
       </aside>
     </div>
@@ -743,7 +829,7 @@ export function ActivitiesPage({
               <header className="ac-head">
                 <div className="ac-head-text">
                   <h1>Activity</h1>
-                  <p>Signals from your connected tools, newest first. One email is one signal.</p>
+                  <p>Emails, messages, and calls from connected tools — newest first.</p>
                 </div>
                 <div className="ac-sync-controls">
                   <span className="ac-auto-sync">
@@ -830,14 +916,15 @@ export function ActivitiesPage({
                               className="ac-row"
                               onClick={() => setSelected(signal)}
                             >
-                              <SourceLogo source="gmail" small />
+                              <SourceLogo source={signal.source} eventType={signal.event_type} small />
                               <span className="ac-row-main">
                                 <span className="ac-row-top">
-                                  <DirectionMark direction={signal.direction} />
+                                  <DirectionMark direction={signal.direction} call={signal.event_type === 'call.completed'} />
                                   <span className="ac-row-person">{personOf(signal)}</span>
                                   {signal.has_attachments && (
                                     <AttachmentClip count={signal.attachment_count} />
                                   )}
+                                  {signal.event_type === 'call.completed' && signal.call_status && <CallStatusPill status={signal.call_status} />}
                                   {signal.classification?.label && (
                                     <span
                                       className="ac-row-label"
@@ -847,16 +934,10 @@ export function ActivitiesPage({
                                     </span>
                                   )}
                                 </span>
-                                <span className="ac-row-line">
-                                  <span className="ac-row-subject">
-                                    {signal.subject !== '' ? signal.subject : '(no subject)'}
-                                  </span>
-                                  {signal.preview !== '' && (
-                                    <span className="ac-row-preview"> — {signal.preview}</span>
-                                  )}
-                                </span>
+                                <RowLine signal={signal} />
                               </span>
                               <span className="ac-row-side">
+                                {signal.event_type === 'call.completed' && callDurationLabel(signal.duration_seconds) && <span className="ac-row-duration">{callDurationLabel(signal.duration_seconds)}</span>}
                                 <time
                                   className="ac-row-time"
                                   dateTime={signal.occurred_at}

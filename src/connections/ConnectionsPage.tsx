@@ -25,11 +25,39 @@ interface GmailConnection {
   error: string | null;
 }
 
+interface QuoPhoneNumber {
+  id: string;
+  e164: string;
+  label: string | null;
+}
+
+interface QuoConnection {
+  id: string;
+  provider: 'quo';
+  phoneNumbers: QuoPhoneNumber[];
+  status: 'connected' | 'error' | 'checking';
+  createdAt: string;
+  updatedAt: string;
+  lastCheckedAt: string | null;
+  lastHealthyAt: string | null;
+  nextCheckAt: string | null;
+  error: string | null;
+  webhook: {
+    state: 'receiving' | 'pending';
+    url: string;
+    lastEventAt: string | null;
+    signingSecretConfigured: boolean;
+  };
+}
+
+type Connection = GmailConnection | QuoConnection;
+
 interface ConnectionsPayload {
-  connections: GmailConnection[];
+  connections: Connection[];
   healthCheckIntervalMs: number;
-  configured: boolean;
-  configurationError?: string;
+  configured?: boolean;
+  gmail: { configured: boolean; configurationError?: string };
+  quo: { configured: boolean; configurationError?: string };
 }
 
 interface ConnectionLoadFailure {
@@ -88,13 +116,13 @@ function connectionLoadFailure(e: unknown): ConnectionLoadFailure {
       status: e.status,
       message:
         e.message === `the server answered ${e.status}`
-          ? `Fluid's Gmail integration API returned HTTP ${e.status}.`
+          ? `Fluid's connections API returned HTTP ${e.status}.`
           : e.message,
     };
   }
   return {
     status: null,
-    message: "Fluid's Gmail integration API could not be reached.",
+    message: "Fluid's connections API could not be reached.",
   };
 }
 
@@ -157,10 +185,21 @@ function GmailLogo({ dim = false }: { dim?: boolean }) {
   );
 }
 
+function QuoLogo({ dim = false }: { dim?: boolean }) {
+  return (
+    <span className={`cn-logo cn-logo-quo${dim ? ' cn-logo-dim' : ''}`} aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="20" height="20" focusable="false">
+        <circle cx="9" cy="12" r="6.2" fill="#fff" />
+        <circle cx="15" cy="12" r="6.2" fill="#fff" opacity="0.82" />
+      </svg>
+    </span>
+  );
+}
+
 function StatusPill({
   status,
 }: {
-  status: GmailConnection['status'] | 'off' | 'unavailable';
+  status: Connection['status'] | 'off' | 'unavailable';
 }) {
   const meta =
     status === 'connected'
@@ -335,6 +374,256 @@ function ConnectedCard({
   );
 }
 
+function QuoWebhookLine({ webhook, now }: { webhook: QuoConnection['webhook']; now: number }) {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  if (webhook.state === 'receiving') {
+    return (
+      <p className="cn-webhook cn-webhook-ok">
+        <i className="cn-dot" />
+        Receiving events
+        {webhook.lastEventAt !== null && <span> · last event {fmtPast(webhook.lastEventAt, now, 'never')}</span>}
+      </p>
+    );
+  }
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(webhook.url);
+      setCopyError(false);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_600);
+    } catch {
+      setCopyError(true);
+    }
+  };
+  return (
+    <div className="cn-webhook cn-webhook-pending" role="status">
+      <p><i className="cn-dot cn-dot-breathe" /> Setup needed — add this URL as the webhook in Quo</p>
+      <div className="cn-webhook-url-row">
+        <code className="cn-webhook-url">{webhook.url || 'Supabase webhook URL unavailable'}</code>
+        {webhook.url && (
+          <button type="button" className="cn-btn cn-btn-sm" onClick={() => void copy()}>
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        )}
+        <span aria-live="polite" className="cn-sr">{copied ? 'Copied to clipboard' : ''}</span>
+      </div>
+      {copyError && <p className="cn-hint">Couldn’t copy — select the URL and copy it manually.</p>}
+    </div>
+  );
+}
+
+type ImportKind = 'contacts' | 'messages' | 'calls';
+type ImportFileState =
+  | { phase: 'idle' }
+  | { phase: 'selected'; file: File }
+  | { phase: 'uploading'; file: File }
+  | { phase: 'done'; file: File; imported: number; skipped: number }
+  | { phase: 'error'; file: File; message: string };
+
+const IMPORT_ROWS: { kind: ImportKind; title: string; hint: string }[] = [
+  { kind: 'contacts', title: 'Contacts', hint: 'CSV exported from Quo → Contacts' },
+  { kind: 'messages', title: 'Message logs', hint: 'CSV exported from Quo → Messages' },
+  { kind: 'calls', title: 'Call logs', hint: 'CSV exported from Quo → Calls' },
+];
+
+function QuoImportPanel({ panelId, connectionId }: { panelId: string; connectionId: string }) {
+  const [rows, setRows] = useState<Record<ImportKind, ImportFileState>>({
+    contacts: { phase: 'idle' }, messages: { phase: 'idle' }, calls: { phase: 'idle' },
+  });
+  const pickFile = (kind: ImportKind, file: File | null) => {
+    setRows((current) => ({
+      ...current,
+      [kind]: file === null ? { phase: 'idle' } : { phase: 'selected', file },
+    }));
+  };
+  const upload = async (kind: ImportKind) => {
+    const selected = rows[kind];
+    if (selected.phase !== 'selected' && selected.phase !== 'error') return;
+    const file = selected.file;
+    setRows((current) => ({ ...current, [kind]: { phase: 'uploading', file } }));
+    try {
+      const text = await file.text();
+      const result = await api<{ imported: number; skipped: number }>(
+        `/api/connections/quo/${encodeURIComponent(connectionId)}/import?kind=${kind}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'x-fluid-filename': encodeURIComponent(file.name),
+          },
+          body: text,
+        },
+      );
+      setRows((current) => ({
+        ...current,
+        [kind]: { phase: 'done', file, imported: result.imported, skipped: result.skipped },
+      }));
+    } catch (error) {
+      setRows((current) => ({
+        ...current,
+        [kind]: { phase: 'error', file, message: errText(error) },
+      }));
+    }
+  };
+  return (
+    <div id={panelId} className="cn-import" role="group" aria-label="Import Quo history from CSV exports">
+      <p className="cn-import-note">Upload CSV exports from Quo. Each file imports independently.</p>
+      {IMPORT_ROWS.map(({ kind, title, hint }) => {
+        const state = rows[kind];
+        const inputId = `cn-import-${connectionId}-${kind}`;
+        return (
+          <div className="cn-import-row" key={kind}>
+            <div className="cn-import-row-head">
+              <label htmlFor={inputId} className="cn-import-label">{title}</label>
+              <span className="cn-import-hint" id={`${inputId}-hint`}>{hint}</span>
+            </div>
+            <div className="cn-import-row-body">
+              <input
+                id={inputId}
+                type="file"
+                accept=".csv,text/csv"
+                aria-describedby={`${inputId}-hint`}
+                className="cn-import-input"
+                disabled={state.phase === 'uploading'}
+                onChange={(event) => pickFile(kind, event.target.files?.[0] ?? null)}
+              />
+              {(state.phase === 'selected' || state.phase === 'error') && (
+                <button type="button" className="cn-btn cn-btn-sm cn-btn-primary" onClick={() => void upload(kind)}>
+                  Upload
+                </button>
+              )}
+            </div>
+            {state.phase === 'uploading' && (
+              <p className="cn-import-status cn-import-status-busy" role="status">
+                <i className="cn-dot cn-dot-breathe" /> Uploading {state.file.name}…
+              </p>
+            )}
+            {state.phase === 'done' && (
+              <p className="cn-import-status cn-import-status-ok" role="status">
+                {state.imported} imported{state.skipped > 0 ? `, ${state.skipped} skipped` : ''} from {state.file.name}
+              </p>
+            )}
+            {state.phase === 'error' && (
+              <p className="cn-import-status cn-import-status-err" role="alert">
+                {state.file.name} failed: {state.message}
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ConnectedQuoCard({
+  c,
+  now,
+  busy,
+  confirming,
+  importOpen,
+  onCheck,
+  onDisconnect,
+  onConfirmChange,
+  onToggleImport,
+}: {
+  c: QuoConnection;
+  now: number;
+  busy: boolean;
+  confirming: boolean;
+  importOpen: boolean;
+  onCheck: () => void;
+  onDisconnect: () => void;
+  onConfirmChange: (open: boolean) => void;
+  onToggleImport: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef<HTMLDivElement | null>(null);
+  const manageRef = useRef<HTMLButtonElement | null>(null);
+  const menuItemRef = useRef<HTMLButtonElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    menuItemRef.current?.focus();
+    const onDown = (event: PointerEvent) => {
+      if (menuWrapRef.current !== null && !menuWrapRef.current.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(false);
+        manageRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+  useEffect(() => {
+    if (confirming) cancelRef.current?.focus();
+  }, [confirming]);
+  const checking = busy || c.status === 'checking';
+  const single = c.phoneNumbers.length === 1;
+  const identity = single ? c.phoneNumbers[0]?.e164 ?? 'Quo' : 'Quo';
+  return (
+    <section className="cn-card" aria-label={`Quo — ${c.phoneNumbers.map((number) => number.e164).join(', ')}`}>
+      <div className="cn-card-head">
+        <QuoLogo />
+        <div className="cn-who">
+          <b>{identity}</b>
+          <span>{single ? 'Quo' : `${c.phoneNumbers.length} phone numbers`}</span>
+        </div>
+        <StatusPill status={c.status} />
+      </div>
+      {!single && (
+        <ul className="cn-numbers">
+          {c.phoneNumbers.map((number) => (
+            <li key={number.id}>
+              <span className="cn-number">{number.e164}</span>
+              {number.label !== null && <span className="cn-number-label">{number.label}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {c.status === 'error' && (
+        <p className="cn-problem">{c.error ?? 'The last health check failed. Try a manual check, or reconnect.'}</p>
+      )}
+      <QuoWebhookLine webhook={c.webhook} now={now} />
+      {confirming ? (
+        <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
+          <p>Disconnect <b>Quo</b>? Fluid loses access to this workspace’s calls and texts immediately. Nothing in Quo itself is deleted.</p>
+          <div className="cn-actions">
+            <button type="button" className="cn-btn cn-btn-danger" onClick={onDisconnect} disabled={busy}>
+              {busy ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+            <button ref={cancelRef} type="button" className="cn-btn" onClick={() => onConfirmChange(false)} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="cn-card-foot">
+          <dl className="cn-meta">
+            <div className="cn-meta-item"><dt>Last checked</dt><dd title={fmtAbs(c.lastCheckedAt)}>{fmtPast(c.lastCheckedAt, now, 'not yet')}</dd></div>
+            <div className="cn-meta-item"><dt>Next check</dt><dd title={fmtAbs(c.nextCheckAt)}>{fmtFuture(c.nextCheckAt, now)}</dd></div>
+          </dl>
+          <div className="cn-actions">
+            <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>{checking ? 'Checking…' : 'Check now'}</button>
+            <button type="button" className="cn-btn" aria-expanded={importOpen} aria-controls={`cn-import-${c.id}`} onClick={onToggleImport}>Import history</button>
+            <div className="cn-menu-wrap" ref={menuWrapRef}>
+              <button ref={manageRef} type="button" className="cn-btn cn-btn-icon" aria-label="Manage Quo" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="3" cy="8" r="1.4" fill="currentColor" /><circle cx="8" cy="8" r="1.4" fill="currentColor" /><circle cx="13" cy="8" r="1.4" fill="currentColor" /></svg>
+              </button>
+              {menuOpen && <div className="cn-menu" role="menu"><button ref={menuItemRef} type="button" role="menuitem" className="cn-menu-item cn-menu-item-danger" onClick={() => { setMenuOpen(false); onConfirmChange(true); }}>Disconnect…</button></div>}
+            </div>
+          </div>
+        </div>
+      )}
+      {importOpen && <QuoImportPanel panelId={`cn-import-${c.id}`} connectionId={c.id} />}
+    </section>
+  );
+}
+
 // ---------- the page ----------
 
 export function ConnectionsPage({
@@ -351,7 +640,10 @@ export function ConnectionsPage({
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [quoConnecting, setQuoConnecting] = useState(false);
+  const [quoApiKey, setQuoApiKey] = useState('');
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [importOpenId, setImportOpenId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(async (silent: boolean) => {
@@ -427,11 +719,32 @@ export function ConnectionsPage({
     }
   };
 
+  const connectQuo = async () => {
+    setQuoConnecting(true);
+    setActionError(null);
+    try {
+      const { connection } = await api<{ connection: QuoConnection }>('/api/connections/quo/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: quoApiKey }),
+      });
+      setQuoApiKey('');
+      setPayload((current) => current === null
+        ? current
+        : { ...current, connections: [...current.connections.filter((item) => item.provider !== 'quo'), connection] });
+      setNotice({ tone: 'ok', text: 'Quo connected.', detail: `${connection.phoneNumbers.length} phone number${connection.phoneNumbers.length === 1 ? '' : 's'} available.` });
+    } catch (error) {
+      setActionError(`Couldn’t connect Quo: ${errText(error)}.`);
+    } finally {
+      setQuoConnecting(false);
+    }
+  };
+
   const checkNow = async (id: string) => {
     setBusyId(id);
     setActionError(null);
     try {
-      const { connection } = await api<{ connection: GmailConnection }>(
+      const { connection } = await api<{ connection: Connection }>(
         `/api/connections/${id}/check`,
         { method: 'POST' },
       );
@@ -448,7 +761,7 @@ export function ConnectionsPage({
     }
   };
 
-  const disconnect = async (c: GmailConnection) => {
+  const disconnect = async (c: Connection) => {
     setBusyId(c.id);
     setActionError(null);
     try {
@@ -458,8 +771,10 @@ export function ConnectionsPage({
       );
       setNotice({
         tone: 'info',
-        text: `${c.email} disconnected.`,
-        detail: 'Fluid no longer has access to this inbox. Nothing in Gmail itself was changed.',
+        text: `${c.provider === 'gmail' ? c.email : 'Quo'} disconnected.`,
+        detail: c.provider === 'gmail'
+          ? 'Fluid no longer has access to this inbox. Nothing in Gmail itself was changed.'
+          : 'Fluid no longer has access to this workspace’s calls and texts. Nothing in Quo itself was changed.',
       });
     } catch (e) {
       setActionError(`Couldn’t disconnect: ${errText(e)}.`);
@@ -470,6 +785,9 @@ export function ConnectionsPage({
   };
 
   const gmailConnections = payload?.connections.filter((c) => c.provider === 'gmail') ?? [];
+  const quoConnections = payload?.connections.filter((c) => c.provider === 'quo') ?? [];
+  const anyAvailable = gmailConnections.length === 0 || quoConnections.length === 0;
+  const anyConnected = gmailConnections.length > 0 || quoConnections.length > 0;
   const interval = everyPhrase(payload?.healthCheckIntervalMs ?? 300_000);
 
   return (
@@ -523,24 +841,20 @@ export function ConnectionsPage({
               {loading ? (
                 <div className="cn-loading" role="status">
                   <i className="cn-dot cn-dot-breathe" />
-                  Checking Gmail connection status…
+                  Checking connection status…
                 </div>
               ) : loadError !== null ? (
-                <section
-                  className="cn-card"
-                  aria-label={`Gmail — ${INTENDED_EMAIL} — status unavailable`}
-                >
+                <section className="cn-card" aria-label="Connections — status unavailable">
                   <div className="cn-card-head">
-                    <GmailLogo dim />
+                    <QuoLogo dim />
                     <div className="cn-who">
-                      <b>{INTENDED_EMAIL}</b>
-                      <span>Gmail</span>
+                      <b>Connections</b>
+                      <span>Gmail &amp; Quo</span>
                     </div>
                     <StatusPill status="unavailable" />
                   </div>
                   <p className="cn-problem" role="alert">
-                    <b>Fluid’s integration server is unavailable</b> — Gmail itself wasn’t reached,
-                    so this page isn’t claiming the inbox is connected or disconnected.{' '}
+                    <b>Fluid’s integration server is unavailable.</b>{' '}
                     {loadError.message}
                     {loadError.status !== null && !loadError.message.includes('HTTP')
                       ? ` (HTTP ${loadError.status})`
@@ -554,22 +868,17 @@ export function ConnectionsPage({
                 </section>
               ) : payload !== null ? (
                 <>
-                  {!payload.configured && (
+                  {(!payload.gmail.configured || !payload.quo.configured) && (
                     <div className="cn-panel cn-panel-warn" role="status">
-                      <p className="cn-panel-text">
-                        <b>Gmail isn’t set up on the server yet.</b>{' '}
-                        {payload.configurationError ??
-                          'The server is missing its Google credentials, so connecting is disabled until an administrator adds them.'}
-                      </p>
+                      {!payload.gmail.configured && <p className="cn-panel-text"><b>Gmail isn’t set up on the server yet.</b> {payload.gmail.configurationError ?? 'Add the Google credentials to the server.'}</p>}
+                      {!payload.quo.configured && <p className="cn-panel-text"><b>Quo isn’t set up on the server yet.</b> {payload.quo.configurationError ?? 'Add connection encryption to the server.'}</p>}
                     </div>
                   )}
 
-                  {gmailConnections.length === 0 ? (
-                    <section className="cn-section" aria-labelledby="cn-section-h">
-                      <h2 id="cn-section-h" className="cn-section-label">
-                        Available
-                      </h2>
-                      <section className="cn-card" aria-label="Gmail — not connected">
+                  {anyAvailable && (
+                    <section className="cn-section" aria-labelledby="cn-available-h">
+                      <h2 id="cn-available-h" className="cn-section-label">Available</h2>
+                      {gmailConnections.length === 0 && <section className="cn-card" aria-label="Gmail — not connected">
                         <div className="cn-card-head">
                           <GmailLogo dim />
                           <div className="cn-who">
@@ -587,23 +896,40 @@ export function ConnectionsPage({
                             type="button"
                             className="cn-btn cn-btn-primary"
                             onClick={() => void connect()}
-                            disabled={!payload.configured || connecting}
+                            disabled={!payload.gmail.configured || connecting}
                           >
                             {connecting ? 'Opening Google sign-in…' : 'Connect Gmail'}
                           </button>
                         </div>
-                        {!payload.configured && (
+                        {!payload.gmail.configured && (
                           <p className="cn-hint">
                             Disabled until the server has Google credentials — see the note above.
                           </p>
                         )}
-                      </section>
+                      </section>}
+                      {quoConnections.length === 0 && <section className="cn-card" aria-label="Quo — not connected">
+                        <div className="cn-card-head">
+                          <QuoLogo dim />
+                          <div className="cn-who"><b>Quo</b><span>Business phone &amp; SMS</span></div>
+                          <StatusPill status="off" />
+                        </div>
+                        <p className="cn-card-text">Paste your Quo workspace API key. Fluid stores it encrypted on the server.</p>
+                        <div className="cn-field">
+                          <label htmlFor="quo-api-key" className="cn-field-label">API key</label>
+                          <input id="quo-api-key" type="password" autoComplete="off" spellCheck={false} className="cn-key-input" placeholder="Paste API key" value={quoApiKey} onChange={(event) => setQuoApiKey(event.target.value)} disabled={!payload.quo.configured || quoConnecting} />
+                        </div>
+                        <div className="cn-actions">
+                          <button type="button" className="cn-btn cn-btn-primary" onClick={() => void connectQuo()} disabled={!payload.quo.configured || quoConnecting || quoApiKey.trim() === ''}>
+                            {quoConnecting ? 'Connecting…' : 'Connect Quo'}
+                          </button>
+                        </div>
+                        <p className="cn-hint">The key never comes back to this browser.</p>
+                      </section>}
                     </section>
-                  ) : (
-                    <section className="cn-section" aria-labelledby="cn-section-h">
-                      <h2 id="cn-section-h" className="cn-section-label">
-                        Connected
-                      </h2>
+                  )}
+                  {anyConnected && (
+                    <section className="cn-section" aria-labelledby="cn-connected-h">
+                      <h2 id="cn-connected-h" className="cn-section-label">Connected</h2>
                       {gmailConnections.map((c) => (
                         <ConnectedCard
                           key={c.id}
@@ -614,6 +940,20 @@ export function ConnectionsPage({
                           onCheck={() => void checkNow(c.id)}
                           onDisconnect={() => void disconnect(c)}
                           onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
+                        />
+                      ))}
+                      {quoConnections.map((c) => (
+                        <ConnectedQuoCard
+                          key={c.id}
+                          c={c}
+                          now={now}
+                          busy={busyId === c.id}
+                          confirming={confirmId === c.id}
+                          importOpen={importOpenId === c.id}
+                          onCheck={() => void checkNow(c.id)}
+                          onDisconnect={() => void disconnect(c)}
+                          onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
+                          onToggleImport={() => setImportOpenId((id) => id === c.id ? null : c.id)}
                         />
                       ))}
                       <p className="cn-quiet">Automatic health checks {interval}.</p>

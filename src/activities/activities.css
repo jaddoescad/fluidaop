@@ -87,6 +87,7 @@
 }
 
 .ac-logo {
+  position: relative;
   flex: none;
   width: 30px;
   height: 30px;
@@ -98,6 +99,24 @@
   border: 1px solid var(--line);
   user-select: none;
 }
+
+.ac-logo-quo { background: #5b2ee0; border-color: transparent; }
+
+.ac-evt {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 13px;
+  height: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1.5px solid var(--card);
+}
+.ac-evt-call { color: var(--c-call); }
+.ac-evt-msg { color: var(--c-sms); }
 
 .ac-logo svg { display: block; }
 
@@ -339,6 +358,9 @@
   text-overflow: ellipsis;
 }
 
+.ac-call-pill { color: var(--danger); background: var(--danger-soft); }
+.ac-call-pill-warn { color: var(--gold); background: var(--warn-soft); }
+
 .ac-row-line {
   font-size: 12.5px;
   line-height: 1.45;
@@ -368,6 +390,15 @@
   color: var(--faint);
   white-space: nowrap;
 }
+
+.ac-row-duration {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ac-call-detail { align-self: stretch; }
 
 .ac-clip {
   position: relative;

@@ -156,7 +156,6 @@ Deno.serve(async (req: Request) => {
     const accountEmail = (url.searchParams.get('accountEmail') ?? '').trim().toLowerCase();
 
     if (req.method === 'GET' && action === 'list') {
-      if (!accountEmail) return response({ error: 'accountEmail is required' }, 400);
       const limit = cleanLimit(url.searchParams.get('limit'), 30, 50);
       const cursor = cursorFrom(url);
       if (cursor === false) return response({ error: 'Invalid activity cursor' }, 400);
@@ -164,9 +163,8 @@ Deno.serve(async (req: Request) => {
       let signalsQuery = supabase
         .from('activities')
         .select(
-          'id,source,account_email,external_id,external_thread_id,direction,actor_name,actor_email,from_email,to_emails,cc_emails,subject,preview,occurred_at,has_attachments,attachment_count,contact_id',
+          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id',
         )
-        .eq('account_email', accountEmail)
         .order('occurred_at', { ascending: false })
         .order('id', { ascending: false })
         .limit(limit + 1);
@@ -180,9 +178,10 @@ Deno.serve(async (req: Request) => {
         signalsQuery,
         supabase
           .from('activities')
-          .select('id', { count: 'exact', head: true })
-          .eq('account_email', accountEmail),
-        supabase.from('gmail_sync_state').select('*').eq('account_email', accountEmail).maybeSingle(),
+          .select('id', { count: 'exact', head: true }),
+        accountEmail
+          ? supabase.from('gmail_sync_state').select('*').eq('account_email', accountEmail).maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
       ]);
 
       const failure = [signalsResult, countResult, syncResult]
@@ -222,15 +221,14 @@ Deno.serve(async (req: Request) => {
 
     if (req.method === 'GET' && action === 'signal') {
       const signalId = positiveId(url.searchParams.get('signalId'));
-      if (!accountEmail || signalId === null) {
-        return response({ error: 'Valid signalId and accountEmail are required' }, 400);
+      if (signalId === null) {
+        return response({ error: 'Valid signalId is required' }, 400);
       }
       const { data, error } = await supabase
         .from('activities')
         .select(
-          'id,source,account_email,external_id,external_thread_id,direction,actor_name,actor_email,from_email,to_emails,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,contact_id',
+          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
         )
-        .eq('account_email', accountEmail)
         .eq('id', signalId)
         .maybeSingle();
       if (error) throw error;
@@ -258,7 +256,8 @@ Deno.serve(async (req: Request) => {
         const historyResult = await supabase
           .from('activities')
           .select('id', { count: 'exact', head: true })
-          .eq('account_email', accountEmail)
+          .eq('source', data.source)
+          .eq('account_key', data.account_email ?? data.account_phone)
           .eq('external_thread_id', data.external_thread_id)
           .neq('id', signalId);
         if (historyResult.error) throw historyResult.error;
@@ -278,14 +277,13 @@ Deno.serve(async (req: Request) => {
       const signalId = positiveId(url.searchParams.get('signalId'));
       const limit = cleanLimit(url.searchParams.get('limit'), 5, 20);
       const cursor = cursorFrom(url);
-      if (!accountEmail || signalId === null || cursor === false) {
-        return response({ error: 'Valid signalId, accountEmail, and cursor are required' }, 400);
+      if (signalId === null || cursor === false) {
+        return response({ error: 'Valid signalId and cursor are required' }, 400);
       }
 
       const selectedResult = await supabase
         .from('activities')
-        .select('external_thread_id')
-        .eq('account_email', accountEmail)
+        .select('source,account_key,external_thread_id')
         .eq('id', signalId)
         .maybeSingle();
       if (selectedResult.error) throw selectedResult.error;
@@ -296,9 +294,10 @@ Deno.serve(async (req: Request) => {
       let messagesQuery = supabase
         .from('activities')
         .select(
-          'id,source,account_email,external_id,external_thread_id,direction,actor_name,actor_email,from_email,to_emails,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,contact_id',
+          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
         )
-        .eq('account_email', accountEmail)
+        .eq('source', selectedResult.data.source)
+        .eq('account_key', selectedResult.data.account_key)
         .eq('external_thread_id', threadId)
         .neq('id', signalId)
         .order('occurred_at', { ascending: false })
@@ -315,7 +314,8 @@ Deno.serve(async (req: Request) => {
         supabase
           .from('activities')
           .select('id', { count: 'exact', head: true })
-          .eq('account_email', accountEmail)
+          .eq('source', selectedResult.data.source)
+          .eq('account_key', selectedResult.data.account_key)
           .eq('external_thread_id', threadId)
           .neq('id', signalId),
       ]);
@@ -469,7 +469,7 @@ Deno.serve(async (req: Request) => {
       for (const rowBatch of chunks(rows, 200)) {
         const { error } = await supabase
           .from('activities')
-          .upsert(rowBatch, { onConflict: 'source,account_email,external_id' });
+          .upsert(rowBatch, { onConflict: 'source,account_key,external_id' });
         if (error) throw error;
       }
 

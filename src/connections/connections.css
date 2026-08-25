@@ -194,6 +194,10 @@
   filter: grayscale(0.9) opacity(0.55);
 }
 
+.cn-logo-quo { background: #5b2ee0; border-color: transparent; }
+.cn-logo-quo.cn-logo-dim { background: color-mix(in srgb, #5b2ee0 50%, var(--panel)); }
+.cn-logo-quo.cn-logo-dim svg { filter: none; opacity: 0.6; }
+
 .cn-who {
   flex: 1;
   min-width: 0;
@@ -267,6 +271,93 @@
   margin-top: 12px;
   max-width: 58ch;
 }
+
+.cn-numbers {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cn-numbers li { display: flex; align-items: center; gap: 8px; }
+.cn-number { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink); }
+.cn-number-label { font-size: 10.5px; color: var(--faint); }
+
+.cn-field { margin-top: 12px; }
+.cn-field-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 5px;
+}
+
+.cn-key-input {
+  width: 100%;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+  padding: 7px 10px;
+}
+
+.cn-key-input:focus { outline: none; border-color: var(--accent); }
+.cn-key-input::placeholder { color: var(--faint); }
+.cn-key-input:disabled { opacity: 0.5; }
+
+.cn-webhook { margin-top: 12px; font-size: 12px; }
+.cn-webhook-ok { display: flex; align-items: center; gap: 7px; color: var(--ok); }
+.cn-webhook-pending {
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  background: var(--warn-soft);
+  border-radius: 9px;
+  padding: 8px 11px;
+}
+.cn-webhook-pending > p { display: flex; align-items: center; gap: 7px; color: var(--gold); font-weight: 600; margin: 0 0 7px; }
+.cn-webhook-url-row { display: flex; align-items: center; gap: 8px; }
+.cn-webhook-url {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 8px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.cn-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.cn-import { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 12px; }
+.cn-import-note { font-size: 11.5px; color: var(--faint); }
+.cn-import-row { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+.cn-import-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.cn-import-label { font-size: 12.5px; font-weight: 650; color: var(--ink); }
+.cn-import-hint { font-size: 10.5px; color: var(--faint); }
+.cn-import-row-body { display: flex; align-items: center; gap: 10px; }
+.cn-import-input { flex: 1; min-width: 0; font-size: 11.5px; color: var(--dim); }
+.cn-import-input::file-selector-button {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  padding: 5px 10px;
+  margin-right: 8px;
+}
+.cn-import-status { margin-top: 7px; font-size: 11.5px; display: flex; align-items: center; gap: 7px; }
+.cn-import-status-busy { color: var(--dim); }
+.cn-import-status-ok { color: var(--ok); }
+.cn-import-status-err { color: var(--danger); }
+.cn-btn-sm { padding: 5px 10px; font-size: 11px; }
 
 /* what went wrong, verbatim from the server */
 .cn-problem {

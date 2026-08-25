@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -11,30 +11,62 @@ import {
   GmailActivityRow,
   GmailApiError,
 } from './gmailActivities.js';
+import {
+  parseQuoExport,
+  QuoActivityInput,
+  QuoContactInput,
+  QuoImportKind,
+  QuoPhoneNumber,
+} from './quoCsv.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
-interface StoredConnection {
+interface StoredConnectionBase {
   id: string;
-  provider: 'gmail';
-  email: string;
   status: ConnectionStatus;
   createdAt: string;
   updatedAt: string;
   lastCheckedAt: string | null;
   lastHealthyAt: string | null;
   error: string | null;
+}
+
+interface StoredGmailConnection extends StoredConnectionBase {
+  provider: 'gmail';
+  email: string;
   encryptedRefreshToken: string;
 }
+
+interface StoredQuoConnection extends StoredConnectionBase {
+  provider: 'quo';
+  phoneNumbers: QuoPhoneNumber[];
+  encryptedApiKey: string;
+}
+
+type StoredConnection = StoredGmailConnection | StoredQuoConnection;
 
 interface ConnectionStore {
   version: 1;
   connections: StoredConnection[];
 }
 
-interface PublicConnection extends Omit<StoredConnection, 'encryptedRefreshToken'> {
+interface PublicGmailConnection extends Omit<StoredGmailConnection, 'encryptedRefreshToken'> {
   nextCheckAt: string | null;
 }
+
+interface QuoWebhookStatus {
+  state: 'receiving' | 'pending';
+  url: string;
+  lastEventAt: string | null;
+  signingSecretConfigured: boolean;
+}
+
+interface PublicQuoConnection extends Omit<StoredQuoConnection, 'encryptedApiKey'> {
+  nextCheckAt: string | null;
+  webhook: QuoWebhookStatus;
+}
+
+type PublicConnection = PublicGmailConnection | PublicQuoConnection;
 
 interface GoogleTokenResponse {
   access_token?: string;
@@ -49,6 +81,15 @@ interface GoogleTokenResponse {
 interface GmailProfile {
   emailAddress?: string;
   historyId?: string;
+}
+
+interface QuoPhoneNumbersResponse {
+  data?: Array<{
+    id?: string;
+    formattedNumber?: string;
+    phoneNumber?: string;
+    name?: string | null;
+  }>;
 }
 
 interface PendingAuthorization {
@@ -123,28 +164,45 @@ function readPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function configurationProblems(): string[] {
+function encryptionProblems(): string[] {
   const problems: string[] = [];
-  if (!process.env.GOOGLE_CLIENT_ID?.trim()) problems.push('GOOGLE_CLIENT_ID');
-  if (!process.env.GOOGLE_CLIENT_SECRET?.trim()) problems.push('GOOGLE_CLIENT_SECRET');
   if ((process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim().length ?? 0) < 32) {
     problems.push('CONNECTION_TOKEN_ENCRYPTION_KEY (at least 32 characters)');
   }
   return problems;
 }
 
-function requireConfigured(): void {
-  const problems = configurationProblems();
+function gmailConfigurationProblems(): string[] {
+  const problems = encryptionProblems();
+  if (!process.env.GOOGLE_CLIENT_ID?.trim()) problems.push('GOOGLE_CLIENT_ID');
+  if (!process.env.GOOGLE_CLIENT_SECRET?.trim()) problems.push('GOOGLE_CLIENT_SECRET');
+  return problems;
+}
+
+function quoConfigurationProblems(): string[] {
+  return encryptionProblems();
+}
+
+function requireGmailConfigured(): void {
+  const problems = gmailConfigurationProblems();
   if (problems.length > 0) {
     throw new HttpError(503, `Missing server configuration: ${problems.join(', ')}`);
   }
 }
 
-function requireActivityConfigured(): void {
-  requireConfigured();
+function requireDatabaseConfigured(): void {
+  const problems = encryptionProblems();
+  if (problems.length > 0) {
+    throw new HttpError(503, `Missing server configuration: ${problems.join(', ')}`);
+  }
   if (!supabaseProjectUrl) {
     throw new HttpError(503, 'Missing server configuration: SUPABASE_PROJECT_URL');
   }
+}
+
+function requireActivityConfigured(): void {
+  requireGmailConfigured();
+  requireDatabaseConfigured();
 }
 
 function encryptionKey(): Buffer {
@@ -210,10 +268,10 @@ function encryptToken(token: string): string {
 
 function decryptToken(value: string): string {
   const parts = value.split('.');
-  if (parts.length !== 3) throw new Error('Stored Gmail credential is malformed');
+  if (parts.length !== 3) throw new Error('Stored connection credential is malformed');
   const [ivPart, tagPart, ciphertextPart] = parts;
   if (!ivPart || !tagPart || !ciphertextPart) {
-    throw new Error('Stored Gmail credential is malformed');
+    throw new Error('Stored connection credential is malformed');
   }
   const decipher = createDecipheriv('aes-256-gcm', encryptionKey(), Buffer.from(ivPart, 'base64url'));
   decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
@@ -248,14 +306,14 @@ async function saveStore(): Promise<void> {
   await writeChain;
 }
 
-function toPublicConnection(connection: StoredConnection): PublicConnection {
-  const problems = configurationProblems();
+async function toPublicConnection(connection: StoredConnection): Promise<PublicConnection> {
+  const problems = connection.provider === 'gmail'
+    ? gmailConfigurationProblems()
+    : quoConfigurationProblems();
   const lastChecked = connection.lastCheckedAt ? Date.parse(connection.lastCheckedAt) : Number.NaN;
   const nextAt = Number.isFinite(lastChecked) ? lastChecked + healthCheckIntervalMs : Date.now();
-  return {
+  const common = {
     id: connection.id,
-    provider: connection.provider,
-    email: connection.email,
     status: problems.length > 0 ? 'error' : connection.status,
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt,
@@ -267,6 +325,31 @@ function toPublicConnection(connection: StoredConnection): PublicConnection {
         ? `Server configuration is incomplete: ${problems.join(', ')}`
         : connection.error,
   };
+  if (connection.provider === 'gmail') {
+    return { ...common, provider: 'gmail', email: connection.email };
+  }
+  let webhook: QuoWebhookStatus = {
+    state: 'pending',
+    url: quoWebhookUrl(),
+    lastEventAt: null,
+    signingSecretConfigured: false,
+  };
+  try {
+    const status = await quoFunctionJson<{
+      signingSecretConfigured?: boolean;
+      lastEvent?: { received_at?: string } | null;
+    }>('status');
+    const lastEventAt = status.lastEvent?.received_at ?? null;
+    webhook = {
+      state: status.signingSecretConfigured && lastEventAt ? 'receiving' : 'pending',
+      url: quoWebhookUrl(),
+      lastEventAt,
+      signingSecretConfigured: Boolean(status.signingSecretConfigured),
+    };
+  } catch {
+    // The API-key connection remains usable if webhook setup is incomplete.
+  }
+  return { ...common, provider: 'quo', phoneNumbers: connection.phoneNumbers, webhook };
 }
 
 function originFor(req: Request): string {
@@ -308,6 +391,48 @@ async function fetchGoogleJson<T>(url: string, init: RequestInit): Promise<T> {
   return payload as T;
 }
 
+function quoPhone(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const compact = raw.trim().replace(/[\s().-]/g, '');
+  if (/^\+[1-9]\d{6,14}$/.test(compact)) return compact;
+  if (/^1\d{10}$/.test(compact)) return `+${compact}`;
+  if (/^\d{10}$/.test(compact)) return `+1${compact}`;
+  return null;
+}
+
+async function fetchQuoJson<T>(path: string, apiKey: string): Promise<T> {
+  const response = await fetch(`https://api.openphone.com/v1${path}`, {
+    headers: { Accept: 'application/json', Authorization: apiKey },
+    signal: AbortSignal.timeout(15_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      payload = raw;
+    }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload);
+    throw new Error(detail ? `Quo API ${response.status}: ${detail}` : `Quo API ${response.status}`);
+  }
+  return payload as T;
+}
+
+async function getQuoPhoneNumbers(apiKey: string): Promise<QuoPhoneNumber[]> {
+  const payload = await fetchQuoJson<QuoPhoneNumbersResponse>('/phone-numbers', apiKey);
+  const numbers = (payload.data ?? []).flatMap((number) => {
+    const id = number.id?.trim();
+    const phone = quoPhone(number.phoneNumber ?? number.formattedNumber);
+    if (!id || !phone) return [];
+    return [{ id, e164: phone, label: number.name?.trim() || null }];
+  });
+  if (numbers.length === 0) throw new Error('Quo returned no accessible phone numbers for this API key');
+  return numbers;
+}
+
 async function activityFunctionJson<T>(
   action: 'list' | 'signal' | 'history' | 'state' | 'labels' | 'label' | 'agent-history' | 'upsert',
   search: Record<string, string>,
@@ -337,6 +462,45 @@ async function activityFunctionJson<T>(
   }
   if (!response.ok) {
     const detail = googleResponseError(payload) ?? `Supabase activity service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
+function quoWebhookUrl(): string {
+  return supabaseProjectUrl
+    ? `${supabaseProjectUrl}/functions/v1/fluid-quo-events`
+    : '';
+}
+
+async function quoFunctionJson<T>(
+  action: 'status' | 'backfill',
+  init?: RequestInit,
+): Promise<T> {
+  requireDatabaseConfigured();
+  const url = new URL(quoWebhookUrl());
+  url.searchParams.set('action', action);
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.headers ?? {}),
+    },
+    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      payload = raw;
+    }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Supabase Quo service returned ${response.status}`;
     throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
   }
   return payload as T;
@@ -400,6 +564,17 @@ function publicGoogleError(error: unknown): string {
   return message.replace(/\s+/g, ' ').slice(0, 300);
 }
 
+function publicQuoError(error: unknown): string {
+  const message = errorMessage(error);
+  if (/401|403|unauthor|forbidden|api.?key/i.test(message)) {
+    return 'Quo rejected this API key. Create a new key in Quo and reconnect.';
+  }
+  if (/fetch failed|network|timed?\s*out/i.test(message)) {
+    return 'Quo could not be reached. The next health check will retry automatically.';
+  }
+  return message.replace(/\s+/g, ' ').slice(0, 300);
+}
+
 async function exchangeAuthorizationCode(
   code: string,
   pending: PendingAuthorization,
@@ -452,21 +627,28 @@ async function revokeGoogleToken(token: string): Promise<void> {
 }
 
 async function performHealthCheck(connectionId: string): Promise<PublicConnection> {
-  requireConfigured();
   const connection = store.connections.find((item) => item.id === connectionId);
   if (!connection) throw new HttpError(404, 'Connection not found');
+  if (connection.provider === 'gmail') requireGmailConfigured();
+  else if (quoConfigurationProblems().length > 0) {
+    throw new HttpError(503, `Missing server configuration: ${quoConfigurationProblems().join(', ')}`);
+  }
 
   connection.status = 'checking';
   connection.updatedAt = new Date().toISOString();
   await saveStore();
 
   try {
-    const refreshToken = decryptToken(connection.encryptedRefreshToken);
-    const accessToken = await refreshAccessToken(refreshToken);
-    const profile = await getGmailProfile(accessToken);
-    const actualEmail = profile.emailAddress?.trim().toLowerCase();
-    if (actualEmail !== connection.email.toLowerCase()) {
-      throw new Error(`Google returned a different mailbox (${actualEmail ?? 'unknown'})`);
+    if (connection.provider === 'gmail') {
+      const refreshToken = decryptToken(connection.encryptedRefreshToken);
+      const accessToken = await refreshAccessToken(refreshToken);
+      const profile = await getGmailProfile(accessToken);
+      const actualEmail = profile.emailAddress?.trim().toLowerCase();
+      if (actualEmail !== connection.email.toLowerCase()) {
+        throw new Error(`Google returned a different mailbox (${actualEmail ?? 'unknown'})`);
+      }
+    } else {
+      connection.phoneNumbers = await getQuoPhoneNumbers(decryptToken(connection.encryptedApiKey));
     }
     const checkedAt = new Date().toISOString();
     connection.status = 'connected';
@@ -479,10 +661,10 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
     connection.status = 'error';
     connection.lastCheckedAt = checkedAt;
     connection.updatedAt = checkedAt;
-    connection.error = publicGoogleError(error);
+    connection.error = connection.provider === 'gmail' ? publicGoogleError(error) : publicQuoError(error);
   }
   await saveStore();
-  return toPublicConnection(connection);
+  return await toPublicConnection(connection);
 }
 
 function checkConnection(connectionId: string): Promise<PublicConnection> {
@@ -495,7 +677,7 @@ function checkConnection(connectionId: string): Promise<PublicConnection> {
   return check;
 }
 
-async function performActivitySync(connection: StoredConnection): Promise<ActivitySyncResult> {
+async function performActivitySync(connection: StoredGmailConnection): Promise<ActivitySyncResult> {
   requireActivityConfigured();
   const startedAt = new Date().toISOString();
   let previousState: StoredActivitySyncState | null = null;
@@ -641,7 +823,7 @@ async function performActivitySync(connection: StoredConnection): Promise<Activi
   }
 }
 
-function syncActivities(connection: StoredConnection): Promise<ActivitySyncResult> {
+function syncActivities(connection: StoredGmailConnection): Promise<ActivitySyncResult> {
   const running = activeActivitySyncs.get(connection.id);
   if (running) return running;
   lastActivitySyncAttemptAt.set(connection.id, Date.now());
@@ -653,9 +835,10 @@ function syncActivities(connection: StoredConnection): Promise<ActivitySyncResul
 }
 
 async function syncDueActivities(): Promise<void> {
-  if (configurationProblems().length > 0 || !supabaseProjectUrl) return;
+  if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
   const now = Date.now();
-  const due = store.connections.filter((connection) => {
+  const due = store.connections.filter((connection): connection is StoredGmailConnection => {
+    if (connection.provider !== 'gmail') return false;
     const lastAttempt = lastActivitySyncAttemptAt.get(connection.id) ?? 0;
     return now - lastAttempt >= gmailActivitySyncIntervalMs;
   });
@@ -674,12 +857,10 @@ async function syncDueActivities(): Promise<void> {
 }
 
 async function checkAllConnections(): Promise<void> {
-  if (configurationProblems().length > 0) return;
   await Promise.allSettled(store.connections.map((connection) => checkConnection(connection.id)));
 }
 
 async function checkDueConnections(): Promise<void> {
-  if (configurationProblems().length > 0) return;
   const now = Date.now();
   const due = store.connections.filter((connection) => {
     if (!connection.lastCheckedAt) return true;
@@ -689,21 +870,35 @@ async function checkDueConnections(): Promise<void> {
   await Promise.allSettled(due.map((connection) => checkConnection(connection.id)));
 }
 
-app.get('/api/connections', (_req, res) => {
-  const problems = configurationProblems();
-  res.json({
-    connections: store.connections.map(toPublicConnection),
-    healthCheckIntervalMs,
-    configured: problems.length === 0,
-    ...(problems.length > 0
-      ? { configurationError: `Add ${problems.join(', ')} to the server environment.` }
-      : {}),
-  });
+app.get('/api/connections', async (_req, res, next) => {
+  try {
+    const gmailProblems = gmailConfigurationProblems();
+    const quoProblems = quoConfigurationProblems();
+    res.json({
+      connections: await Promise.all(store.connections.map(toPublicConnection)),
+      healthCheckIntervalMs,
+      configured: gmailProblems.length === 0,
+      gmail: {
+        configured: gmailProblems.length === 0,
+        ...(gmailProblems.length > 0
+          ? { configurationError: `Add ${gmailProblems.join(', ')} to the server environment.` }
+          : {}),
+      },
+      quo: {
+        configured: quoProblems.length === 0,
+        ...(quoProblems.length > 0
+          ? { configurationError: `Add ${quoProblems.join(', ')} to the server environment.` }
+          : {}),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/connections/gmail/authorize', (req, res, next) => {
   try {
-    requireConfigured();
+    requireGmailConfigured();
     const state = randomBytes(32).toString('base64url');
     const codeVerifier = randomBytes(48).toString('base64url');
     const redirectUri = callbackUri(req);
@@ -753,7 +948,7 @@ app.get('/api/oauth/google/callback', async (req, res) => {
   }
 
   try {
-    requireConfigured();
+    requireGmailConfigured();
     const tokens = await exchangeAuthorizationCode(code, pending);
     if (!tokens.access_token) throw new Error('Google did not return an access token');
     const profile = await getGmailProfile(tokens.access_token);
@@ -766,7 +961,7 @@ app.get('/api/oauth/google/callback', async (req, res) => {
     }
 
     const existing = store.connections.find(
-      (connection) => connection.provider === 'gmail' && connection.email.toLowerCase() === email,
+      (connection): connection is StoredGmailConnection => connection.provider === 'gmail' && connection.email.toLowerCase() === email,
     );
     const refreshToken = tokens.refresh_token ??
       (existing ? decryptToken(existing.encryptedRefreshToken) : null);
@@ -774,7 +969,7 @@ app.get('/api/oauth/google/callback', async (req, res) => {
       throw new Error('Google did not issue offline access. Remove Fluid from Google account access and try again.');
     }
     const now = new Date().toISOString();
-    const connection: StoredConnection = {
+    const connection: StoredGmailConnection = {
       id: `gmail:${email}`,
       provider: 'gmail',
       email,
@@ -795,6 +990,146 @@ app.get('/api/oauth/google/callback', async (req, res) => {
   }
 });
 
+app.post('/api/connections/quo/connect', async (req, res, next) => {
+  try {
+    const problems = quoConfigurationProblems();
+    if (problems.length > 0) {
+      throw new HttpError(503, `Missing server configuration: ${problems.join(', ')}`);
+    }
+    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (!apiKey || apiKey.length > 2_048) throw new HttpError(400, 'Paste a valid Quo API key');
+    const phoneNumbers = await getQuoPhoneNumbers(apiKey).catch((error: unknown) => {
+      throw new HttpError(400, publicQuoError(error));
+    });
+    const existing = store.connections.find((item): item is StoredQuoConnection => item.provider === 'quo');
+    const now = new Date().toISOString();
+    const connection: StoredQuoConnection = {
+      id: existing?.id ?? 'quo:workspace',
+      provider: 'quo',
+      phoneNumbers,
+      status: 'connected',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      lastCheckedAt: now,
+      lastHealthyAt: now,
+      error: null,
+      encryptedApiKey: encryptToken(apiKey),
+    };
+    if (existing) Object.assign(existing, connection);
+    else store.connections.push(connection);
+    await saveStore();
+    res.status(existing ? 200 : 201).json({ connection: await toPublicConnection(connection) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post(
+  '/api/connections/quo/:id/import',
+  express.text({ type: ['text/csv', 'application/csv', 'text/plain'], limit: '50mb' }),
+  async (req, res, next) => {
+    const runId = randomUUID();
+    const startedAt = new Date().toISOString();
+    let connection: StoredQuoConnection | undefined;
+    let kind: QuoImportKind | null = null;
+    let filename = 'quo-export.csv';
+    try {
+      connection = store.connections.find(
+        (item): item is StoredQuoConnection => item.provider === 'quo' && item.id === req.params.id,
+      );
+      if (!connection) throw new HttpError(404, 'Quo connection not found');
+      const rawKind = typeof req.query.kind === 'string' ? req.query.kind : '';
+      kind = rawKind === 'contacts' || rawKind === 'messages' || rawKind === 'calls' ? rawKind : null;
+      if (!kind) throw new HttpError(400, 'Import kind must be contacts, messages, or calls');
+      filename = typeof req.headers['x-fluid-filename'] === 'string'
+        ? decodeURIComponent(req.headers['x-fluid-filename']).replace(/[\r\n]/g, '').slice(0, 240)
+        : filename;
+      if (typeof req.body !== 'string') throw new HttpError(400, 'Upload a CSV file');
+      const parsed = parseQuoExport(kind, req.body, connection.phoneNumbers);
+      let rowsImported = 0;
+      const batches = Math.max(1, Math.ceil(Math.max(parsed.activities.length, parsed.contacts.length) / 400));
+      for (let index = 0; index < batches; index += 1) {
+        const activities: QuoActivityInput[] = parsed.activities.slice(index * 400, (index + 1) * 400);
+        const contacts: QuoContactInput[] = parsed.contacts.slice(index * 400, (index + 1) * 400);
+        const result = await quoFunctionJson<{ imported: number }>('backfill', {
+          method: 'POST',
+          body: JSON.stringify({
+            run: {
+              id: runId,
+              connection_id: connection.id,
+              import_kind: kind,
+              filename,
+              status: 'running',
+              rows_seen: parsed.rowsSeen,
+              rows_imported: rowsImported,
+              rows_skipped: parsed.rowsSkipped,
+              started_at: startedAt,
+              completed_at: null,
+              last_error: null,
+            },
+            activities,
+            contacts,
+          }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        rowsImported += result.imported;
+      }
+      const completedAt = new Date().toISOString();
+      await quoFunctionJson('backfill', {
+        method: 'POST',
+        body: JSON.stringify({
+          run: {
+            id: runId,
+            connection_id: connection.id,
+            import_kind: kind,
+            filename,
+            status: 'succeeded',
+            rows_seen: parsed.rowsSeen,
+            rows_imported: rowsImported,
+            rows_skipped: parsed.rowsSkipped,
+            started_at: startedAt,
+            completed_at: completedAt,
+            last_error: null,
+          },
+          activities: [],
+          contacts: [],
+        }),
+      });
+      res.json({
+        imported: rowsImported,
+        skipped: parsed.rowsSkipped,
+        rowsSeen: parsed.rowsSeen,
+        warnings: parsed.warnings,
+        completedAt,
+      });
+    } catch (error) {
+      if (connection && kind) {
+        await quoFunctionJson('backfill', {
+          method: 'POST',
+          body: JSON.stringify({
+            run: {
+              id: runId,
+              connection_id: connection.id,
+              import_kind: kind,
+              filename,
+              status: 'failed',
+              rows_seen: 0,
+              rows_imported: 0,
+              rows_skipped: 0,
+              started_at: startedAt,
+              completed_at: new Date().toISOString(),
+              last_error: errorMessage(error).slice(0, 500),
+            },
+            activities: [],
+            contacts: [],
+          }),
+        }).catch(() => undefined);
+      }
+      next(error);
+    }
+  },
+);
+
 app.post('/api/connections/:id/check', async (req, res, next) => {
   try {
     const connection = await checkConnection(req.params.id);
@@ -810,11 +1145,13 @@ app.delete('/api/connections/:id', async (req, res, next) => {
     if (index === -1) throw new HttpError(404, 'Connection not found');
     const connection = store.connections[index];
     if (!connection) throw new HttpError(404, 'Connection not found');
-    try {
-      requireConfigured();
-      await revokeGoogleToken(decryptToken(connection.encryptedRefreshToken));
-    } catch (error) {
-      console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
+    if (connection.provider === 'gmail') {
+      try {
+        requireGmailConfigured();
+        await revokeGoogleToken(decryptToken(connection.encryptedRefreshToken));
+      } catch (error) {
+        console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
+      }
     }
     store.connections.splice(index, 1);
     await saveStore();
@@ -930,7 +1267,7 @@ app.get('/api/activities/signals/:signalId/history', async (req, res, next) => {
 app.post('/api/activities/sync', async (_req, res, next) => {
   try {
     const connection = store.connections.find(
-      (item) => item.provider === 'gmail' && item.email.toLowerCase() === intendedEmail,
+      (item): item is StoredGmailConnection => item.provider === 'gmail' && item.email.toLowerCase() === intendedEmail,
     );
     if (!connection) throw new HttpError(409, `Connect ${intendedEmail} before syncing Gmail activity.`);
     const result = await syncActivities(connection);
@@ -1143,7 +1480,10 @@ pendingCleanupTimer.unref();
 
 app.listen(port, () => {
   console.log(`Fluid connections API listening on http://localhost:${port}`);
-  if (configurationProblems().length > 0) {
+  if (gmailConfigurationProblems().length > 0) {
     console.log('Gmail connection is disabled until the values in .env.example are configured.');
+  }
+  if (quoConfigurationProblems().length > 0) {
+    console.log('Quo connection is disabled until token encryption is configured.');
   }
 });

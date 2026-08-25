@@ -90,6 +90,9 @@ verify_jwt = false
 [functions.fluid-customer-sync]
 verify_jwt = false
 
+[functions.fluid-quo-events]
+verify_jwt = false
+
 [studio]
 enabled = true
 # Port to use for Supabase Studio.
