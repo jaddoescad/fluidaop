@@ -116,6 +116,11 @@ function e164(value: unknown): string | null {
   return null;
 }
 
+function phoneList(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value];
+  return [...new Set(values.map(e164).filter((phone): phone is string => phone !== null))];
+}
+
 function normalizedPhone(value: string): string {
   const digits = value.replace(/\D/g, '');
   return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
@@ -364,7 +369,7 @@ function webhookActivity(payload: Record<string, unknown>): ActivityInput | null
   const externalId = cleanString(message.id, 200);
   const direction = message.direction === 'outgoing' || type === 'message.delivered' ? 'outbound' : 'inbound';
   const from = e164(message.from);
-  const to = Array.isArray(message.to) ? message.to.map(e164).filter((phone): phone is string => phone !== null) : [];
+  const to = phoneList(message.to);
   const accountPhone = direction === 'inbound' ? to[0] ?? null : from;
   const actorPhone = direction === 'inbound' ? from : to[0] ?? null;
   const occurredAt = cleanString(message.createdAt, 80) ?? cleanString(payload.createdAt, 80);
