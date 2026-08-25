@@ -1034,7 +1034,6 @@ const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '📡', label: 'Board' },
   { icon: '🤖', label: 'Agents' },
   { icon: '🧩', label: 'Skills' },
-  { icon: '✅', label: 'Approvals' },
   { icon: '⚡', label: 'Activity' },
   { icon: '🏷️', label: 'Labels' },
   { icon: '🧭', label: 'Automations' },
