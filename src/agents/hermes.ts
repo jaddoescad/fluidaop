@@ -24,6 +24,17 @@ export interface HermesAgentDefinition {
   lastRunStatus: string | null;
   lastError: string | null;
   historyAgentId: string | null;
+  contractStatus: string;
+}
+
+interface HermesAgentContract {
+  schemaVersion: number;
+  displayName: string;
+  summary: string;
+  steps: string[];
+  icon: string | null;
+  definitionHash: string;
+  createdAt: string | null;
 }
 
 interface HermesAgentRecord {
@@ -38,6 +49,8 @@ interface HermesAgentRecord {
   lastRunStatus: string | null;
   lastError: string | null;
   mode: 'agent' | 'script';
+  contract: HermesAgentContract | null;
+  contractStatus: string;
 }
 
 interface HermesAgentsPayload {
@@ -45,69 +58,19 @@ interface HermesAgentsPayload {
   fetchedAt: string;
 }
 
-interface AgentPresentation {
-  match: RegExp;
-  name: string;
-  icon: string;
-  description: string;
-  mode: string;
-}
-
-const AGENT_PRESENTATIONS: AgentPresentation[] = [
-  {
-    match: /fluid email categorizer/i,
-    name: 'Email Categorizer',
-    icon: '✉️',
-    description: 'Categorizes incoming Gmail signals in Fluid and records attachment evidence without changing Gmail.',
-    mode: 'Agent-assisted',
-  },
-  {
-    match: /fluid customer sync/i,
-    name: 'Customer Sync',
-    icon: '👥',
-    description: 'Syncs customers from Ottawa Painters Admin to Fluid.',
-    mode: 'Scheduled sync',
-  },
-  {
-    match: /contractor invoice sync/i,
-    name: 'Contractor Invoices',
-    icon: '🧾',
-    description: 'Imports explicit contractor invoice details or defers the invoice for manual review without changing Gmail.',
-    mode: 'Scheduled automation',
-  },
-  {
-    match: /daily dripjobs/i,
-    name: 'DripJobs Job Sync',
-    icon: '🛠️',
-    description: 'Exports active and archived DripJobs jobs, then updates exact-matched amounts and production months.',
-    mode: 'Script-only automation',
-  },
-  {
-    match: /daily meta ads leads and cpl/i,
-    name: 'Meta Ads Daily Report',
-    icon: '📈',
-    description: 'Analyzes Meta Ads results and sends a brief executive Slack update without modifying ads.',
-    mode: 'Scheduled report',
-  },
-  {
-    match: /daily meta ads backend sync/i,
-    name: 'Meta Ads Backend Sync',
-    icon: '↻',
-    description: 'Refreshes the rolling Meta Ads campaign window in the Ottawa Painters backend.',
-    mode: 'Script-only automation',
-  },
-];
-
 export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinition {
-  const presentation = AGENT_PRESENTATIONS.find((candidate) => candidate.match.test(agent.name));
+  const contract = agent.contractStatus === 'verified' ? agent.contract : null;
+  const unavailableDescription = agent.contractStatus === 'stale'
+    ? 'The live Hermes definition changed. Its presentation contract needs regeneration.'
+    : 'Live Hermes job. Verified presentation details are not available yet.';
   return {
     ...agent,
     runtimeName: agent.name,
-    name: presentation?.name ?? agent.name,
-    icon: presentation?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
-    description: presentation?.description ?? `Hermes automation running in the ${agent.profile} profile.`,
-    mode: presentation?.mode ?? (agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent'),
-    steps: [],
+    name: contract?.displayName ?? agent.name,
+    icon: contract?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
+    description: contract?.summary ?? unavailableDescription,
+    mode: agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent',
+    steps: contract?.steps ?? [],
     historyAgentId: null,
   };
 }

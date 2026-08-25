@@ -7,8 +7,10 @@ content, invoice content, or session messages leave Hermes.
 from __future__ import annotations
 
 import hmac
+import importlib.util
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -22,6 +24,20 @@ from hermes_cli.dashboard_auth.base import (
 )
 from hermes_cli.dashboard_auth.registry import get_provider, register_provider
 from hermes_cli.dashboard_auth.token_auth import register_token_route
+
+try:
+    from .agent_contracts import verified_contract
+except (ImportError, ValueError):  # Hermes loads plugin APIs outside a package context.
+    contract_module_path = Path(__file__).with_name("agent_contracts.py")
+    contract_spec = importlib.util.spec_from_file_location(
+        "fluid_history_agent_contracts",
+        contract_module_path,
+    )
+    if contract_spec is None or contract_spec.loader is None:
+        raise ImportError("Could not load Fluid agent contract module")
+    contract_module = importlib.util.module_from_spec(contract_spec)
+    contract_spec.loader.exec_module(contract_module)
+    verified_contract = contract_module.verified_contract
 
 
 router = APIRouter()
@@ -41,17 +57,27 @@ AGENT_JOB_NAME_PARTS = {
 }
 
 
+def _fluid_secret() -> str:
+    secret = os.environ.get("HERMES_FLUID_HISTORY_SECRET", "").strip()
+    if secret:
+        return secret
+    try:
+        from hermes_cli.config import get_env_value
+
+        return str(get_env_value("HERMES_FLUID_HISTORY_SECRET") or "").strip()
+    except (ImportError, OSError, TypeError, ValueError):
+        return ""
+
+
 class FluidHistoryTokenProvider(DashboardAuthProvider):
     name = "fluid-history"
     display_name = "Fluid history service"
     supports_token = True
     supports_session = False
 
-    def __init__(self, secret: str) -> None:
-        self._secret = secret
-
     def verify_token(self, *, token: str) -> Optional[TokenPrincipal]:
-        if not hmac.compare_digest(self._secret, token):
+        secret = _fluid_secret()
+        if len(secret) < MIN_SECRET_CHARS or not hmac.compare_digest(secret, token):
             return None
         return TokenPrincipal(
             principal="fluid-ottawa-painters",
@@ -85,11 +111,8 @@ class FluidHistoryTokenProvider(DashboardAuthProvider):
 def _install_auth() -> None:
     for path in ROUTE_PATHS:
         register_token_route(path)
-    secret = os.environ.get("HERMES_FLUID_HISTORY_SECRET", "").strip()
-    if len(secret) < MIN_SECRET_CHARS:
-        return
     if get_provider(FluidHistoryTokenProvider.name) is None:
-        register_provider(FluidHistoryTokenProvider(secret))
+        register_provider(FluidHistoryTokenProvider())
 
 
 _install_auth()
@@ -136,6 +159,7 @@ def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     latest = job.get("latest_execution")
     if not isinstance(latest, dict):
         latest = {}
+    contract, contract_status = verified_contract(job)
     return {
         "id": str(job.get("id") or ""),
         "name": str(job.get("name") or job.get("id") or "Unnamed automation"),
@@ -148,6 +172,8 @@ def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "lastRunStatus": str(latest.get("status") or "") or None,
         "lastError": _safe_error(latest.get("error") or job.get("last_error")),
         "mode": "script" if bool(job.get("no_agent")) else "agent",
+        "contract": contract,
+        "contractStatus": contract_status,
     }
 
 
