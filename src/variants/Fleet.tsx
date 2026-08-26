@@ -8,6 +8,7 @@ import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
 import { PeoplePage } from '../people/PeoplePage';
 import { SchedulesPage } from '../schedules/SchedulesPage';
+import { loadFluidSchedules } from '../schedules/fluid';
 import { SkillsPage } from '../skills/SkillsPage';
 import { useLiveBoard } from '../board/useLiveBoard';
 import { agentFor } from '../engine';
@@ -52,7 +53,10 @@ export function FleetV() {
   const [page, setPage] = useState<AppPage>(pageFromPath);
   const [hermesStatus, setHermesStatus] = useState<HermesStatus | null>(null);
   const [hermesSchedules, setHermesSchedules] = useState<HermesAgentDefinition[] | null>(null);
+  const [schedules, setSchedules] = useState<HermesAgentDefinition[] | null>(null);
   const [hermesError, setHermesError] = useState<string | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
   const hermesAgents = hermesSchedules?.filter((schedule) => schedule.runtimeMode === 'agent') ?? null;
 
   useEffect(() => {
@@ -62,23 +66,40 @@ export function FleetV() {
   }, []);
 
   const refreshHermes = useCallback(async () => {
-    const [statusResult, schedulesResult] = await Promise.allSettled([
+    const [statusResult, hermesSchedulesResult, fluidSchedulesResult] = await Promise.allSettled([
       loadHermesStatus(),
       loadHermesSchedules(),
+      loadFluidSchedules(),
     ]);
     setHermesStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
-    setHermesSchedules(schedulesResult.status === 'fulfilled' ? schedulesResult.value : null);
-    const failure = schedulesResult.status === 'rejected'
-      ? schedulesResult.reason
-      : statusResult.status === 'rejected'
+    setHermesSchedules(hermesSchedulesResult.status === 'fulfilled' ? hermesSchedulesResult.value : null);
+    const hermesFailure = statusResult.status === 'rejected'
         ? statusResult.reason
-        : null;
+        : hermesSchedulesResult.status === 'rejected'
+          ? hermesSchedulesResult.reason
+          : null;
     setHermesError(
-      failure === null
+      hermesFailure === null
         ? null
-        : failure instanceof Error
-          ? failure.message
+        : hermesFailure instanceof Error
+          ? hermesFailure.message
           : 'Could not reach Hermes',
+    );
+    const availableSchedules = [
+      ...(fluidSchedulesResult.status === 'fulfilled' ? fluidSchedulesResult.value : []),
+      ...(hermesSchedulesResult.status === 'fulfilled' ? hermesSchedulesResult.value : []),
+    ];
+    const allSchedulesFailed = fluidSchedulesResult.status === 'rejected' && hermesSchedulesResult.status === 'rejected';
+    setSchedules(allSchedulesFailed ? null : availableSchedules);
+    setScheduleError(allSchedulesFailed ? 'Could not load Fluid or Hermes schedules.' : null);
+    setScheduleWarning(
+      allSchedulesFailed
+        ? null
+        : fluidSchedulesResult.status === 'rejected'
+          ? 'Fluid script schedules are temporarily unavailable.'
+          : hermesSchedulesResult.status === 'rejected'
+            ? 'Hermes schedules are temporarily unavailable.'
+            : null,
     );
   }, []);
 
@@ -129,8 +150,9 @@ export function FleetV() {
       onNavigate={navigate}
       header={appHeader}
       status={hermesStatus}
-      schedules={hermesSchedules}
-      error={hermesError}
+      schedules={schedules}
+      error={scheduleError}
+      warning={scheduleWarning}
       onRefresh={refreshHermes}
     />
   );
@@ -232,8 +254,6 @@ export function FleetV() {
               act={act}
               d={d}
               selId={runSel?.type === 'signal' ? runSel.id : null}
-              view={board.signalView === 'needs_you' ? 'open' : 'all'}
-              onView={(view) => board.setSignalView(view === 'open' ? 'needs_you' : 'all')}
               hasMore={board.signalsHasMore}
               loading={board.signalsLoading}
               onLoadMore={() => void board.loadMoreSignals()}

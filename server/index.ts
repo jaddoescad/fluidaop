@@ -82,9 +82,33 @@ interface ConnectionStore {
 
 interface PublicGmailConnection extends Omit<StoredGmailConnection, 'encryptedRefreshToken'> {
   nextCheckAt: string | null;
-  gmailLabelSync: GmailLabelSyncStatus & {
-    state: 'active' | 'needs_reconnect' | 'unavailable';
+  permissions: {
+    readEmails: boolean;
+    applyLabels: boolean;
   };
+}
+
+interface PublicFluidSchedule {
+  id: string;
+  runtimeName: string;
+  name: string;
+  icon: string;
+  description: string;
+  schedule: string;
+  profile: string;
+  mode: string;
+  runtimeMode: 'script';
+  steps: string[];
+  enabled: boolean;
+  state: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: string | null;
+  lastError: string | null;
+  historyAgentId: null;
+  contractStatus: 'built-in';
+  source: 'fluid';
+  historyAvailable: false;
 }
 
 interface QuoWebhookStatus {
@@ -198,6 +222,7 @@ const activeGmailLabelSyncs = new Map<string, Promise<GmailLabelSyncBatchResult>
 const activeSlackSyncs = new Map<string, Promise<SlackSyncResult>>();
 const lastActivitySyncAttemptAt = new Map<string, number>();
 const lastSlackSyncAttemptAt = new Map<string, number>();
+let lastGmailLabelSyncAttemptAt = 0;
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -290,6 +315,10 @@ function googleScopes(raw: string | undefined): string[] {
 
 function gmailCanModifyLabels(connection: StoredGmailConnection): boolean {
   return connection.scopes.includes(GMAIL_MODIFY_SCOPE);
+}
+
+function gmailCanReadEmails(connection: StoredGmailConnection): boolean {
+  return connection.scopes.includes(GMAIL_READONLY_SCOPE) || gmailCanModifyLabels(connection);
 }
 
 function isUuid(value: unknown): value is string {
@@ -483,40 +512,15 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
         : connection.error,
   };
   if (connection.provider === 'gmail') {
-    const canModifyLabels = gmailCanModifyLabels(connection);
-    let sync: GmailLabelSyncStatus = {
-      pending: 0,
-      leased: 0,
-      succeeded: 0,
-      failed: 0,
-      lastSyncedAt: null,
-      lastError: null,
-    };
-    let state: PublicGmailConnection['gmailLabelSync']['state'] = canModifyLabels
-      ? 'active'
-      : 'needs_reconnect';
-    try {
-      const payload = await gmailLabelSyncFunctionJson<{ status?: Partial<GmailLabelSyncStatus> }>(
-        'status',
-        connection.email,
-      );
-      sync = {
-        pending: Number(payload.status?.pending ?? 0),
-        leased: Number(payload.status?.leased ?? 0),
-        succeeded: Number(payload.status?.succeeded ?? 0),
-        failed: Number(payload.status?.failed ?? 0),
-        lastSyncedAt: typeof payload.status?.lastSyncedAt === 'string' ? payload.status.lastSyncedAt : null,
-        lastError: typeof payload.status?.lastError === 'string' ? payload.status.lastError : null,
-      };
-    } catch {
-      state = canModifyLabels ? 'unavailable' : 'needs_reconnect';
-    }
     return {
       ...common,
       provider: 'gmail',
       email: connection.email,
       scopes: connection.scopes,
-      gmailLabelSync: { ...sync, state },
+      permissions: {
+        readEmails: gmailCanReadEmails(connection),
+        applyLabels: gmailCanModifyLabels(connection),
+      },
     };
   }
   if (connection.provider === 'slack') {
@@ -1557,6 +1561,9 @@ function syncGmailLabels(connection: StoredGmailConnection): Promise<GmailLabelS
 
 async function syncDueGmailLabels(): Promise<void> {
   if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
+  const now = Date.now();
+  if (now - lastGmailLabelSyncAttemptAt < gmailLabelSyncIntervalMs) return;
+  lastGmailLabelSyncAttemptAt = now;
   const connected = store.connections.filter((connection): connection is StoredGmailConnection =>
     connection.provider === 'gmail' && connection.status !== 'error' && gmailCanModifyLabels(connection));
   const results = await Promise.allSettled(connected.map((connection) => syncGmailLabels(connection)));
@@ -1567,6 +1574,152 @@ async function syncDueGmailLabels(): Promise<void> {
       console.log(`Gmail label sync applied ${outcome.value.applied} Fluid label(s).`);
     }
   }
+}
+
+function scheduleIntervalLabel(intervalMs: number): string {
+  if (intervalMs % 3_600_000 === 0) {
+    const hours = intervalMs / 3_600_000;
+    return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  if (intervalMs % 60_000 === 0) {
+    const minutes = intervalMs / 60_000;
+    return `Every ${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+  const seconds = Math.max(1, Math.round(intervalMs / 1_000));
+  return `Every ${seconds} second${seconds === 1 ? '' : 's'}`;
+}
+
+function nextScheduledAt(lastAttemptAt: number, intervalMs: number, enabled: boolean): string | null {
+  if (!enabled) return null;
+  const nextAt = lastAttemptAt > 0 ? lastAttemptAt + intervalMs : Date.now() + intervalMs;
+  return new Date(Math.max(Date.now(), nextAt)).toISOString();
+}
+
+async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
+  const gmail = store.connections.find((connection): connection is StoredGmailConnection =>
+    connection.provider === 'gmail' && connection.email.toLowerCase() === intendedEmail)
+    ?? store.connections.find((connection): connection is StoredGmailConnection => connection.provider === 'gmail');
+  const configured = gmailConfigurationProblems().length === 0 && Boolean(supabaseProjectUrl);
+  const inboxEnabled = configured && gmail !== undefined && gmail.status !== 'error' && gmailCanReadEmails(gmail);
+  const labelEnabled = inboxEnabled && gmail !== undefined && gmailCanModifyLabels(gmail);
+
+  let activityState: StoredActivitySyncState | null = null;
+  let activityStatusError: string | null = null;
+  let labelStatus: GmailLabelSyncStatus = {
+    pending: 0,
+    leased: 0,
+    succeeded: 0,
+    failed: 0,
+    lastSyncedAt: null,
+    lastError: null,
+  };
+  let labelStatusError: string | null = null;
+
+  if (gmail !== undefined && configured) {
+    try {
+      const payload = await activityFunctionJson<{ sync: StoredActivitySyncState | null }>('state', {
+        accountEmail: gmail.email.toLowerCase(),
+      });
+      activityState = payload.sync;
+    } catch (error) {
+      activityStatusError = errorMessage(error);
+    }
+    if (gmailCanModifyLabels(gmail)) {
+      try {
+        const payload = await gmailLabelSyncFunctionJson<{ status?: Partial<GmailLabelSyncStatus> }>(
+          'status',
+          gmail.email,
+        );
+        labelStatus = {
+          pending: Number(payload.status?.pending ?? 0),
+          leased: Number(payload.status?.leased ?? 0),
+          succeeded: Number(payload.status?.succeeded ?? 0),
+          failed: Number(payload.status?.failed ?? 0),
+          lastSyncedAt: typeof payload.status?.lastSyncedAt === 'string' ? payload.status.lastSyncedAt : null,
+          lastError: typeof payload.status?.lastError === 'string' ? payload.status.lastError : null,
+        };
+      } catch (error) {
+        labelStatusError = errorMessage(error);
+      }
+    }
+  }
+
+  const inboxAttempt = gmail === undefined ? 0 : lastActivitySyncAttemptAt.get(gmail.id) ?? 0;
+  const labelQueued = labelStatus.pending + labelStatus.leased;
+  const inboxLastError = activityState?.last_error
+    ?? (gmail?.status === 'error' ? gmail.error : null)
+    ?? activityStatusError;
+  const labelLastError = labelStatus.lastError ?? labelStatusError;
+
+  return [
+    {
+      id: 'fluid-gmail-activities',
+      runtimeName: 'fluid-gmail-activities',
+      name: 'Gmail inbox sync',
+      icon: '⚙️',
+      description: 'Imports new Gmail messages into Fluid Signals from the durable Gmail history cursor.',
+      schedule: scheduleIntervalLabel(gmailActivitySyncIntervalMs),
+      profile: 'Fluid server',
+      mode: 'Script-only automation',
+      runtimeMode: 'script',
+      steps: [
+        'Read Gmail changes since the durable history cursor.',
+        'Upsert messages idempotently into Fluid Signals.',
+      ],
+      enabled: inboxEnabled,
+      state: inboxEnabled
+        ? activeActivitySyncs.size > 0 ? 'Running' : 'Active'
+        : gmail === undefined ? 'Needs Gmail connection' : 'Needs attention',
+      nextRunAt: nextScheduledAt(inboxAttempt, gmailActivitySyncIntervalMs, inboxEnabled),
+      lastRunAt: activityState?.last_sync_completed_at ?? (inboxAttempt > 0 ? new Date(inboxAttempt).toISOString() : null),
+      lastRunStatus: activeActivitySyncs.size > 0 ? 'running' : activityState?.last_sync_status ?? null,
+      lastError: inboxLastError,
+      historyAgentId: null,
+      contractStatus: 'built-in',
+      source: 'fluid',
+      historyAvailable: false,
+    },
+    {
+      id: 'fluid-gmail-label-sync',
+      runtimeName: 'fluid-gmail-label-sync',
+      name: 'Gmail label sync',
+      icon: '⚙️',
+      description: 'Applies canonical Fluid labels to newly classified Gmail messages without historical backfill.',
+      schedule: scheduleIntervalLabel(gmailLabelSyncIntervalMs),
+      profile: 'Fluid server',
+      mode: 'Script-only automation',
+      runtimeMode: 'script',
+      steps: [
+        'Claim newly classified Gmail messages from the label queue.',
+        'Apply Fluid topic and role labels without changing personal Gmail labels.',
+      ],
+      enabled: labelEnabled,
+      state: labelEnabled
+        ? activeGmailLabelSyncs.size > 0
+          ? 'Running'
+          : labelQueued > 0
+            ? `Active · ${labelQueued} queued`
+            : 'Active'
+        : gmail === undefined
+          ? 'Needs Gmail connection'
+          : 'Needs Gmail label permission',
+      nextRunAt: nextScheduledAt(lastGmailLabelSyncAttemptAt, gmailLabelSyncIntervalMs, labelEnabled),
+      lastRunAt: labelStatus.lastSyncedAt
+        ?? (lastGmailLabelSyncAttemptAt > 0 ? new Date(lastGmailLabelSyncAttemptAt).toISOString() : null),
+      lastRunStatus: activeGmailLabelSyncs.size > 0
+        ? 'running'
+        : labelStatus.failed > 0
+          ? 'failed'
+          : lastGmailLabelSyncAttemptAt > 0
+            ? 'completed'
+            : null,
+      lastError: labelLastError,
+      historyAgentId: null,
+      contractStatus: 'built-in',
+      source: 'fluid',
+      historyAvailable: false,
+    },
+  ];
 }
 
 async function performSlackSync(connection: StoredSlackConnection): Promise<SlackSyncResult> {
@@ -2936,6 +3089,14 @@ app.get('/api/hermes/schedules', async (_req, res, next) => {
     res.json(await hermesMetadataJson('agents'));
   } catch (error) {
     next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes schedules: ${errorMessage(error)}`));
+  }
+});
+
+app.get('/api/fluid/schedules', async (_req, res, next) => {
+  try {
+    res.json({ schedules: await fluidScheduleRoster(), fetchedAt: new Date().toISOString() });
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Fluid schedules: ${errorMessage(error)}`));
   }
 });
 

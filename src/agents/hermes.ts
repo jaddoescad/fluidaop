@@ -26,6 +26,8 @@ export interface HermesAgentDefinition {
   lastError: string | null;
   historyAgentId: string | null;
   contractStatus: string;
+  source: 'hermes' | 'fluid';
+  historyAvailable: boolean;
 }
 
 interface HermesAgentContract {
@@ -74,6 +76,8 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     runtimeMode: agent.mode,
     steps: contract?.steps ?? [],
     historyAgentId: null,
+    source: 'hermes',
+    historyAvailable: true,
   };
 }
 

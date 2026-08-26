@@ -26,6 +26,7 @@ export function SchedulesPage({
   status,
   schedules,
   error,
+  warning,
   onRefresh,
 }: {
   onNavigate: (label: string) => void;
@@ -33,6 +34,7 @@ export function SchedulesPage({
   status: HermesStatus | null;
   schedules: HermesAgentDefinition[] | null;
   error: string | null;
+  warning: string | null;
   onRefresh: () => Promise<void>;
 }) {
   const [filter, setFilter] = useState<ScheduleFilter>('all');
@@ -64,6 +66,10 @@ export function SchedulesPage({
     if (selected === undefined) return;
     setHistory(null);
     setHistoryError(null);
+    if (!selected.historyAvailable) {
+      setHistoryLoading(false);
+      return;
+    }
     setHistoryLoading(true);
     void loadHermesHistory(selected.id, controller.signal, selected.id)
       .then((nextHistory) => {
@@ -81,8 +87,7 @@ export function SchedulesPage({
     return () => controller.abort();
   }, [historyReload, schedules, selectedId]);
 
-  const online = error === null && status?.connected === true;
-  const degraded = error !== null && status?.gatewayState === 'running';
+  const online = error === null && schedules !== null;
   const selected = schedules?.find((schedule) => schedule.id === selectedId) ?? null;
   const visible = schedules?.filter(
     (schedule) => filter === 'all' || schedule.runtimeMode === filter,
@@ -90,12 +95,10 @@ export function SchedulesPage({
   const agentCount = schedules?.filter((schedule) => schedule.runtimeMode === 'agent').length ?? 0;
   const scriptCount = schedules === null ? 0 : schedules.length - agentCount;
   const runtimeLabel = error !== null
-    ? degraded ? 'Hermes degraded' : 'Hermes unavailable'
-    : status === null
-      ? 'Checking Hermes'
-      : online
-        ? 'Hermes online'
-        : 'Hermes offline';
+    ? 'Schedules unavailable'
+    : schedules === null
+      ? 'Loading schedules'
+      : 'Schedules available';
 
   return (
     <div className="v v-flow v-zen sc-root">
@@ -119,18 +122,20 @@ export function SchedulesPage({
               </header>
 
               <section className={`sc-runtime${error !== null ? ' sc-runtime-error' : ''}`} aria-live="polite">
-                <span className={`sc-dot${online ? ' sc-dot-online' : degraded ? ' sc-dot-degraded' : ''}`} />
+                <span className={`sc-dot${online ? ' sc-dot-online' : ''}`} />
                 <div className="sc-runtime-copy">
                   <strong>{runtimeLabel}</strong>
                   <span>
                     {error !== null
                       ? error
-                      : status === null
-                        ? 'Connecting to the scheduler…'
-                        : `v${status.version ?? 'unknown'} · ${schedules?.length ?? 0} schedules · ${agentCount} agent · ${scriptCount} script`}
+                      : schedules === null
+                        ? 'Reading Fluid and Hermes schedule rosters…'
+                        : `${schedules.length} schedules · ${agentCount} agent · ${scriptCount} script · Hermes ${status?.connected === true ? `v${status.version ?? 'unknown'} online` : 'unavailable'}`}
                   </span>
                 </div>
               </section>
+
+              {warning !== null ? <p className="sc-warning" role="status">{warning}</p> : null}
 
               <div className="sc-filter" role="group" aria-label="Filter schedules by type">
                 {FILTERS.map(({ id, label }) => (
@@ -155,28 +160,30 @@ export function SchedulesPage({
               ) : schedules === null ? (
                 <div className="sc-empty" role="status">
                   <strong>Loading schedules</strong>
-                  <p>Reading the live Hermes cron roster…</p>
+                  <p>Reading Fluid scripts and live Hermes jobs…</p>
                 </div>
               ) : schedules.length === 0 ? (
                 <div className="sc-empty">
                   <strong>No schedules</strong>
-                  <p>Hermes is online, but it is not reporting any cron jobs.</p>
+                  <p>No recurring Fluid scripts or Hermes jobs are registered.</p>
                 </div>
               ) : visible !== null && visible.length === 0 ? (
                 <div className="sc-empty">
                   <strong>No {filter === 'agent' ? 'agent' : 'script'} schedules</strong>
-                  <p>None of the {schedules.length} Hermes schedules run in {filter} mode.</p>
+                  <p>None of the {schedules.length} registered schedules run in {filter} mode.</p>
                 </div>
               ) : (
-                <div className="sc-list" aria-label="Hermes schedules">
+                <div className="sc-list" aria-label="Schedules">
                   {visible?.map((schedule) => {
                     const stateLabel = !schedule.enabled
-                      ? 'Paused'
+                      ? schedule.state || 'Paused'
                       : schedule.lastError !== null
                         ? 'Needs attention'
                         : 'Active';
                     const stateClass = !schedule.enabled
-                      ? ' sc-state-paused'
+                      ? schedule.state.toLowerCase().includes('needs')
+                        ? ' sc-state-attention'
+                        : ' sc-state-paused'
                       : schedule.lastError !== null
                         ? ' sc-state-attention'
                         : ' sc-state-active';
@@ -207,8 +214,8 @@ export function SchedulesPage({
               )}
 
               <p className="sc-note">
-                This roster comes directly from the Hermes scheduler — every cron job, agent-mode and
-                script-mode alike. Pausing or editing a schedule happens in Hermes, not here.
+                This roster combines Fluid's fixed-code schedules with live Hermes jobs. Connections
+                grant account permissions; recurring execution is listed here.
               </p>
             </div>
           </main>
@@ -244,6 +251,7 @@ export function SchedulesPage({
 
             <dl className="sc-facts">
               <div><dt>Runtime name</dt><dd>{selected.runtimeName}</dd></div>
+              <div><dt>Source</dt><dd>{selected.source === 'fluid' ? 'Fluid server' : 'Hermes'}</dd></div>
               <div><dt>Profile</dt><dd>{selected.profile}</dd></div>
               <div><dt>Schedule</dt><dd>{selected.schedule}</dd></div>
               <div>
@@ -259,25 +267,37 @@ export function SchedulesPage({
               ) : null}
             </dl>
 
-            <section className="sc-drawer-section">
-              <div className="sc-drawer-heading">
-                <h3>Run history</h3>
-                <button
-                  type="button"
-                  className="sc-history-refresh"
-                  onClick={() => setHistoryReload((value) => value + 1)}
-                  disabled={historyLoading}
-                >
-                  {historyLoading ? 'Loading…' : 'Refresh'}
-                </button>
-              </div>
-              <ScheduleHistory
-                history={history}
-                error={historyError}
-                loading={historyLoading}
-                onRetry={() => setHistoryReload((value) => value + 1)}
-              />
-            </section>
+            {selected.historyAvailable ? (
+              <section className="sc-drawer-section">
+                <div className="sc-drawer-heading">
+                  <h3>Run history</h3>
+                  <button
+                    type="button"
+                    className="sc-history-refresh"
+                    onClick={() => setHistoryReload((value) => value + 1)}
+                    disabled={historyLoading}
+                  >
+                    {historyLoading ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+                <ScheduleHistory
+                  history={history}
+                  error={historyError}
+                  loading={historyLoading}
+                  onRetry={() => setHistoryReload((value) => value + 1)}
+                />
+              </section>
+            ) : (
+              <section className="sc-drawer-section">
+                <div className="sc-drawer-heading"><h3>How it runs</h3></div>
+                <p className="sc-built-in-note">{selected.description}</p>
+                {selected.steps.length > 0 ? (
+                  <ol className="sc-built-in-steps">
+                    {selected.steps.map((step) => <li key={step}>{step}</li>)}
+                  </ol>
+                ) : null}
+              </section>
+            )}
           </section>
         </div>
       ) : null}

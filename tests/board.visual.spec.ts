@@ -39,6 +39,23 @@ const signal = {
   review: { status: 'pending', resolution: null, pendingRecommendationCount: 1 },
 };
 
+const fluidSchedules = [
+  {
+    id: 'fluid-gmail-activities', runtimeName: 'fluid-gmail-activities', name: 'Gmail inbox sync', icon: '⚙️',
+    description: 'Imports new Gmail messages into Fluid Signals.', schedule: 'Every 5 minutes', profile: 'Fluid server',
+    mode: 'Script-only automation', runtimeMode: 'script', steps: [], enabled: true, state: 'Active',
+    nextRunAt: '2026-08-26T02:35:00.000Z', lastRunAt: '2026-08-26T02:30:00.000Z', lastRunStatus: 'succeeded',
+    lastError: null, historyAgentId: null, contractStatus: 'built-in', source: 'fluid', historyAvailable: false,
+  },
+  {
+    id: 'fluid-gmail-label-sync', runtimeName: 'fluid-gmail-label-sync', name: 'Gmail label sync', icon: '⚙️',
+    description: 'Applies Fluid labels to newly classified Gmail messages.', schedule: 'Every 30 seconds', profile: 'Fluid server',
+    mode: 'Script-only automation', runtimeMode: 'script', steps: [], enabled: true, state: 'Active',
+    nextRunAt: '2026-08-26T02:30:30.000Z', lastRunAt: '2026-08-26T02:30:00.000Z', lastRunStatus: 'completed',
+    lastError: null, historyAgentId: null, contractStatus: 'built-in', source: 'fluid', historyAvailable: false,
+  },
+];
+
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(new Date('2026-08-26T02:30:00.000Z'));
   let actionCreated = false;
@@ -138,6 +155,18 @@ test.beforeEach(async ({ page }) => {
       return route.fulfill({ json: { connected: true, version: 'test', gatewayState: 'running', activeAgents: 0, profiles: ['default'], checkedAt: new Date().toISOString() } });
     }
     if (path === '/api/hermes/schedules') return route.fulfill({ json: { agents: [], fetchedAt: new Date().toISOString() } });
+    if (path === '/api/fluid/schedules') return route.fulfill({ json: { schedules: fluidSchedules, fetchedAt: new Date().toISOString() } });
+    if (path === '/api/connections') return route.fulfill({ json: {
+      connections: [{
+        id: 'gmail-1', provider: 'gmail', email: 'info@paintersottawa.com', scopes: [], status: 'connected',
+        createdAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-26T02:30:00.000Z',
+        lastCheckedAt: '2026-08-26T02:30:00.000Z', lastHealthyAt: '2026-08-26T02:30:00.000Z',
+        nextCheckAt: '2026-08-26T02:35:00.000Z', error: null,
+        permissions: { readEmails: true, applyLabels: true },
+      }],
+      healthCheckIntervalMs: 300000,
+      gmail: { configured: true }, quo: { configured: true }, slack: { configured: true },
+    } });
     if (path.startsWith('/api/board/')) return route.fulfill({ json: { items: [], nextCursor: null } });
     return route.fulfill({ status: 404, json: { error: 'Not mocked' } });
   });
@@ -698,4 +727,20 @@ test('the agent roster scrolls while sidebar settings stay fixed', async ({ page
   expect(await roster.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   expect(await footer.evaluate((element) => element.getBoundingClientRect().top)).toBe(footerTop);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
+test('keeps Gmail permissions in Connections and recurring work in Schedules', async ({ page }) => {
+  await page.goto('/connections');
+  await expect(page.getByLabel('Gmail — info@paintersottawa.com')).toContainText('Read emails · Apply labels');
+  await expect(page.getByText('Gmail label sync', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Fluid labels active', { exact: true })).toHaveCount(0);
+
+  await page.goto('/schedules');
+  await expect(page.getByText('Gmail inbox sync', { exact: true })).toBeVisible();
+  await expect(page.getByText('Gmail label sync', { exact: true })).toBeVisible();
+  await expect(page.locator('.sc-badge-script')).toHaveCount(2);
+
+  await page.goto('/agents');
+  await expect(page.getByText('Gmail inbox sync', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Gmail label sync', { exact: true })).toHaveCount(0);
 });

@@ -200,14 +200,23 @@
 .cn-logo-slack { background: #fff; border-color: color-mix(in srgb, var(--line) 82%, #fff); }
 .cn-logo-slack.cn-logo-dim svg { filter: grayscale(.7); opacity: .62; }
 
-.cn-gmail-labels {
-  padding: 0 20px;
+.cn-capabilities {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 20px 10px;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
-.cn-gmail-labels .cn-manage-ok,
-.cn-gmail-labels .cn-problem,
-.cn-gmail-labels .cn-hint {
-  margin: 0 0 10px;
+.cn-capabilities strong {
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .cn-who {

@@ -83,6 +83,12 @@
 .sc-runtime-copy strong { color: var(--ink); font-size: 12.5px; font-weight: 600; }
 .sc-runtime-copy span { color: var(--dim); font-size: 11.5px; }
 
+.sc-warning {
+  margin: -4px 0 14px;
+  color: var(--warn);
+  font-size: 11px;
+}
+
 /* ---------- All / Agents / Scripts filter ---------- */
 
 .sc-filter {
@@ -313,6 +319,20 @@
 .sc-history-refresh:hover:not(:disabled) { color: var(--ink); }
 .sc-history-refresh:disabled { cursor: wait; opacity: 0.55; }
 .sc-history-refresh:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.sc-built-in-note {
+  color: var(--dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.sc-built-in-steps {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.6;
+}
 
 /* ---------- run history (schedule-local markup) ---------- */
 

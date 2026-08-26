@@ -5,7 +5,18 @@ description: Create or revise a Hermes automation agent from a business workflow
 
 # Agent Creator
 
-Create an operational Hermes automation, not a mock UI entry. In Fluid, an agent is a real Hermes cron job that uses one or more skills. Fluid discovers the job from Hermes after creation.
+Create an operational Hermes agent, not a mock UI entry. In Fluid, an agent is a Hermes job that uses model reasoning. A deterministic recurring job is a script schedule, not an agent, even when Hermes or the Fluid server launches it on a clock.
+
+## Classify before building
+
+Keep Fluid's product ownership explicit:
+
+- **Connections** own provider accounts, authorization scopes, and connection health. They do not own recurring execution.
+- **Schedules** list every recurring job and its cadence. Agent-mode schedules invoke a model; script-mode schedules run fixed code.
+- **Agents** list only jobs that use model reasoning. A scheduled agent appears in both Agents and Schedules; a deterministic job appears only in Schedules.
+- **Skills** define reusable agent behavior. Do not create a skill or agent for deterministic synchronization, projection, polling, or queue-draining code.
+
+Before creating an agent, decide whether the work requires inference. If fixed code can produce the correct result, implement an idempotent script schedule and register it in Fluid's schedule roster. Never hide a recurring job only inside a Connection card.
 
 ## Establish the contract
 
@@ -29,7 +40,7 @@ If the user is exploring rather than authorizing creation, return a proposed con
 2. Create or revise a narrowly scoped skill containing the business-specific reasoning and output contract. Keep secrets, sample customer data, and environment-specific tokens out of `SKILL.md`.
 3. Give the job only the toolsets and skills it needs. Default to read-only access. Any sending, deleting, moving, publishing, payment, or external write must be explicitly within the user's request.
 4. Add a deterministic pre-check when polling can establish that no work is due. A no-work tick should skip the model rather than spend tokens.
-5. Create the Hermes cron job with a clear name, explicit profile, attached skills, schedule, and bounded execution. Use the `cronjob` tool when available.
+5. Create the Hermes agent schedule with a clear name, explicit profile, attached skills, cadence, and bounded execution. Use the `cronjob` tool when available. If the final workflow is deterministic, stop using this skill and register a script schedule instead.
 6. Create or replace the job's verified Fluid presentation contract as described below.
 7. Verify the job exists in Hermes's all-profile cron roster before presenting it as created. Never add or preserve a Fluid card to simulate an agent that Hermes does not report.
 
@@ -80,6 +91,7 @@ Before declaring success, confirm:
 
 - the skill is discoverable in the intended Hermes profile;
 - the job appears in the live all-profile cron roster with the intended schedule and state;
+- recurring timing appears in Fluid Schedules, while only model-reasoning jobs appear in Fluid Agents;
 - the Fluid presentation contract verifies against the live job definition;
 - a dry run or one bounded real run produces the expected stored output;
 - duplicate execution does not duplicate side effects;

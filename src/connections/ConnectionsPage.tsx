@@ -23,14 +23,9 @@ interface GmailConnection {
   lastHealthyAt: string | null;
   nextCheckAt: string | null;
   error: string | null;
-  gmailLabelSync: {
-    state: 'active' | 'needs_reconnect' | 'unavailable';
-    pending: number;
-    leased: number;
-    succeeded: number;
-    failed: number;
-    lastSyncedAt: string | null;
-    lastError: string | null;
+  permissions: {
+    readEmails: boolean;
+    applyLabels: boolean;
   };
 }
 
@@ -351,28 +346,12 @@ function ConnectedCard({
         </p>
       )}
 
-      <div className="cn-gmail-labels">
-        {c.gmailLabelSync.state === 'active' ? (
-          <p className="cn-manage-ok">
-            <i className="cn-dot" />
-            Fluid labels active
-            {(c.gmailLabelSync.pending + c.gmailLabelSync.leased) > 0 && (
-              <span> · {c.gmailLabelSync.pending + c.gmailLabelSync.leased} queued</span>
-            )}
-          </p>
-        ) : c.gmailLabelSync.state === 'needs_reconnect' ? (
-          <p className="cn-problem">
-            Reconnect once to let Fluid add its own labels to new inbound mail.
-          </p>
-        ) : (
-          <p className="cn-problem">Gmail label status is temporarily unavailable.</p>
-        )}
-        {c.gmailLabelSync.failed > 0 && (
-          <p className="cn-hint">
-            {c.gmailLabelSync.failed} label update{c.gmailLabelSync.failed === 1 ? '' : 's'} need review.
-            {c.gmailLabelSync.lastError ? ` ${c.gmailLabelSync.lastError}` : ''}
-          </p>
-        )}
+      <div className="cn-capabilities" aria-label="Granted Gmail permissions">
+        <span>Permissions</span>
+        <strong>
+          {c.permissions.readEmails ? 'Read emails' : 'Email access unavailable'}
+          {c.permissions.applyLabels ? ' · Apply labels' : ''}
+        </strong>
       </div>
 
       {confirming ? (
@@ -414,9 +393,9 @@ function ConnectedCard({
             </div>
           </dl>
           <div className="cn-actions">
-            {c.gmailLabelSync.state === 'needs_reconnect' && (
+            {!c.permissions.applyLabels && (
               <button type="button" className="cn-btn cn-btn-primary" onClick={onReconnect} disabled={reconnecting}>
-                {reconnecting ? 'Opening Google…' : 'Enable Gmail labels'}
+                {reconnecting ? 'Opening Google…' : 'Add label permission'}
               </button>
             )}
             <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>
