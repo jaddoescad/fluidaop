@@ -96,6 +96,12 @@ export interface Signal {
   direction?: 'inbound' | 'outbound';
   actorEmail?: string | null;
   actorPhone?: string | null;
+  identityResolution?: {
+    status: 'conflict' | 'unresolved';
+    displayName: string | null;
+    displayValue: string | null;
+    reason: string;
+  } | null;
   topic?: string | null;
   topicColor?: string | null;
   urgency?: string | null;

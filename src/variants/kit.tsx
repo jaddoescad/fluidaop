@@ -686,14 +686,23 @@ function formatSignalPhone(value: string): string {
   return value;
 }
 
+function SignalContactTag({ signal, person }: { signal: Signal; person?: Person }) {
+  if (signal.identityResolution?.status === 'conflict') {
+    return (
+      <span className="fl-role role-conflict" title={signal.identityResolution.reason}>
+        ⚠ duplicate contacts
+      </span>
+    );
+  }
+  return person ? <RoleTag role={person.role} /> : null;
+}
+
 export function SignalsCol({
   s,
   act,
   d,
   onOpen,
   selId,
-  view,
-  onView,
   onLoadMore,
   hasMore = false,
   loading = false,
@@ -703,18 +712,10 @@ export function SignalsCol({
   d: Derived;
   onOpen: (sig: Signal) => void;
   selId?: string | null;
-  view?: 'all' | 'open';
-  onView?: (view: 'all' | 'open') => void;
   onLoadMore?: () => void;
   hasMore?: boolean;
   loading?: boolean;
 }) {
-  const [localView, setLocalView] = useState<'all' | 'open'>('all');
-  const activeView = view ?? localView;
-  const setView = (next: 'all' | 'open') => {
-    setLocalView(next);
-    onView?.(next);
-  };
   const fname = d.focusPerson?.name ?? null;
   const clear = () => act.focus(null);
   const stById = new Map(d.streams.map((sig) => [sig.id, statusOf(s, sig)]));
@@ -741,7 +742,7 @@ export function SignalsCol({
             <span className="fl-sig-name">{p?.name ?? 'Unknown'}</span>
             {sig.actorPhone ? <span className="fl-sig-phone">{formatSignalPhone(sig.actorPhone)}</span> : null}
           </span>
-          {p && <RoleTag role={p.role} />}
+          <SignalContactTag signal={sig} person={p} />
           {st.key === 'action' && <span className="fl-sig-status">Draft in Actions</span>}
         </div>
         <h3 className="fl-act-title">
@@ -763,16 +764,6 @@ export function SignalsCol({
         count={d.streams.length}
         focusName={fname}
         onClear={clear}
-        extra={
-          <span className="fl-viewtoggle">
-            <button className={activeView === 'open' ? 'on' : ''} onClick={() => setView('open')}>
-              needs you · {openSigs.length}
-            </button>
-            <button className={activeView === 'all' ? 'on' : ''} onClick={() => setView('all')}>
-              all
-            </button>
-          </span>
-        }
       />
       <div
         className="pane-scroll"
@@ -791,7 +782,7 @@ export function SignalsCol({
         {openSigs.length === 0 && (
           <Empty>Nothing needs you right now{fname ? ` from ${fname}` : ''} — all settled. 🏁</Empty>
         )}
-        {activeView === 'all' && settledSigs.length > 0 && (
+        {settledSigs.length > 0 && (
           <>
             <h4 className="autos-h">Settled</h4>
             {groupStreamByDay(settledSigs, s.now).map((g) => (
@@ -1382,7 +1373,7 @@ export function DecidePopup({
           <div className="fl-mega-main">
             <div className="fl-mega-row">
               <h2 className="fl-mega-name">{person.name}</h2>
-              <RoleTag role={person.role} />
+              <SignalContactTag signal={anchor} person={person} />
               {label && (
                 <em className="fl-plabel canonical-label" style={canonicalLabelStyle(label.color)}>
                   {label.text}

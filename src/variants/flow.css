@@ -534,6 +534,7 @@
 .fl-role.role-lead { color: var(--c-email); }
 .fl-role.role-client { color: var(--ok); }
 .fl-role.role-vendor { color: var(--c-form); }
+.fl-role.role-conflict { color: var(--danger); }
 
 .card-who .fl-role,
 .fl-act-person .fl-role {
@@ -640,34 +641,7 @@
 
 .v-flow .fl-sig:hover .fl-open-hint { opacity: 1; }
 
-/* view toggle: the whole point is that most of the wall is settled */
-
-.v-flow .fl-viewtoggle {
-  margin-left: auto;
-  display: flex;
-  gap: 4px;
-}
-
 .v-flow .pane-head .focus-pill { margin-left: 0; }
-
-.v-flow .fl-viewtoggle button {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  padding: 3px 9px;
-  border-radius: 7px;
-  border: 1.5px solid var(--line-2);
-  color: var(--dim);
-  white-space: nowrap;
-  transition: background 0.12s, color 0.12s;
-}
-
-.v-flow .fl-viewtoggle button.on {
-  background: var(--warn);
-  color: #150b28;
-  border-color: #000;
-  box-shadow: 2px 2px 0 #000;
-}
 
 /* per-card status: needs you vs settled */
 

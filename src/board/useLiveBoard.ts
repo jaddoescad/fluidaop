@@ -63,6 +63,12 @@ interface ApiSignal {
   actorName: string | null;
   actorEmail: string | null;
   actorPhone: string | null;
+  identityResolution?: {
+    status: 'conflict' | 'unresolved';
+    displayName: string | null;
+    displayValue: string | null;
+    reason: string;
+  } | null;
   subject: string;
   preview: string;
   bodyText?: string | null;
@@ -218,7 +224,8 @@ function apiPersonToPerson(
 }
 
 function actorName(signal: ApiSignal): string {
-  return signal.contact?.displayName ?? signal.actorName ?? signal.actorEmail ?? signal.actorPhone ?? 'Unknown';
+  return signal.contact?.displayName ?? signal.identityResolution?.displayName ??
+    signal.actorName ?? signal.actorEmail ?? signal.actorPhone ?? 'Unknown';
 }
 
 function apiSignalToSignal(signal: ApiSignal, personId?: string): Signal {
@@ -242,6 +249,7 @@ function apiSignalToSignal(signal: ApiSignal, personId?: string): Signal {
     direction: signal.direction,
     actorEmail: signal.contact?.primaryEmail ?? signal.actorEmail,
     actorPhone: signal.contact?.primaryPhone ?? signal.actorPhone,
+    identityResolution: signal.identityResolution ?? null,
     topic: topic?.name ?? null,
     topicColor: safeLabelColor(topic?.color),
     urgency: urgency?.name ?? null,
@@ -360,8 +368,6 @@ export interface LiveBoardController {
   s: State;
   act: Act;
   error: string | null;
-  signalView: 'all' | 'needs_you';
-  setSignalView: (view: 'all' | 'needs_you') => void;
   peopleHasMore: boolean;
   peopleCount: number;
   signalsHasMore: boolean;
@@ -390,7 +396,6 @@ export function useLiveBoard(): LiveBoardController {
   const [signalsCursor, setSignalsCursor] = useState<string | null>(null);
   const [peopleLoading, setPeopleLoading] = useState(false);
   const [signalsLoading, setSignalsLoading] = useState(false);
-  const [signalView, setSignalView] = useState<'all' | 'needs_you'>('all');
   const [details, setDetails] = useState<Record<string, SignalDetail>>({});
   const [actionDetails, setActionDetails] = useState<Record<string, ActionDetail>>({});
   const [error, setError] = useState<string | null>(null);
@@ -434,7 +439,7 @@ export function useLiveBoard(): LiveBoardController {
     setSignalsLoading(true);
     try {
       const cursor = append ? signalsCursor : null;
-      const search = new URLSearchParams({ limit: '30', view: signalView });
+      const search = new URLSearchParams({ limit: '30', view: 'all' });
       if (focusId) search.set('contactId', focusId);
       if (cursor) search.set('cursor', cursor);
       const page = await json<CursorPage<ApiSignal>>(`/api/board/signals?${search}`);
@@ -444,7 +449,7 @@ export function useLiveBoard(): LiveBoardController {
     } finally {
       if (revision === requestRevision.current) setSignalsLoading(false);
     }
-  }, [focusId, signalView, signalsCursor, signalsLoading]);
+  }, [focusId, signalsCursor, signalsLoading]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -469,7 +474,7 @@ export function useLiveBoard(): LiveBoardController {
     setSignalsLoading(false);
     void loadSignals(false).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not load Signals'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusId, signalView]);
+  }, [focusId]);
 
   useEffect(() => {
     if (!booted || paused) return;
@@ -784,8 +789,6 @@ export function useLiveBoard(): LiveBoardController {
     s,
     act,
     error,
-    signalView,
-    setSignalView,
     peopleHasMore: peopleCursor !== null,
     peopleCount,
     signalsHasMore: signalsCursor !== null,

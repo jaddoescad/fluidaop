@@ -121,6 +121,59 @@ async function addAutomatedFlags(
   return items.map((item) => ({ ...item, isAutomated: flags.get(String(item.id)) ?? false }));
 }
 
+async function addIdentityResolutions(
+  client: SupabaseClient,
+  items: Array<Record<string, unknown>>,
+): Promise<Array<Record<string, unknown>>> {
+  const activityIds = items
+    .map((item) => Number(item.id))
+    .filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (activityIds.length === 0) return items;
+
+  const { data: activityIdentities, error: identityError } = await client
+    .from('activity_identities')
+    .select('activity_id,identity_id')
+    .in('activity_id', activityIds);
+  if (identityError) throw identityError;
+
+  const identityIds = [...new Set((activityIdentities ?? []).map((item) => item.identity_id))];
+  if (identityIds.length === 0) return items;
+
+  const { data: suggestions, error: suggestionError } = await client
+    .from('contact_suggestions')
+    .select('identity_id,suggestion_type,proposed_display_name,reason,identity:identities!contact_suggestions_identity_id_fkey(display_name,display_value)')
+    .eq('workspace_key', WORKSPACE_KEY)
+    .eq('status', 'pending')
+    .in('identity_id', identityIds);
+  if (suggestionError) throw suggestionError;
+
+  const suggestionByIdentity = new Map<string, Record<string, unknown>>();
+  for (const suggestion of suggestions ?? []) {
+    const identity = Array.isArray(suggestion.identity) ? suggestion.identity[0] : suggestion.identity;
+    suggestionByIdentity.set(String(suggestion.identity_id), {
+      status: suggestion.suggestion_type === 'conflict' ? 'conflict' : 'unresolved',
+      displayName: suggestion.proposed_display_name ?? identity?.display_name ?? null,
+      displayValue: identity?.display_value ?? null,
+      reason: suggestion.reason,
+    });
+  }
+
+  const resolutionByActivity = new Map<number, Record<string, unknown>>();
+  for (const link of activityIdentities ?? []) {
+    const suggestion = suggestionByIdentity.get(String(link.identity_id));
+    if (!suggestion) continue;
+    const current = resolutionByActivity.get(Number(link.activity_id));
+    if (!current || (current.status !== 'conflict' && suggestion.status === 'conflict')) {
+      resolutionByActivity.set(Number(link.activity_id), suggestion);
+    }
+  }
+
+  return items.map((item) => ({
+    ...item,
+    identityResolution: resolutionByActivity.get(Number(item.id)) ?? null,
+  }));
+}
+
 async function summary(client: SupabaseClient): Promise<Response> {
   return response(await rpc(client, 'get_real_board_summary', { p_workspace_key: WORKSPACE_KEY }));
 }
@@ -169,7 +222,11 @@ async function signals(client: SupabaseClient, url: URL): Promise<Response> {
   const items = (result?.items ?? []).filter((item): item is Record<string, unknown> => (
     Boolean(item) && typeof item === 'object'
   ));
-  return response({ items: await addAutomatedFlags(client, items), nextCursor: encodeCursor(result?.nextCursor) });
+  const flagged = await addAutomatedFlags(client, items);
+  return response({
+    items: await addIdentityResolutions(client, flagged),
+    nextCursor: encodeCursor(result?.nextCursor),
+  });
 }
 
 async function signal(client: SupabaseClient, url: URL): Promise<Response> {
@@ -186,9 +243,10 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
     p_history_cursor_id: cursor?.id ?? null,
   }) as Record<string, unknown> | null;
   if (!result) return response({ error: 'Signal not found' }, 404);
-  const selected = result.signal && typeof result.signal === 'object'
+  const selectedWithFlags = result.signal && typeof result.signal === 'object'
     ? await addAutomatedFlags(client, [result.signal as Record<string, unknown>])
     : [];
+  const selected = await addIdentityResolutions(client, selectedWithFlags);
   const { data: content, error: contentError } = await client.from('activities')
     .select('source,account_key,external_thread_id,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at')
     .eq('workspace_key', WORKSPACE_KEY).eq('id', activityId).maybeSingle();

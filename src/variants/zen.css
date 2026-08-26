@@ -154,15 +154,6 @@
   color: var(--danger);
 }
 
-.v-zen .fl-viewtoggle button { border: 1px solid var(--line-2); }
-
-.v-zen .fl-viewtoggle button.on {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: transparent;
-  box-shadow: none;
-}
-
 .v-zen .fl-custom input,
 .v-zen .fl-auto-select {
   background: var(--panel);
