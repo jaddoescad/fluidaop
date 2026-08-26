@@ -1,17 +1,14 @@
 import { ReactNode, useCallback, useEffect, useState } from 'react';
 import { HermesSkill, HermesStatus, loadHermesSkills, loadHermesStatus } from '../agents/hermes';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './skills.css';
 
 export function SkillsPage({
-  d,
   onNavigate,
   header,
 }: {
-  d: Derived;
   onNavigate: (label: string) => void;
   header: ReactNode;
 }) {
@@ -52,7 +49,7 @@ export function SkillsPage({
   return (
     <div className="v v-flow v-zen sk-root">
       <div className="fl-shell">
-        <SideNav d={d} active="Skills" onNav={onNavigate} />
+        <SideNav active="Skills" onNav={onNavigate} />
         <div className="fl-frame">
           {header}
           <main className="sk-main">

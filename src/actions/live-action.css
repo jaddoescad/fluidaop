@@ -1,0 +1,45 @@
+.la-popup { width: min(680px,94vw); height: min(760px,92vh); }
+.la-head { flex: 0 0 auto; }
+.la-state { display: grid; min-height: 220px; place-items: center; color: var(--dim); }
+.la-status { color: var(--faint); }
+.la-status.is-awaiting_approval { color: var(--gold); }
+.la-status.is-simulated { color: var(--warn); }
+.la-status.is-failed { color: var(--danger); }
+.la-body { padding: 0 24px 24px; }
+.la-latest,.la-compose { padding: 20px 0; border-bottom: 1px solid var(--line); }
+.la-section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.la-section-head > span:last-child { font-weight: 500; letter-spacing: 0; text-transform: none; }
+.la-source-meta { display: flex; align-items: center; gap: 6px; }
+.la-latest > p { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.62; white-space: pre-wrap; }
+.la-latest > p.is-clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 6; }
+.la-context-actions { display: flex; gap: 16px; margin-top: 10px; min-height: 18px; }
+.la-context-actions button { padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; }
+.la-context-actions button:hover { color: var(--ink); }
+.la-compose { border-bottom: 0; padding-bottom: 14px; }
+.la-agent-state { display: flex; align-items: center; gap: 8px; padding: 12px 0; color: var(--accent); font-size: 12.5px; }
+.la-agent-state.is-error,.la-error { color: var(--danger); }
+.la-draft-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.la-compose textarea { box-sizing: border-box; width: 100%; min-height: 250px; resize: vertical; border: 1px solid var(--line-2); border-radius: 8px; outline: 0; background: #101014; color: var(--ink); padding: 14px 15px; font: inherit; font-size: 13.5px; line-height: 1.62; }
+.la-compose textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.la-draft-meta { margin-top: 7px; color: var(--faint); font-size: 10.5px; }
+.la-simulation-note { margin: 10px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.45; }
+.la-simulation-note strong { color: var(--warn); }
+.la-simulation { margin: 0 0 14px; padding: 11px 13px; border-left: 2px solid var(--warn); background: var(--warn-soft); }
+.la-simulation strong { color: var(--warn); font-size: 12px; }
+.la-simulation p { margin: 4px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.5; }
+.la-details { border-top: 1px solid var(--line); padding: 11px 0; }
+.la-details summary { color: var(--dim); font-size: 11.5px; cursor: pointer; list-style-position: inside; }
+.la-details > p { margin: 9px 0 2px 18px; color: var(--dim); font-size: 12px; line-height: 1.5; }
+.la-audit div { display: flex; justify-content: space-between; margin-left: 18px; padding: 7px 0; color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--line); }
+.la-audit span { text-transform: capitalize; }
+.la-audit small { color: var(--faint); }
+.la-error { margin-top: 10px; padding: 9px 11px; border-radius: 7px; background: var(--danger-soft); font-size: 11.5px; }
+.la-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; padding: 12px 16px; background: #14141a; border-top: 1px solid #22222a; }
+.la-actions > span { flex: 1; }
+.la-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (max-width: 620px) {
+  .la-body { padding-inline: 16px; }
+  .la-section-head { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .la-compose textarea { min-height: 220px; }
+}

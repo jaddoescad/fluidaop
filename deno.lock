@@ -1473,6 +1473,7 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
+        "npm:@playwright/test@^1.62.1",
         "npm:@types/express@^5.0.6",
         "npm:@types/node@^26.2.0",
         "npm:@types/react-dom@^18.3.1",
@@ -1480,6 +1481,7 @@
         "npm:@vitejs/plugin-react@^4.3.4",
         "npm:concurrently@^10.0.5",
         "npm:dotenv@^17.4.2",
+        "npm:email-reply-parser@^2.3.9",
         "npm:express@^5.2.1",
         "npm:react-dom@^18.3.1",
         "npm:react@^18.3.1",

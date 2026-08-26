@@ -1,16 +1,19 @@
 import { Fragment, ReactNode, useCallback, useEffect, useState } from 'react';
 import { ActivitiesPage } from '../activities/ActivitiesPage';
+import { ActionsPage } from '../actions/ActionsPage';
+import { LiveActionPopup } from '../actions/LiveActionPopup';
 import { AgentsPage } from '../agents/AgentsPage';
 import { HermesAgentDefinition, HermesStatus, loadHermesSchedules, loadHermesStatus } from '../agents/hermes';
 import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
 import { PeoplePage } from '../people/PeoplePage';
-import { SkillsPage } from '../skills/SkillsPage';
 import { SchedulesPage } from '../schedules/SchedulesPage';
+import { SkillsPage } from '../skills/SkillsPage';
+import { useLiveBoard } from '../board/useLiveBoard';
 import { agentFor } from '../engine';
 import { fmtAge } from '../time';
 import { ActionCard } from '../types';
-import { derive, DueChip, Empty, PaneHead, RoleTag, VProps } from './shared';
+import { derive, DueChip, Empty, PaneHead, RoleTag } from './shared';
 import {
   AGENT_STEPS,
   AgentInfo,
@@ -27,19 +30,12 @@ import './flow.css';
 import './zen.css';
 import './fleet.css';
 
-/**
- * Fleet — the same clean board as Zen, but actions actually RUN: an agent
- * picks a card up, works it step by step, and it succeeds, fails, or comes
- * back for review — sometimes recommending the next move. Clicking an
- * action opens the RUN inspector (execution timeline, the draft, controls);
- * the person dossier stays one click deeper. Roster lives in the side nav.
- */
-
-type AppPage = 'Board' | 'Agents' | 'Skills' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts';
+type AppPage = 'Board' | 'Agents' | 'Skills' | 'Actions' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts';
 
 function pageFromPath(): AppPage {
   if (window.location.pathname === '/agents') return 'Agents';
   if (window.location.pathname === '/skills') return 'Skills';
+  if (window.location.pathname === '/actions') return 'Actions';
   if (window.location.pathname === '/schedules' || window.location.pathname === '/automations') return 'Schedules';
   if (window.location.pathname === '/connections') return 'Connections';
   if (window.location.pathname === '/labels') return 'Labels';
@@ -48,7 +44,9 @@ function pageFromPath(): AppPage {
   return 'Board';
 }
 
-export function FleetV({ s, act }: VProps) {
+export function FleetV() {
+  const board = useLiveBoard();
+  const { s, act } = board;
   const d = derive(s);
   const [runSel, setRunSel] = useState<RunSubject | null>(null);
   const [page, setPage] = useState<AppPage>(pageFromPath);
@@ -58,9 +56,7 @@ export function FleetV({ s, act }: VProps) {
   const hermesAgents = hermesSchedules?.filter((schedule) => schedule.runtimeMode === 'agent') ?? null;
 
   useEffect(() => {
-    const syncPage = () => {
-      setPage(pageFromPath());
-    };
+    const syncPage = () => setPage(pageFromPath());
     window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
   }, []);
@@ -70,7 +66,6 @@ export function FleetV({ s, act }: VProps) {
       loadHermesStatus(),
       loadHermesSchedules(),
     ]);
-
     setHermesStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
     setHermesSchedules(schedulesResult.status === 'fulfilled' ? schedulesResult.value : null);
     const failure = schedulesResult.status === 'rejected'
@@ -104,42 +99,33 @@ export function FleetV({ s, act }: VProps) {
   );
 
   const navigate = (label: string) => {
-    if (
-      label !== 'Board' &&
-      label !== 'Agents' &&
-      label !== 'Skills' &&
-      label !== 'Activity' &&
-      label !== 'Labels' &&
-      label !== 'Schedules' &&
-      label !== 'Contacts' &&
-      label !== 'Connections'
-    )
-      return;
-    const path =
-      label === 'Agents'
-        ? '/agents'
-        : label === 'Skills'
-          ? '/skills'
+    if (!['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Contacts', 'Connections'].includes(label)) return;
+    const path = label === 'Agents'
+      ? '/agents'
+      : label === 'Skills'
+        ? '/skills'
+        : label === 'Actions'
+          ? '/actions'
         : label === 'Schedules'
           ? '/schedules'
-        : label === 'Connections'
-        ? '/connections'
-        : label === 'Labels'
-          ? '/labels'
-          : label === 'Contacts'
-            ? '/contacts'
-          : label === 'Activity'
-            ? '/activity'
-            : '/';
+          : label === 'Connections'
+            ? '/connections'
+            : label === 'Labels'
+              ? '/labels'
+              : label === 'Contacts'
+                ? '/contacts'
+                : label === 'Activity'
+                  ? '/activity'
+                  : '/';
     if (window.location.pathname !== path) window.history.pushState(null, '', path);
-    setPage(label);
+    setPage(label as AppPage);
   };
 
-  if (page === 'Agents') return <AgentsPage d={d} onNavigate={navigate} header={appHeader} />;
-  if (page === 'Skills') return <SkillsPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Agents') return <AgentsPage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Skills') return <SkillsPage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Actions') return <ActionsPage onNavigate={navigate} header={appHeader} />;
   if (page === 'Schedules') return (
     <SchedulesPage
-      d={d}
       onNavigate={navigate}
       header={appHeader}
       status={hermesStatus}
@@ -148,10 +134,12 @@ export function FleetV({ s, act }: VProps) {
       onRefresh={refreshHermes}
     />
   );
-  if (page === 'Activity') return <ActivitiesPage d={d} onNavigate={navigate} header={appHeader} />;
-  if (page === 'Labels') return <LabelsPage d={d} onNavigate={navigate} header={appHeader} />;
-  if (page === 'Contacts') return <PeoplePage d={d} onNavigate={navigate} header={appHeader} />;
-  if (page === 'Connections') return <ConnectionsPage d={d} onNavigate={navigate} header={appHeader} />;
+  if (page === 'Activity') return <ActivitiesPage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Labels') return <LabelsPage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Contacts') return <PeoplePage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Connections') return <ConnectionsPage onNavigate={navigate} header={appHeader} />;
+
+  if (!s.booted) return <div className="boot" />;
 
   const fname = d.focusPerson?.name ?? null;
   const personOf = (id: string) => s.people.find((x) => x.id === id);
@@ -175,6 +163,10 @@ export function FleetV({ s, act }: VProps) {
 
   // ----- status chip per card -----
   const statusOfCard = (a: ActionCard): { key: string; chip: ReactNode } => {
+    if (a.status === 'simulated') return { key: 'review', chip: <>◌ Sent (simulation)</> };
+    if (a.status === 'awaiting_approval') return { key: 'review', chip: <>◔ review · Hermes</> };
+    if (a.status === 'failed') return { key: 'fail', chip: <>✗ failed · Hermes</> };
+    if (a.status === 'drafting') return { key: 'run', chip: <><i className="fs-run-i" /> Hermes drafting</> };
     const run = s.runs[a.id];
     if (!run) {
       const agent = agentFor(s, a);
@@ -226,13 +218,29 @@ export function FleetV({ s, act }: VProps) {
         <div className="fl-frame">
           {appHeader}
           <main className="fl-cols">
-            <PeopleCol s={s} act={act} d={d} />
+            <PeopleCol
+              s={s}
+              act={act}
+              d={d}
+              totalCount={board.peopleCount}
+              hasMore={board.peopleHasMore}
+              loading={board.peopleLoading}
+              onLoadMore={() => void board.loadMorePeople()}
+            />
             <SignalsCol
               s={s}
               act={act}
               d={d}
               selId={runSel?.type === 'signal' ? runSel.id : null}
-              onOpen={(sig) => setRunSel({ type: 'signal', id: sig.id })}
+              view={board.signalView === 'needs_you' ? 'open' : 'all'}
+              onView={(view) => board.setSignalView(view === 'open' ? 'needs_you' : 'all')}
+              hasMore={board.signalsHasMore}
+              loading={board.signalsLoading}
+              onLoadMore={() => void board.loadMoreSignals()}
+              onOpen={(sig) => {
+                setRunSel({ type: 'signal', id: sig.id });
+                void board.openSignal(sig.id);
+              }}
             />
 
             {/* ----- actions: dispatched to agents, statuses live on the chip ----- */}
@@ -245,7 +253,7 @@ export function FleetV({ s, act }: VProps) {
               />
               <div className="pane-scroll">
                 {d.actions.length === 0 && (
-                  <div className="fl-zero">All clear — the agents are watching{fname ? ` for ${fname}` : ''}.</div>
+                  <div className="fl-zero">No user-created actions{fname ? ` for ${fname}` : ''}.</div>
                 )}
                 {rows.map(({ a, doneAt }, i) => {
                   const p = personOf(a.personId);
@@ -262,7 +270,7 @@ export function FleetV({ s, act }: VProps) {
                         {i === openCount && <h4 className="autos-h">Done</h4>}
                         <article
                           className="card fl-done-card fs-click"
-                          onClick={() => setRunSel({ type: 'action', id: a.id })}
+                          onClick={() => { setRunSel({ type: 'action', id: a.id }); void board.openAction(a.id); }}
                           title="Open the chat"
                         >
                           <div className="card-top">
@@ -291,7 +299,7 @@ export function FleetV({ s, act }: VProps) {
                     <article
                       key={a.id}
                       className={`card fs-card fs-b-${st.key}${fresh ? ' fresh' : ''}`}
-                      onClick={() => setRunSel({ type: 'action', id: a.id })}
+                      onClick={() => { setRunSel({ type: 'action', id: a.id }); void board.openAction(a.id); }}
                       title="Open the chat"
                     >
                       <div className="card-top">
@@ -348,7 +356,7 @@ export function FleetV({ s, act }: VProps) {
                   );
                 })}
                 {heldRems.length === 0 && (
-                  <Empty>Nothing waiting{fname ? ` for ${fname}` : ''} — triggered reminders move to Actions.</Empty>
+                  <Empty>No user-created reminders{fname ? ` for ${fname}` : ''}.</Empty>
                 )}
               </div>
             </section>
@@ -357,7 +365,31 @@ export function FleetV({ s, act }: VProps) {
           </main>
         </div>
       </div>
-      {runSel && <RunPopup s={s} act={act} subject={runSel} onClose={() => setRunSel(null)} />}
+      {runSel?.type === 'action' ? (
+        <LiveActionPopup
+          detail={s.actionDetails?.[runSel.id]}
+          person={s.people.find((person) => person.id === s.actions.find((action) => action.id === runSel.id)?.personId) ?? null}
+          now={s.now}
+          act={act}
+          onClose={() => setRunSel(null)}
+          onOpenSignal={(id) => {
+            setRunSel({ type: 'signal', id });
+            void board.openSignal(id);
+          }}
+        />
+      ) : runSel ? (
+        <RunPopup
+          s={s}
+          act={act}
+          subject={runSel}
+          onClose={() => setRunSel(null)}
+          onLoadMoreHistory={(id) => void board.loadMoreHistory(id)}
+          onOpenAction={(id) => {
+            setRunSel({ type: 'action', id });
+            void board.openAction(id);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -12,12 +12,30 @@ import {
   GmailApiError,
 } from './gmailActivities.js';
 import {
+  FluidTopicLabel,
+  GmailLabelApiError,
+  GmailLabelMapping,
+  GmailRestLabelClient,
+  projectTopicToGmail,
+} from './gmailLabelSync.js';
+import { decorateEmailRecord } from './emailContent.js';
+import {
   parseQuoExport,
   QuoActivityInput,
   QuoContactInput,
   QuoImportKind,
   QuoPhoneNumber,
 } from './quoCsv.js';
+import {
+  exchangeSlackCode,
+  listSlackChannels,
+  listSlackUsers,
+  readSlackChannel,
+  readSlackThread,
+  revokeSlackToken,
+  SlackApiError,
+  slackAuthTest,
+} from './slack.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -34,6 +52,7 @@ interface StoredConnectionBase {
 interface StoredGmailConnection extends StoredConnectionBase {
   provider: 'gmail';
   email: string;
+  scopes: string[];
   encryptedRefreshToken: string;
 }
 
@@ -44,7 +63,17 @@ interface StoredQuoConnection extends StoredConnectionBase {
   encryptedApiKey: string;
 }
 
-type StoredConnection = StoredGmailConnection | StoredQuoConnection;
+interface StoredSlackConnection extends StoredConnectionBase {
+  provider: 'slack';
+  teamId: string;
+  teamName: string;
+  teamDomain: string | null;
+  authedUserId: string;
+  scopes: string[];
+  encryptedAccessToken: string;
+}
+
+type StoredConnection = StoredGmailConnection | StoredQuoConnection | StoredSlackConnection;
 
 interface ConnectionStore {
   version: 1;
@@ -53,6 +82,9 @@ interface ConnectionStore {
 
 interface PublicGmailConnection extends Omit<StoredGmailConnection, 'encryptedRefreshToken'> {
   nextCheckAt: string | null;
+  gmailLabelSync: GmailLabelSyncStatus & {
+    state: 'active' | 'needs_reconnect' | 'unavailable';
+  };
 }
 
 interface QuoWebhookStatus {
@@ -67,7 +99,20 @@ interface PublicQuoConnection extends Omit<StoredQuoConnection, 'encryptedApiKey
   webhook: QuoWebhookStatus;
 }
 
-type PublicConnection = PublicGmailConnection | PublicQuoConnection;
+interface PublicSlackConnection extends Omit<StoredSlackConnection, 'encryptedAccessToken'> {
+  nextCheckAt: string | null;
+  selectedChannelCount: number;
+  selectedJobChannelCount: number;
+  webhook: {
+    state: 'receiving' | 'ready' | 'pending';
+    url: string;
+    lastEventAt: string | null;
+    signingSecretConfigured: boolean;
+  };
+  lastSyncedAt: string | null;
+}
+
+type PublicConnection = PublicGmailConnection | PublicQuoConnection | PublicSlackConnection;
 
 interface GoogleTokenResponse {
   access_token?: string;
@@ -99,7 +144,14 @@ interface PendingAuthorization {
   expiresAt: number;
 }
 
+interface PendingSlackAuthorization {
+  redirectUri: string;
+  expiresAt: number;
+}
+
 const app = express();
+const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const port = readPositiveInt(process.env.API_PORT, 8787);
 const healthCheckIntervalMs = readPositiveInt(
   process.env.GMAIL_HEALTH_CHECK_INTERVAL_MS,
@@ -114,22 +166,38 @@ const gmailActivitySyncIntervalMs = readPositiveInt(
   process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
   5 * 60_000,
 );
+const gmailLabelSyncIntervalMs = readPositiveInt(
+  process.env.GMAIL_LABEL_SYNC_INTERVAL_MS,
+  30_000,
+);
+const gmailLabelSyncMaximumJobs = Math.min(
+  25,
+  readPositiveInt(process.env.GMAIL_LABEL_SYNC_MAX_JOBS, 10),
+);
+const slackSyncIntervalMs = readPositiveInt(process.env.SLACK_SYNC_INTERVAL_MS, 60_000);
+const slackBackfillChannelsPerRun = readPositiveInt(process.env.SLACK_BACKFILL_CHANNELS_PER_RUN, 1);
 const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
 const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
 ).trim().replace(/\/$/, '');
 const hermesAgentIds = new Set([
   'signal-triage',
-  'email-categorizer',
+  'signal-recommender',
+  'action-runner',
+  'case-reconciler',
   'contractor-invoices',
   'dripjobs-operations',
   'meta-ads-reporter',
 ]);
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
 const pendingAuthorizations = new Map<string, PendingAuthorization>();
+const pendingSlackAuthorizations = new Map<string, PendingSlackAuthorization>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
 const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
+const activeGmailLabelSyncs = new Map<string, Promise<GmailLabelSyncBatchResult>>();
+const activeSlackSyncs = new Map<string, Promise<SlackSyncResult>>();
 const lastActivitySyncAttemptAt = new Map<string, number>();
+const lastSlackSyncAttemptAt = new Map<string, number>();
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -140,6 +208,18 @@ interface ActivitySyncResult {
   lookbackDays: number;
   truncated: boolean;
   mode: 'full' | 'incremental';
+  completedAt: string;
+}
+
+interface SlackSyncResult {
+  teamId: string;
+  channelsSeen: number;
+  channelsSelected: number;
+  channelsBackfilled: number;
+  messagesSeen: number;
+  messagesUpserted: number;
+  rateLimited: boolean;
+  retryAfterSeconds: number | null;
   completedAt: string;
 }
 
@@ -157,6 +237,44 @@ interface StoredActivitySyncState {
   updated_at: string;
 }
 
+interface GmailLabelSyncStatus {
+  pending: number;
+  leased: number;
+  succeeded: number;
+  failed: number;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+}
+
+interface GmailLabelSyncClaim {
+  job: {
+    id: number;
+    leaseToken: string;
+    generation: number;
+    attempts: number;
+    claimedAt: string;
+  } | null;
+  message?: {
+    activityId: number;
+    accountEmail: string;
+    externalId: string;
+  };
+  desiredLabel?: FluidTopicLabel;
+  topicLabels?: FluidTopicLabel[];
+  mappings?: GmailLabelMapping[];
+  roleLabels?: string[];
+  managedRoleLabels?: string[];
+}
+
+interface GmailLabelSyncBatchResult {
+  accountEmail: string;
+  processed: number;
+  applied: number;
+  alreadyApplied: number;
+  missing: number;
+  failed: number;
+}
+
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '16kb' }));
@@ -164,6 +282,14 @@ app.use(express.json({ limit: '16kb' }));
 function readPositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function googleScopes(raw: string | undefined): string[] {
+  return [...new Set((raw ?? '').split(/\s+/).map((scope) => scope.trim()).filter(Boolean))].sort();
+}
+
+function gmailCanModifyLabels(connection: StoredGmailConnection): boolean {
+  return connection.scopes.includes(GMAIL_MODIFY_SCOPE);
 }
 
 function isUuid(value: unknown): value is string {
@@ -188,6 +314,13 @@ function gmailConfigurationProblems(): string[] {
 
 function quoConfigurationProblems(): string[] {
   return encryptionProblems();
+}
+
+function slackConfigurationProblems(): string[] {
+  const problems = encryptionProblems();
+  if (!process.env.SLACK_CLIENT_ID?.trim()) problems.push('SLACK_CLIENT_ID');
+  if (!process.env.SLACK_CLIENT_SECRET?.trim()) problems.push('SLACK_CLIENT_SECRET');
+  return problems;
 }
 
 function requireGmailConfigured(): void {
@@ -298,7 +431,12 @@ async function loadStore(): Promise<void> {
     store = { version: 1, connections: parsed.connections as StoredConnection[] };
     let migrated = false;
     for (const connection of store.connections) {
-      if (connection.provider === 'quo' && !Array.isArray(connection.selectedPhoneNumberIds)) {
+      if (connection.provider === 'gmail' && !Array.isArray(connection.scopes)) {
+        // Existing grants predate Gmail label projection and are read-only.
+        // Never infer write authority from a token we did not observe being granted.
+        connection.scopes = [GMAIL_READONLY_SCOPE];
+        migrated = true;
+      } else if (connection.provider === 'quo' && !Array.isArray(connection.selectedPhoneNumberIds)) {
         // Older connections discovered every accessible line but did not distinguish
         // discovery from capture consent. Default safely to no active lines.
         connection.selectedPhoneNumberIds = [];
@@ -326,7 +464,9 @@ async function saveStore(): Promise<void> {
 async function toPublicConnection(connection: StoredConnection): Promise<PublicConnection> {
   const problems = connection.provider === 'gmail'
     ? gmailConfigurationProblems()
-    : quoConfigurationProblems();
+    : connection.provider === 'quo'
+      ? quoConfigurationProblems()
+      : slackConfigurationProblems();
   const lastChecked = connection.lastCheckedAt ? Date.parse(connection.lastCheckedAt) : Number.NaN;
   const nextAt = Number.isFinite(lastChecked) ? lastChecked + healthCheckIntervalMs : Date.now();
   const common = {
@@ -343,7 +483,82 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
         : connection.error,
   };
   if (connection.provider === 'gmail') {
-    return { ...common, provider: 'gmail', email: connection.email };
+    const canModifyLabels = gmailCanModifyLabels(connection);
+    let sync: GmailLabelSyncStatus = {
+      pending: 0,
+      leased: 0,
+      succeeded: 0,
+      failed: 0,
+      lastSyncedAt: null,
+      lastError: null,
+    };
+    let state: PublicGmailConnection['gmailLabelSync']['state'] = canModifyLabels
+      ? 'active'
+      : 'needs_reconnect';
+    try {
+      const payload = await gmailLabelSyncFunctionJson<{ status?: Partial<GmailLabelSyncStatus> }>(
+        'status',
+        connection.email,
+      );
+      sync = {
+        pending: Number(payload.status?.pending ?? 0),
+        leased: Number(payload.status?.leased ?? 0),
+        succeeded: Number(payload.status?.succeeded ?? 0),
+        failed: Number(payload.status?.failed ?? 0),
+        lastSyncedAt: typeof payload.status?.lastSyncedAt === 'string' ? payload.status.lastSyncedAt : null,
+        lastError: typeof payload.status?.lastError === 'string' ? payload.status.lastError : null,
+      };
+    } catch {
+      state = canModifyLabels ? 'unavailable' : 'needs_reconnect';
+    }
+    return {
+      ...common,
+      provider: 'gmail',
+      email: connection.email,
+      scopes: connection.scopes,
+      gmailLabelSync: { ...sync, state },
+    };
+  }
+  if (connection.provider === 'slack') {
+    let selectedChannelCount = 0;
+    let selectedJobChannelCount = 0;
+    let lastEventAt: string | null = null;
+    let lastSyncedAt: string | null = null;
+    let signingSecretConfigured = false;
+    try {
+      const status = await slackFunctionJson<{
+        signingSecretConfigured?: boolean;
+        workspaces?: Array<{ team_id?: string; last_event_at?: string | null; last_synced_at?: string | null }>;
+        selectedChannels?: Array<{ team_id?: string; channel_kind?: string }>;
+      }>('status');
+      const workspace = (status.workspaces ?? []).find((item) => item.team_id === connection.teamId);
+      const selected = (status.selectedChannels ?? []).filter((item) => item.team_id === connection.teamId);
+      selectedChannelCount = selected.length;
+      selectedJobChannelCount = selected.filter((item) => item.channel_kind === 'job').length;
+      lastEventAt = workspace?.last_event_at ?? null;
+      lastSyncedAt = workspace?.last_synced_at ?? null;
+      signingSecretConfigured = Boolean(status.signingSecretConfigured);
+    } catch {
+      // OAuth health remains independently checkable if the event endpoint is unavailable.
+    }
+    return {
+      ...common,
+      provider: 'slack',
+      teamId: connection.teamId,
+      teamName: connection.teamName,
+      teamDomain: connection.teamDomain,
+      authedUserId: connection.authedUserId,
+      scopes: connection.scopes,
+      selectedChannelCount,
+      selectedJobChannelCount,
+      lastSyncedAt,
+      webhook: {
+        state: signingSecretConfigured ? (lastEventAt ? 'receiving' : 'ready') : 'pending',
+        url: slackWebhookUrl(),
+        lastEventAt,
+        signingSecretConfigured,
+      },
+    };
   }
   let webhook: QuoWebhookStatus = {
     state: 'pending',
@@ -385,9 +600,20 @@ function callbackUri(req: Request): string {
   return `${originFor(req)}/api/oauth/google/callback`;
 }
 
+function slackCallbackUri(req: Request): string {
+  return `${originFor(req)}/api/oauth/slack/callback`;
+}
+
 function callbackRedirect(req: Request, gmail: 'connected' | 'error', message: string): string {
   const url = new URL('/connections', originFor(req));
   url.searchParams.set('gmail', gmail);
+  url.searchParams.set('message', message);
+  return url.toString();
+}
+
+function slackCallbackRedirect(req: Request, slack: 'connected' | 'error', message: string): string {
+  const url = new URL('/connections', originFor(req));
+  url.searchParams.set('slack', slack);
   url.searchParams.set('message', message);
   return url.toString();
 }
@@ -510,6 +736,33 @@ async function activityFunctionJson<T>(
   return payload as T;
 }
 
+async function gmailLabelSyncFunctionJson<T>(
+  action: 'status' | 'claim' | 'complete' | 'fail',
+  accountEmail?: string,
+  body?: Record<string, unknown>,
+): Promise<T> {
+  requireDatabaseConfigured();
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-gmail-label-sync`);
+  url.searchParams.set('action', action);
+  if (accountEmail) url.searchParams.set('accountEmail', accountEmail.trim().toLowerCase());
+  const response = await fetch(url, {
+    method: body ? 'POST' : 'GET',
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-gmail-label-sync-secret': activityFunctionSecret(),
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Supabase Gmail label service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
 function quoWebhookUrl(): string {
   return supabaseProjectUrl
     ? `${supabaseProjectUrl}/functions/v1/fluid-quo-events`
@@ -544,6 +797,105 @@ async function quoFunctionJson<T>(
   }
   if (!response.ok) {
     const detail = googleResponseError(payload) ?? `Supabase Quo service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
+function slackWebhookUrl(): string {
+  return supabaseProjectUrl
+    ? `${supabaseProjectUrl}/functions/v1/fluid-slack-events`
+    : '';
+}
+
+async function slackFunctionJson<T>(
+  action: 'status' | 'workspace' | 'channels' | 'users' | 'messages' | 'sync-state' | 'channel-sync-state',
+  init?: RequestInit,
+): Promise<T> {
+  requireDatabaseConfigured();
+  const url = new URL(slackWebhookUrl());
+  url.searchParams.set('action', action);
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.headers ?? {}),
+    },
+    signal: init?.signal ?? AbortSignal.timeout(45_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Supabase Slack service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
+async function operationalFunctionJson<T>(
+  action: 'board' | 'job-context' | 'shadow-status' | 'resolve-work-item' | 'reconcile',
+  search: Record<string, string> = {},
+  init?: RequestInit,
+): Promise<T> {
+  requireDatabaseConfigured();
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-operational-context`);
+  url.searchParams.set('action', action);
+  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.headers ?? {}),
+    },
+    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Operational context service returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
+async function realBoardFunctionJson<T>(
+  action: 'summary' | 'people' | 'signals' | 'signal' | 'settle' | 'actions' | 'reminders' | 'automations' |
+    'action-definitions' | 'update-action-definition' | 'accept-recommendation' | 'action-detail' |
+    'update-action-draft' | 'simulate-action-send' | 'retry-action' | 'dismiss-action',
+  search: Record<string, string> = {},
+  init?: RequestInit,
+): Promise<T> {
+  requireDatabaseConfigured();
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-real-board`);
+  url.searchParams.set('action', action);
+  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      'x-fluid-activity-secret': activityFunctionSecret(),
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init?.headers ?? {}),
+    },
+    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  });
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `Real Board service returned ${response.status}`;
     throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
   }
   return payload as T;
@@ -717,7 +1069,7 @@ function publicGoogleError(error: unknown): string {
     return 'Google authorization expired or was revoked. Disconnect and reconnect Gmail.';
   }
   if (/insufficient|permission|forbidden|403/i.test(message)) {
-    return 'Google no longer grants the required Gmail read access. Reconnect Gmail.';
+    return 'Google no longer grants the required Gmail read and label access. Reconnect Gmail.';
   }
   if (/fetch failed|network|timed?\s*out/i.test(message)) {
     return 'Google could not be reached. The next health check will retry automatically.';
@@ -732,6 +1084,23 @@ function publicQuoError(error: unknown): string {
   }
   if (/fetch failed|network|timed?\s*out/i.test(message)) {
     return 'Quo could not be reached. The next health check will retry automatically.';
+  }
+  return message.replace(/\s+/g, ' ').slice(0, 300);
+}
+
+function publicSlackError(error: unknown): string {
+  const message = errorMessage(error);
+  if (/invalid_auth|not_authed|token_revoked|account_inactive|401|403/i.test(message)) {
+    return 'Slack authorization expired or was revoked. Disconnect and reconnect Slack.';
+  }
+  if (/missing_scope|not_allowed_token_type/i.test(message)) {
+    return 'Slack no longer grants the required read-only channel access. Reconnect Slack.';
+  }
+  if (/fetch failed|network|timed?\s*out/i.test(message)) {
+    return 'Slack could not be reached. The next health check will retry automatically.';
+  }
+  if (/ratelimited|rate.?limit/i.test(message)) {
+    return 'Slack temporarily rate-limited history sync. Fluid will resume automatically.';
   }
   return message.replace(/\s+/g, ' ').slice(0, 300);
 }
@@ -791,8 +1160,10 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
   const connection = store.connections.find((item) => item.id === connectionId);
   if (!connection) throw new HttpError(404, 'Connection not found');
   if (connection.provider === 'gmail') requireGmailConfigured();
-  else if (quoConfigurationProblems().length > 0) {
+  else if (connection.provider === 'quo' && quoConfigurationProblems().length > 0) {
     throw new HttpError(503, `Missing server configuration: ${quoConfigurationProblems().join(', ')}`);
+  } else if (connection.provider === 'slack' && slackConfigurationProblems().length > 0) {
+    throw new HttpError(503, `Missing server configuration: ${slackConfigurationProblems().join(', ')}`);
   }
 
   connection.status = 'checking';
@@ -808,12 +1179,17 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
       if (actualEmail !== connection.email.toLowerCase()) {
         throw new Error(`Google returned a different mailbox (${actualEmail ?? 'unknown'})`);
       }
-    } else {
+    } else if (connection.provider === 'quo') {
       const phoneNumbers = await getQuoPhoneNumbers(decryptToken(connection.encryptedApiKey));
       const availableIds = new Set(phoneNumbers.map((number) => number.id));
       connection.selectedPhoneNumberIds = connection.selectedPhoneNumberIds.filter((id) => availableIds.has(id));
       connection.phoneNumbers = phoneNumbers;
       await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
+    } else {
+      const profile = await slackAuthTest(decryptToken(connection.encryptedAccessToken));
+      if (profile.team_id !== connection.teamId || profile.user_id !== connection.authedUserId) {
+        throw new Error('Slack returned a different workspace or installing user');
+      }
     }
     const checkedAt = new Date().toISOString();
     connection.status = 'connected';
@@ -826,7 +1202,11 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
     connection.status = 'error';
     connection.lastCheckedAt = checkedAt;
     connection.updatedAt = checkedAt;
-    connection.error = connection.provider === 'gmail' ? publicGoogleError(error) : publicQuoError(error);
+    connection.error = connection.provider === 'gmail'
+      ? publicGoogleError(error)
+      : connection.provider === 'quo'
+        ? publicQuoError(error)
+        : publicSlackError(error);
   }
   await saveStore();
   return await toPublicConnection(connection);
@@ -1021,6 +1401,351 @@ async function syncDueActivities(): Promise<void> {
   }
 }
 
+function safeGmailLabelSyncError(error: unknown): string {
+  if (error instanceof GmailLabelApiError) {
+    if (error.status === 401 || error.status === 403) {
+      return 'Google authorization does not allow Gmail label updates.';
+    }
+    if (error.status === 429) return 'Gmail temporarily rate-limited label updates.';
+    if (error.status >= 500) return 'Gmail label service is temporarily unavailable.';
+    return `Gmail label update returned HTTP ${error.status}.`;
+  }
+  const message = errorMessage(error);
+  if (/fetch failed|network|timed?\s*out|abort/i.test(message)) {
+    return 'Gmail label sync could not reach Google.';
+  }
+  return 'Gmail label sync failed safely.';
+}
+
+function validGmailLabelClaim(claim: GmailLabelSyncClaim): claim is GmailLabelSyncClaim & {
+  job: NonNullable<GmailLabelSyncClaim['job']>;
+  message: NonNullable<GmailLabelSyncClaim['message']>;
+  desiredLabel: FluidTopicLabel;
+  topicLabels: FluidTopicLabel[];
+  mappings: GmailLabelMapping[];
+  roleLabels: string[];
+  managedRoleLabels: string[];
+} {
+  return claim.job !== null && claim.job !== undefined &&
+    Number.isSafeInteger(claim.job.id) && claim.job.id > 0 &&
+    isUuid(claim.job.leaseToken) &&
+    Number.isSafeInteger(claim.job.generation) && claim.job.generation > 0 &&
+    claim.message !== undefined && Number.isSafeInteger(claim.message.activityId) &&
+    claim.message.activityId > 0 && claim.message.accountEmail === claim.message.accountEmail.toLowerCase() &&
+    Boolean(claim.message.externalId) &&
+    claim.desiredLabel !== undefined && Number.isSafeInteger(claim.desiredLabel.id) &&
+    Boolean(claim.desiredLabel.key && claim.desiredLabel.name) &&
+    Array.isArray(claim.topicLabels) && Array.isArray(claim.mappings) &&
+    Array.isArray(claim.roleLabels) && claim.roleLabels.every((name) => typeof name === 'string' && name.length <= 225) &&
+    Array.isArray(claim.managedRoleLabels) &&
+    claim.managedRoleLabels.every((name) => typeof name === 'string' && name.length <= 225);
+}
+
+async function performGmailLabelSync(
+  connection: StoredGmailConnection,
+): Promise<GmailLabelSyncBatchResult> {
+  requireActivityConfigured();
+  if (!gmailCanModifyLabels(connection)) {
+    throw new HttpError(409, 'Reconnect Gmail to enable Fluid label updates.');
+  }
+
+  const refreshToken = decryptToken(connection.encryptedRefreshToken);
+  const accessToken = await refreshAccessToken(refreshToken);
+  const profile = await getGmailProfile(accessToken);
+  const accountEmail = profile.emailAddress?.trim().toLowerCase();
+  if (!accountEmail || accountEmail !== connection.email.toLowerCase()) {
+    throw new Error(`Google returned a different mailbox (${accountEmail ?? 'unknown'})`);
+  }
+
+  const client = new GmailRestLabelClient(accessToken);
+  const result: GmailLabelSyncBatchResult = {
+    accountEmail,
+    processed: 0,
+    applied: 0,
+    alreadyApplied: 0,
+    missing: 0,
+    failed: 0,
+  };
+  const worker = `fluid-gmail-label-sync-${process.pid}`;
+
+  for (let index = 0; index < gmailLabelSyncMaximumJobs; index += 1) {
+    const claim: GmailLabelSyncClaim = await gmailLabelSyncFunctionJson<GmailLabelSyncClaim>('claim', undefined, {
+      worker,
+      accountEmail,
+      leaseSeconds: 300,
+    });
+    if (!claim || typeof claim !== 'object') {
+      throw new Error('Gmail label sync returned an invalid claim response');
+    }
+    if (claim.job === null) break;
+    result.processed += 1;
+
+    if (!validGmailLabelClaim(claim) || claim.message.accountEmail !== accountEmail) {
+      if (claim.job && isUuid(claim.job.leaseToken) && Number.isSafeInteger(claim.job.id) &&
+        Number.isSafeInteger(claim.job.generation)) {
+        await gmailLabelSyncFunctionJson('fail', undefined, {
+          jobId: claim.job.id,
+          leaseToken: claim.job.leaseToken,
+          generation: claim.job.generation,
+          error: 'Gmail label sync received an invalid claimed job.',
+          retryable: false,
+          retryAfterSeconds: null,
+        }).catch(() => undefined);
+      }
+      result.failed += 1;
+      continue;
+    }
+
+    try {
+      const projected = await projectTopicToGmail(
+        client,
+        claim.message.externalId,
+        claim.desiredLabel,
+        claim.topicLabels,
+        claim.mappings,
+        { desiredNames: claim.roleLabels, managedNames: claim.managedRoleLabels },
+      );
+      await gmailLabelSyncFunctionJson('complete', undefined, {
+        jobId: claim.job.id,
+        leaseToken: claim.job.leaseToken,
+        generation: claim.job.generation,
+        outcome: projected.outcome,
+        gmailLabelId: projected.gmailLabelId,
+        gmailLabelName: projected.gmailLabelName,
+      });
+      if (projected.outcome === 'applied') result.applied += 1;
+      else if (projected.outcome === 'already-applied') result.alreadyApplied += 1;
+      else result.missing += 1;
+    } catch (error) {
+      const retryable = error instanceof GmailLabelApiError
+        ? error.retryable
+        : /fetch failed|network|timed?\s*out|abort/i.test(errorMessage(error));
+      const retryAfterSeconds = error instanceof GmailLabelApiError
+        ? error.retryAfterSeconds
+        : null;
+      await gmailLabelSyncFunctionJson('fail', undefined, {
+        jobId: claim.job.id,
+        leaseToken: claim.job.leaseToken,
+        generation: claim.job.generation,
+        error: safeGmailLabelSyncError(error),
+        retryable,
+        retryAfterSeconds,
+      }).catch((failure) => {
+        console.warn(`Could not record Gmail label failure: ${errorMessage(failure)}`);
+      });
+      result.failed += 1;
+      if (error instanceof GmailLabelApiError && (error.status === 401 || error.status === 403)) {
+        connection.status = 'error';
+        connection.error = publicGoogleError(error);
+        connection.updatedAt = new Date().toISOString();
+        await saveStore();
+        break;
+      }
+    }
+  }
+
+  return result;
+}
+
+function syncGmailLabels(connection: StoredGmailConnection): Promise<GmailLabelSyncBatchResult> {
+  const running = activeGmailLabelSyncs.get(connection.id);
+  if (running) return running;
+  const sync = performGmailLabelSync(connection).finally(() => activeGmailLabelSyncs.delete(connection.id));
+  activeGmailLabelSyncs.set(connection.id, sync);
+  return sync;
+}
+
+async function syncDueGmailLabels(): Promise<void> {
+  if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
+  const connected = store.connections.filter((connection): connection is StoredGmailConnection =>
+    connection.provider === 'gmail' && connection.status !== 'error' && gmailCanModifyLabels(connection));
+  const results = await Promise.allSettled(connected.map((connection) => syncGmailLabels(connection)));
+  for (const outcome of results) {
+    if (outcome.status === 'rejected') {
+      console.warn(`Gmail label sync failed: ${safeGmailLabelSyncError(outcome.reason)}`);
+    } else if (outcome.value.applied > 0) {
+      console.log(`Gmail label sync applied ${outcome.value.applied} Fluid label(s).`);
+    }
+  }
+}
+
+async function performSlackSync(connection: StoredSlackConnection): Promise<SlackSyncResult> {
+  requireDatabaseConfigured();
+  if (slackConfigurationProblems().length > 0) {
+    throw new HttpError(503, `Missing server configuration: ${slackConfigurationProblems().join(', ')}`);
+  }
+  const startedAt = new Date().toISOString();
+  const token = decryptToken(connection.encryptedAccessToken);
+  let channelsSeen = 0;
+  let channelsSelected = 0;
+  let channelsBackfilled = 0;
+  let messagesSeen = 0;
+  let messagesUpserted = 0;
+  let rateLimited = false;
+  let retryAfterSeconds: number | null = null;
+  await slackFunctionJson('sync-state', {
+    method: 'POST',
+    body: JSON.stringify({ connectionId: connection.id, teamId: connection.teamId, status: 'running', startedAt }),
+  });
+  try {
+    const channels = await listSlackChannels(token, 500);
+    channelsSeen = channels.length;
+    const channelPayload = await slackFunctionJson<{
+      channels?: Array<{
+        provider_channel_id?: string;
+        channel_kind?: string;
+        selected?: boolean;
+        is_archived?: boolean;
+        sync_status?: string;
+        case_status?: string | null;
+      }>;
+    }>('channels', {
+      method: 'POST',
+      body: JSON.stringify({ teamId: connection.teamId, channels }),
+    });
+    const selected = (channelPayload.channels ?? []).filter((channel) =>
+      channel.selected === true && channel.is_archived !== true &&
+      (channel.channel_kind === 'sales' || channel.case_status === 'open')
+    );
+    channelsSelected = selected.length;
+
+    const users = await listSlackUsers(token, 500);
+    await slackFunctionJson('users', {
+      method: 'POST',
+      body: JSON.stringify({ teamId: connection.teamId, users }),
+    });
+
+    const candidates = selected
+      .filter((channel) => channel.sync_status !== 'succeeded' && typeof channel.provider_channel_id === 'string')
+      .slice(0, Math.max(1, Math.min(slackBackfillChannelsPerRun, 10)));
+    for (const channel of candidates) {
+      const channelId = channel.provider_channel_id as string;
+      await slackFunctionJson('channel-sync-state', {
+        method: 'POST',
+        body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'running' }),
+      });
+      try {
+        const history = await readSlackChannel(token, channelId, 15);
+        messagesSeen += history.messages.length;
+        const historyImport = await slackFunctionJson<{ imported?: number }>('messages', {
+          method: 'POST',
+          body: JSON.stringify({ teamId: connection.teamId, messages: history.messages }),
+        });
+        messagesUpserted += historyImport.imported ?? 0;
+
+        // Thread history is a separate Slack method and can be rate-limited
+        // independently. Persist the sampled parent messages before attempting
+        // replies so a Retry-After response never discards useful progress.
+        for (const parent of history.messages.filter((message) => message.reply_count > 0).slice(0, 3)) {
+          const replies = await readSlackThread(token, channelId, parent.ts);
+          const unseenReplies = replies.filter((reply) => reply.ts !== parent.ts);
+          messagesSeen += unseenReplies.length;
+          if (unseenReplies.length > 0) {
+            const replyImport = await slackFunctionJson<{ imported?: number }>('messages', {
+              method: 'POST',
+              body: JSON.stringify({ teamId: connection.teamId, messages: unseenReplies }),
+            });
+            messagesUpserted += replyImport.imported ?? 0;
+          }
+        }
+        channelsBackfilled += 1;
+        await slackFunctionJson('channel-sync-state', {
+          method: 'POST',
+          body: JSON.stringify({
+            teamId: connection.teamId,
+            channelId,
+            status: 'succeeded',
+            cursor: history.nextCursor,
+          }),
+        });
+      } catch (error) {
+        if (error instanceof SlackApiError && error.retryAfterSeconds !== null) {
+          rateLimited = true;
+          retryAfterSeconds = error.retryAfterSeconds;
+          await slackFunctionJson('channel-sync-state', {
+            method: 'POST',
+            body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'rate_limited', error: publicSlackError(error) }),
+          });
+          break;
+        }
+        await slackFunctionJson('channel-sync-state', {
+          method: 'POST',
+          body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'failed', error: publicSlackError(error) }),
+        });
+      }
+    }
+
+    await slackFunctionJson('sync-state', {
+      method: 'POST',
+      body: JSON.stringify({
+        connectionId: connection.id,
+        teamId: connection.teamId,
+        status: rateLimited ? 'rate_limited' : 'succeeded',
+        channelsSeen,
+        channelsSelected,
+        messagesSeen,
+        messagesUpserted,
+        retryAfterSeconds,
+        startedAt,
+      }),
+    });
+  } catch (error) {
+    const slackError = error instanceof SlackApiError ? error : null;
+    rateLimited = slackError?.retryAfterSeconds !== null && slackError?.retryAfterSeconds !== undefined;
+    retryAfterSeconds = slackError?.retryAfterSeconds ?? null;
+    await slackFunctionJson('sync-state', {
+      method: 'POST',
+      body: JSON.stringify({
+        connectionId: connection.id,
+        teamId: connection.teamId,
+        status: rateLimited ? 'rate_limited' : 'failed',
+        channelsSeen,
+        channelsSelected,
+        messagesSeen,
+        messagesUpserted,
+        retryAfterSeconds,
+        startedAt,
+        error: publicSlackError(error),
+      }),
+    }).catch(() => undefined);
+    if (!rateLimited) throw error;
+  }
+  return {
+    teamId: connection.teamId,
+    channelsSeen,
+    channelsSelected,
+    channelsBackfilled,
+    messagesSeen,
+    messagesUpserted,
+    rateLimited,
+    retryAfterSeconds,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function syncSlack(connection: StoredSlackConnection): Promise<SlackSyncResult> {
+  const running = activeSlackSyncs.get(connection.id);
+  if (running) return running;
+  lastSlackSyncAttemptAt.set(connection.id, Date.now());
+  const sync = performSlackSync(connection).finally(() => activeSlackSyncs.delete(connection.id));
+  activeSlackSyncs.set(connection.id, sync);
+  return sync;
+}
+
+async function syncDueSlack(): Promise<void> {
+  if (slackConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
+  const now = Date.now();
+  const due = store.connections.filter((connection): connection is StoredSlackConnection => {
+    if (connection.provider !== 'slack' || connection.status === 'error') return false;
+    const lastAttempt = lastSlackSyncAttemptAt.get(connection.id) ?? 0;
+    return now - lastAttempt >= slackSyncIntervalMs;
+  });
+  const results = await Promise.allSettled(due.map((connection) => syncSlack(connection)));
+  for (const result of results) {
+    if (result.status === 'rejected') console.warn(`Slack context sync failed: ${publicSlackError(result.reason)}`);
+  }
+}
+
 async function checkAllConnections(): Promise<void> {
   await Promise.allSettled(store.connections.map((connection) => checkConnection(connection.id)));
 }
@@ -1039,6 +1764,7 @@ app.get('/api/connections', async (_req, res, next) => {
   try {
     const gmailProblems = gmailConfigurationProblems();
     const quoProblems = quoConfigurationProblems();
+    const slackProblems = slackConfigurationProblems();
     res.json({
       connections: await Promise.all(store.connections.map(toPublicConnection)),
       healthCheckIntervalMs,
@@ -1053,6 +1779,12 @@ app.get('/api/connections', async (_req, res, next) => {
         configured: quoProblems.length === 0,
         ...(quoProblems.length > 0
           ? { configurationError: `Add ${quoProblems.join(', ')} to the server environment.` }
+          : {}),
+      },
+      slack: {
+        configured: slackProblems.length === 0,
+        ...(slackProblems.length > 0
+          ? { configurationError: `Add ${slackProblems.join(', ')} to the server environment.` }
           : {}),
       },
     });
@@ -1077,7 +1809,7 @@ app.post('/api/connections/gmail/authorize', (req, res, next) => {
       client_id: process.env.GOOGLE_CLIENT_ID ?? '',
       redirect_uri: redirectUri,
       response_type: 'code',
-      scope: 'https://www.googleapis.com/auth/gmail.readonly',
+      scope: GMAIL_MODIFY_SCOPE,
       access_type: 'offline',
       prompt: 'consent',
       include_granted_scopes: 'true',
@@ -1116,6 +1848,12 @@ app.get('/api/oauth/google/callback', async (req, res) => {
     requireGmailConfigured();
     const tokens = await exchangeAuthorizationCode(code, pending);
     if (!tokens.access_token) throw new Error('Google did not return an access token');
+    const scopes = googleScopes(tokens.scope);
+    if (!scopes.includes(GMAIL_MODIFY_SCOPE)) {
+      const tokenToRevoke = tokens.refresh_token ?? tokens.access_token;
+      await revokeGoogleToken(tokenToRevoke).catch(() => undefined);
+      throw new Error('Google did not grant Gmail label access. Please approve the requested access and try again.');
+    }
     const profile = await getGmailProfile(tokens.access_token);
     const email = profile.emailAddress?.trim().toLowerCase();
     if (!email) throw new Error('Google did not identify the connected Gmail account');
@@ -1138,6 +1876,7 @@ app.get('/api/oauth/google/callback', async (req, res) => {
       id: `gmail:${email}`,
       provider: 'gmail',
       email,
+      scopes,
       status: 'connected',
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -1149,9 +1888,142 @@ app.get('/api/oauth/google/callback', async (req, res) => {
     if (existing) Object.assign(existing, connection);
     else store.connections.push(connection);
     await saveStore();
-    res.redirect(callbackRedirect(req, 'connected', `${email} passed its first health check.`));
+    void syncGmailLabels(connection).catch((error) => {
+      console.warn(`Initial Gmail label sync failed: ${safeGmailLabelSyncError(error)}`);
+    });
+    res.redirect(callbackRedirect(
+      req,
+      'connected',
+      `${email} passed its first health check. Fluid labels are enabled for new inbound mail.`,
+    ));
   } catch (error) {
     res.redirect(callbackRedirect(req, 'error', publicGoogleError(error)));
+  }
+});
+
+app.post('/api/connections/slack/authorize', (req, res, next) => {
+  try {
+    const problems = slackConfigurationProblems();
+    if (problems.length > 0) throw new HttpError(503, `Missing server configuration: ${problems.join(', ')}`);
+    const state = randomBytes(32).toString('base64url');
+    const redirectUri = slackCallbackUri(req);
+    pendingSlackAuthorizations.set(state, { redirectUri, expiresAt: Date.now() + 10 * 60_000 });
+    const authorizationUrl = new URL('https://slack.com/oauth/v2/authorize');
+    authorizationUrl.search = new URLSearchParams({
+      client_id: process.env.SLACK_CLIENT_ID ?? '',
+      redirect_uri: redirectUri,
+      user_scope: 'channels:read,channels:history,users:read',
+      state,
+    }).toString();
+    res.json({ authorizationUrl: authorizationUrl.toString() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/oauth/slack/callback', async (req, res) => {
+  const state = typeof req.query.state === 'string' ? req.query.state : '';
+  const pending = state ? pendingSlackAuthorizations.get(state) : undefined;
+  if (state) pendingSlackAuthorizations.delete(state);
+  const oauthError = typeof req.query.error === 'string' ? req.query.error : null;
+  if (oauthError) {
+    res.redirect(slackCallbackRedirect(req, 'error', 'Slack authorization was cancelled or denied.'));
+    return;
+  }
+  if (!pending || pending.expiresAt < Date.now()) {
+    res.redirect(slackCallbackRedirect(req, 'error', 'The Slack authorization request expired. Try connecting again.'));
+    return;
+  }
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  if (!code) {
+    res.redirect(slackCallbackRedirect(req, 'error', 'Slack did not return an authorization code.'));
+    return;
+  }
+  try {
+    const problems = slackConfigurationProblems();
+    if (problems.length > 0) throw new Error(`Missing server configuration: ${problems.join(', ')}`);
+    const oauth = await exchangeSlackCode(
+      code,
+      pending.redirectUri,
+      process.env.SLACK_CLIENT_ID ?? '',
+      process.env.SLACK_CLIENT_SECRET ?? '',
+    );
+    const accessToken = oauth.authed_user?.access_token?.trim();
+    const authedUserId = oauth.authed_user?.id?.trim();
+    const teamId = oauth.team?.id?.trim();
+    const grantedScopes = (oauth.authed_user?.scope ?? '')
+      .split(',').map((scope) => scope.trim()).filter(Boolean);
+    const requiredScopes = ['channels:read', 'channels:history', 'users:read'];
+    if (!accessToken || !authedUserId || !teamId || requiredScopes.some((scope) => !grantedScopes.includes(scope))) {
+      throw new Error('Slack did not grant all required read-only channel scopes');
+    }
+    const profile = await slackAuthTest(accessToken);
+    if (profile.team_id !== teamId || profile.user_id !== authedUserId) {
+      throw new Error('Slack returned inconsistent workspace authorization');
+    }
+    const teamName = profile.team?.trim() || oauth.team?.name?.trim() || 'Slack workspace';
+    let teamDomain: string | null = null;
+    try {
+      const hostname = profile.url ? new URL(profile.url).hostname : '';
+      teamDomain = hostname.endsWith('.slack.com') ? hostname.slice(0, -'.slack.com'.length) : null;
+    } catch {
+      teamDomain = null;
+    }
+    const existing = store.connections.find(
+      (item): item is StoredSlackConnection => item.provider === 'slack',
+    );
+    if (existing && existing.teamId !== teamId) {
+      await revokeSlackToken(decryptToken(existing.encryptedAccessToken)).catch(() => undefined);
+    }
+    const now = new Date().toISOString();
+    const connection: StoredSlackConnection = {
+      id: `slack:${teamId}`,
+      provider: 'slack',
+      teamId,
+      teamName,
+      teamDomain,
+      authedUserId,
+      scopes: grantedScopes,
+      encryptedAccessToken: encryptToken(accessToken),
+      status: 'connected',
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      lastCheckedAt: now,
+      lastHealthyAt: now,
+      error: null,
+    };
+    await slackFunctionJson('workspace', {
+      method: 'POST',
+      body: JSON.stringify({
+        connectionId: connection.id,
+        teamId,
+        teamName,
+        teamDomain,
+        authedUserId,
+        scopes: grantedScopes,
+      }),
+    });
+    if (existing) Object.assign(existing, connection);
+    else store.connections.push(connection);
+    await saveStore();
+    void syncSlack(existing ?? connection).catch((error) => {
+      console.warn(`Initial Slack sync failed: ${publicSlackError(error)}`);
+    });
+    res.redirect(slackCallbackRedirect(req, 'connected', `${teamName} granted read-only channel access.`));
+  } catch (error) {
+    res.redirect(slackCallbackRedirect(req, 'error', publicSlackError(error)));
+  }
+});
+
+app.post('/api/connections/slack/:id/sync', async (req, res, next) => {
+  try {
+    const connection = store.connections.find(
+      (item): item is StoredSlackConnection => item.provider === 'slack' && item.id === req.params.id,
+    );
+    if (!connection) throw new HttpError(404, 'Slack connection not found');
+    res.json({ sync: await syncSlack(connection), connection: await toPublicConnection(connection) });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -1369,14 +2241,362 @@ app.delete('/api/connections/:id', async (req, res, next) => {
       } catch (error) {
         console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
       }
-    } else {
+    } else if (connection.provider === 'quo') {
       await syncQuoScope(connection, []).catch((error) => {
         console.warn(`Quo capture scope could not be cleared remotely: ${publicQuoError(error)}`);
       });
+    } else {
+      try {
+        await revokeSlackToken(decryptToken(connection.encryptedAccessToken));
+      } catch (error) {
+        console.warn(`Slack grant could not be revoked remotely: ${publicSlackError(error)}`);
+      }
+      await slackFunctionJson('workspace', {
+        method: 'POST',
+        body: JSON.stringify({
+          connectionId: connection.id,
+          teamId: connection.teamId,
+          teamName: connection.teamName,
+          teamDomain: connection.teamDomain,
+          authedUserId: connection.authedUserId,
+          scopes: connection.scopes,
+          disconnected: true,
+        }),
+      }).catch(() => undefined);
     }
     store.connections.splice(index, 1);
     await saveStore();
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board', async (req, res, next) => {
+  try {
+    const status = typeof req.query.status === 'string' ? req.query.status : 'open';
+    if (!['open', 'waiting', 'completed'].includes(status)) throw new HttpError(400, 'Invalid board status');
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) throw new HttpError(400, 'Board cursor is incomplete');
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !isUuid(cursorId))) {
+      throw new HttpError(400, 'Board cursor is invalid');
+    }
+    res.json(await operationalFunctionJson('board', {
+      status,
+      limit: String(limit),
+      includeShadow: req.query.includeShadow === 'true' ? 'true' : 'false',
+      ...(cursorAt && cursorId ? { cursorAt, cursorId } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board/summary', async (_req, res, next) => {
+  try {
+    res.json(await realBoardFunctionJson('summary'));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/action-definitions', async (_req, res, next) => {
+  try {
+    res.json(await realBoardFunctionJson('action-definitions'));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/action-definitions/:id', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id) || !Number.isInteger(req.body?.version)) {
+      throw new HttpError(400, 'Invalid Action definition update');
+    }
+    const update: Record<string, unknown> = {
+      definitionId: req.params.id,
+      version: req.body.version,
+    };
+    if (req.body.name !== undefined) {
+      if (typeof req.body.name !== 'string' || req.body.name.trim().length < 1 || req.body.name.length > 100) {
+        throw new HttpError(400, 'Invalid Action name');
+      }
+      update.name = req.body.name;
+    }
+    if (req.body.description !== undefined) {
+      if (typeof req.body.description !== 'string' || req.body.description.trim().length < 1 || req.body.description.length > 1000) {
+        throw new HttpError(400, 'Invalid Action description');
+      }
+      update.description = req.body.description;
+    }
+    if (req.body.enabled !== undefined) {
+      if (typeof req.body.enabled !== 'boolean') throw new HttpError(400, 'Invalid Action enabled state');
+      update.enabled = req.body.enabled;
+    }
+    if (req.body.configuration !== undefined) {
+      if (!req.body.configuration || typeof req.body.configuration !== 'object' || Array.isArray(req.body.configuration) ||
+        Buffer.byteLength(JSON.stringify(req.body.configuration), 'utf8') > 65_536) {
+        throw new HttpError(400, 'Invalid Action configuration');
+      }
+      update.configuration = req.body.configuration;
+    }
+    res.json(await realBoardFunctionJson('update-action-definition', {}, {
+      method: 'POST', body: JSON.stringify(update),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board/people', async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    if (cursor && cursor.length > 1024) throw new HttpError(400, 'People cursor is invalid');
+    res.json(await realBoardFunctionJson('people', {
+      limit: String(limit),
+      ...(cursor ? { cursor } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board/signals', async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    const contactId = typeof req.query.contactId === 'string' ? req.query.contactId : undefined;
+    const view = typeof req.query.view === 'string' ? req.query.view : 'all';
+    if (cursor && cursor.length > 1024) throw new HttpError(400, 'Signals cursor is invalid');
+    if (contactId && !isUuid(contactId)) throw new HttpError(400, 'Invalid Contact id');
+    if (!['all', 'needs_you'].includes(view)) throw new HttpError(400, 'Invalid Signals view');
+    res.json(await realBoardFunctionJson('signals', {
+      limit: String(limit),
+      view,
+      ...(cursor ? { cursor } : {}),
+      ...(contactId ? { contactId } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board/signals/:id', async (req, res, next) => {
+  try {
+    if (!/^[1-9][0-9]*$/.test(req.params.id)) throw new HttpError(400, 'Invalid Signal id');
+    const historyLimit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.historyLimit === 'string' ? req.query.historyLimit : undefined,
+      30,
+    )));
+    const historyCursor = typeof req.query.historyCursor === 'string'
+      ? req.query.historyCursor
+      : undefined;
+    if (historyCursor && historyCursor.length > 1024) throw new HttpError(400, 'History cursor is invalid');
+    const payload = await realBoardFunctionJson<Record<string, unknown>>('signal', {
+      activityId: req.params.id,
+      historyLimit: String(historyLimit),
+      ...(historyCursor ? { historyCursor } : {}),
+    });
+    const signal = payload.signal && typeof payload.signal === 'object' && !Array.isArray(payload.signal)
+      ? decorateEmailRecord(payload.signal as Record<string, unknown>)
+      : payload.signal;
+    const history = Array.isArray(payload.history)
+      ? payload.history.map((item) => item && typeof item === 'object' && !Array.isArray(item)
+        ? decorateEmailRecord(item as Record<string, unknown>)
+        : item)
+      : payload.history;
+    res.json({ ...payload, signal, history });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/signals/:id/settle', async (req, res, next) => {
+  try {
+    if (!/^[1-9][0-9]*$/.test(req.params.id) || req.body?.resolution !== 'no_action') {
+      throw new HttpError(400, 'Invalid Signal resolution');
+    }
+    res.json(await realBoardFunctionJson('settle', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        activityId: req.params.id,
+        resolution: 'no_action',
+        reviewer: 'manager',
+      }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/signals/:signalId/recommendations/:recommendationId/accept', async (req, res, next) => {
+  try {
+    if (!/^[1-9][0-9]*$/.test(req.params.signalId) || !isUuid(req.params.recommendationId)) {
+      throw new HttpError(400, 'Invalid recommendation acceptance');
+    }
+    res.json(await realBoardFunctionJson('accept-recommendation', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        activityId: req.params.signalId,
+        recommendationId: req.params.recommendationId,
+        actor: 'manager',
+      }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/board/actions/:id', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Action id');
+    const payload = await realBoardFunctionJson<Record<string, unknown>>('action-detail', { actionId: req.params.id });
+    const action = payload.action && typeof payload.action === 'object' && !Array.isArray(payload.action)
+      ? payload.action as Record<string, unknown>
+      : null;
+    const source = action?.sourceSignal && typeof action.sourceSignal === 'object' && !Array.isArray(action.sourceSignal)
+      ? decorateEmailRecord({ source: 'gmail', ...(action.sourceSignal as Record<string, unknown>) })
+      : action?.sourceSignal;
+    res.json(action ? { ...payload, action: { ...action, sourceSignal: source } } : payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/board/actions/:id/draft', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id) || !Number.isInteger(req.body?.revision) ||
+      typeof req.body?.draftBody !== 'string' || req.body.draftBody.trim().length < 1 ||
+      req.body.draftBody.length > 50_000) {
+      throw new HttpError(400, 'Invalid Action draft');
+    }
+    res.json(await realBoardFunctionJson('update-action-draft', {}, {
+      method: 'POST', body: JSON.stringify({
+        actionId: req.params.id, expectedRevision: req.body.revision,
+        draftBody: req.body.draftBody, actor: 'manager',
+      }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/actions/:id/simulate-send', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id) || !Number.isInteger(req.body?.revision)) {
+      throw new HttpError(400, 'Invalid simulated send');
+    }
+    res.json(await realBoardFunctionJson('simulate-action-send', {}, {
+      method: 'POST', body: JSON.stringify({
+        actionId: req.params.id, expectedRevision: req.body.revision, actor: 'manager',
+      }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/actions/:id/retry', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Action id');
+    res.json(await realBoardFunctionJson('retry-action', {}, {
+      method: 'POST', body: JSON.stringify({ actionId: req.params.id, actor: 'manager' }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/actions/:id/dismiss', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Action id');
+    res.json(await realBoardFunctionJson('dismiss-action', {}, {
+      method: 'POST', body: JSON.stringify({ actionId: req.params.id, actor: 'manager' }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+for (const collection of ['actions', 'reminders', 'automations'] as const) {
+  app.get(`/api/board/${collection}`, async (req, res, next) => {
+    try {
+      const limit = Math.max(1, Math.min(100, readPositiveInt(
+        typeof req.query.limit === 'string' ? req.query.limit : undefined,
+        30,
+      )));
+      const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+      if (cursor && cursor.length > 1024) throw new HttpError(400, `${collection} cursor is invalid`);
+      res.json(await realBoardFunctionJson(collection, {
+        limit: String(limit),
+        ...(cursor ? { cursor } : {}),
+      }));
+    } catch (error) {
+      next(error);
+    }
+  });
+}
+
+app.get('/api/jobs/:id/context', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid Job id');
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
+    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
+    if ((cursorAt === undefined) !== (cursorId === undefined)) throw new HttpError(400, 'Context cursor is incomplete');
+    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
+      throw new HttpError(400, 'Context cursor is invalid');
+    }
+    res.json(await operationalFunctionJson('job-context', {
+      jobId: req.params.id,
+      limit: String(limit),
+      ...(cursorAt && cursorId ? { cursorAt, cursorId } : {}),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/work-items/:id/resolve', async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid work-item id');
+    const action = req.body?.action;
+    const note = req.body?.note;
+    if (!['complete', 'dismiss', 'reopen'].includes(action) ||
+      (note !== undefined && (typeof note !== 'string' || note.length > 2000))) {
+      throw new HttpError(400, 'Invalid work-item resolution');
+    }
+    res.json(await operationalFunctionJson('resolve-work-item', {}, {
+      method: 'POST',
+      body: JSON.stringify({ workItemId: req.params.id, resolution: action, note, actorId: 'manager' }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/internal/operational/reconcile', async (req, res, next) => {
+  try {
+    if (!authorizedHermesAutomation(req)) throw new HttpError(401, 'Unauthorized');
+    res.json(await operationalFunctionJson('reconcile', {}, {
+      method: 'POST',
+      body: JSON.stringify({ limit: typeof req.body?.limit === 'number' ? req.body.limit : 500 }),
+    }));
   } catch (error) {
     next(error);
   }
@@ -1573,7 +2793,15 @@ app.get('/api/activities/signals/:signalId', async (req, res, next) => {
       accountEmail: intendedEmail,
       signalId: req.params.signalId,
     });
-    res.json(payload);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const record = payload as Record<string, unknown>;
+      const signal = record.signal && typeof record.signal === 'object' && !Array.isArray(record.signal)
+        ? decorateEmailRecord(record.signal as Record<string, unknown>)
+        : record.signal;
+      res.json({ ...record, signal });
+    } else {
+      res.json(payload);
+    }
   } catch (error) {
     next(error);
   }
@@ -1602,7 +2830,17 @@ app.get('/api/activities/signals/:signalId/history', async (req, res, next) => {
       limit: String(limit),
       ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
     });
-    res.json(payload);
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const record = payload as Record<string, unknown>;
+      const messages = Array.isArray(record.messages)
+        ? record.messages.map((item) => item && typeof item === 'object' && !Array.isArray(item)
+          ? decorateEmailRecord(item as Record<string, unknown>)
+          : item)
+        : record.messages;
+      res.json({ ...record, messages });
+    } else {
+      res.json(payload);
+    }
   } catch (error) {
     next(error);
   }
@@ -1723,7 +2961,7 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
       20,
     )));
-    if ((agentId === 'email-categorizer' || agentId === 'signal-triage') && jobId === undefined) {
+    if (agentId === 'signal-triage' && jobId === undefined) {
       const payload = await activityFunctionJson<unknown>('agent-history', {
         accountEmail: intendedEmail,
         agentKey: agentId,
@@ -1807,6 +3045,16 @@ const startupActivitySync = setTimeout(() => {
 }, 10_000);
 startupActivitySync.unref();
 
+const startupGmailLabelSync = setTimeout(() => {
+  void syncDueGmailLabels();
+}, 12_000);
+startupGmailLabelSync.unref();
+
+const startupSlackSync = setTimeout(() => {
+  void syncDueSlack();
+}, 15_000);
+startupSlackSync.unref();
+
 const healthTimer = setInterval(
   () => {
     void checkDueConnections();
@@ -1823,10 +3071,29 @@ const activitySyncTimer = setInterval(
 );
 activitySyncTimer.unref();
 
+const gmailLabelSyncTimer = setInterval(
+  () => {
+    void syncDueGmailLabels();
+  },
+  Math.min(gmailLabelSyncIntervalMs, 30_000),
+);
+gmailLabelSyncTimer.unref();
+
+const slackSyncTimer = setInterval(
+  () => {
+    void syncDueSlack();
+  },
+  Math.min(slackSyncIntervalMs, 30_000),
+);
+slackSyncTimer.unref();
+
 const pendingCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [state, pending] of pendingAuthorizations) {
     if (pending.expiresAt < now) pendingAuthorizations.delete(state);
+  }
+  for (const [state, pending] of pendingSlackAuthorizations) {
+    if (pending.expiresAt < now) pendingSlackAuthorizations.delete(state);
   }
 }, 60_000);
 pendingCleanupTimer.unref();
@@ -1838,5 +3105,8 @@ app.listen(port, () => {
   }
   if (quoConfigurationProblems().length > 0) {
     console.log('Quo connection is disabled until token encryption is configured.');
+  }
+  if (slackConfigurationProblems().length > 0) {
+    console.log('Slack connection is disabled until the Slack OAuth credentials are configured.');
   }
 });

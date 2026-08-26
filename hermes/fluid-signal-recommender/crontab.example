@@ -1,0 +1,2 @@
+* * * * * /opt/data/bin/fluid-signal-recommender-precheck.sh
+17 3 * * * /opt/data/bin/fluid-signal-recommender-reconcile.sh

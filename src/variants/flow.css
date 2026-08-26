@@ -48,15 +48,18 @@
 .fl-nav {
   flex: none;
   width: 188px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 14px 10px 12px;
+  overflow: hidden;
   background: var(--panel);
   border-right: 1px solid var(--line);
 }
 
 .fl-nav-brand {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -88,6 +91,7 @@
 }
 
 .fl-nav-item {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -131,6 +135,7 @@
 .fl-nav-gap { flex: 1; }
 
 .fl-nav-foot {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -416,10 +421,15 @@
   border: 2px solid transparent;
   border-radius: 11px;
   margin-bottom: 4px;
-  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s, opacity 0.12s;
 }
 
 .v-flow .fl-person:hover { background: var(--card); }
+
+.v-flow .fl-person.signal-bright { opacity: 1; }
+.v-flow .fl-person.signal-dim { opacity: 0.48; }
+.v-flow .fl-person.signal-dim:hover { opacity: 0.72; }
+.v-flow .fl-person.signal-dim.focused { opacity: 1; }
 
 .v-flow .fl-person.focused {
   background: var(--card);
@@ -500,6 +510,13 @@
   border-color: var(--line-2);
 }
 
+.fl-plabel.canonical-label {
+  color: var(--label-color, var(--faint));
+  background: color-mix(in srgb, var(--label-color, var(--faint)) 14%, transparent);
+  border-color: currentColor;
+  border-style: solid;
+}
+
 /* who this person IS to the business — lead, client, vendor (someone you pay) */
 .fl-role {
   font-style: normal;
@@ -530,6 +547,52 @@
 
 .v-flow .fl-sig { cursor: pointer; }
 .v-flow .fl-act { cursor: pointer; }
+
+.v-flow .fl-sig-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 7px;
+}
+
+.v-flow .fl-sig-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 750;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-flow .fl-sig-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.v-flow .fl-sig-phone {
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+
+.v-flow .fl-sig-status {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  border-radius: 999px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
 
 /* signal cards: age lives on the bottom row, right-aligned */
 .fl-sig .card-sub .card-age { margin-left: auto; }

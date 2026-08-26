@@ -15,6 +15,14 @@ type ActivityRow = {
   subject: string;
   preview: string;
   body_text: string | null;
+  raw_body_text: string | null;
+  quoted_text: string | null;
+  signature_text: string | null;
+  has_quoted_content: boolean;
+  content_parser_version: string;
+  content_parse_method: string;
+  content_parse_confidence: number;
+  content_parsed_at: string;
   occurred_at: string;
   has_attachments: boolean;
   attachment_count: number;
@@ -41,6 +49,19 @@ type SyncState = {
 type UpsertPayload = {
   activities: ActivityRow[];
   syncState: SyncState;
+};
+
+type EmailContentPatch = {
+  id: number;
+  currentMessageText: string;
+  rawBodyText: string;
+  quotedText: string | null;
+  signatureText: string | null;
+  hasQuotedContent: boolean;
+  parserVersion: string;
+  parseMethod: string;
+  parseConfidence: number;
+  parsedAt: string;
 };
 
 const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
@@ -207,6 +228,26 @@ function validPayload(value: unknown): value is UpsertPayload {
   );
 }
 
+function validContentPatches(value: unknown): value is { patches: EmailContentPatch[] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const patches = (value as { patches?: unknown }).patches;
+  if (!Array.isArray(patches) || patches.length === 0 || patches.length > 200) return false;
+  return patches.every((patch) => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return false;
+    const item = patch as Partial<EmailContentPatch>;
+    return Number.isSafeInteger(item.id) && Number(item.id) > 0 &&
+      typeof item.currentMessageText === 'string' && item.currentMessageText.length <= 100_000 &&
+      typeof item.rawBodyText === 'string' && item.rawBodyText.length <= 100_000 &&
+      (item.quotedText === null || (typeof item.quotedText === 'string' && item.quotedText.length <= 100_000)) &&
+      (item.signatureText === null || (typeof item.signatureText === 'string' && item.signatureText.length <= 20_000)) &&
+      typeof item.hasQuotedContent === 'boolean' &&
+      typeof item.parserVersion === 'string' && item.parserVersion.length > 0 && item.parserVersion.length <= 100 &&
+      typeof item.parseMethod === 'string' && item.parseMethod.length > 0 && item.parseMethod.length <= 100 &&
+      typeof item.parseConfidence === 'number' && item.parseConfidence >= 0 && item.parseConfidence <= 1 &&
+      typeof item.parsedAt === 'string' && Number.isFinite(Date.parse(item.parsedAt));
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (!authorized(req)) return response({ error: 'Unauthorized' }, 401);
 
@@ -219,6 +260,53 @@ Deno.serve(async (req: Request) => {
     const url = new URL(req.url);
     const action = url.searchParams.get('action') ?? 'list';
     const accountEmail = (url.searchParams.get('accountEmail') ?? '').trim().toLowerCase();
+
+    if (req.method === 'GET' && action === 'email-content-source') {
+      const limit = cleanLimit(url.searchParams.get('limit'), 100, 200);
+      const cursorId = url.searchParams.get('cursorId') === null
+        ? null
+        : positiveId(url.searchParams.get('cursorId'));
+      if (url.searchParams.get('cursorId') !== null && cursorId === null) {
+        return response({ error: 'Valid cursorId is required' }, 400);
+      }
+      let query = supabase.from('activities')
+        .select('id,body_text,raw_body_text,content_parser_version')
+        .eq('workspace_key', 'ottawa-painters')
+        .eq('source', 'gmail')
+        .order('id', { ascending: true })
+        .limit(limit);
+      if (cursorId !== null) query = query.gt('id', cursorId);
+      const { data, error } = await query;
+      if (error) throw error;
+      const rows = data ?? [];
+      return response({
+        rows,
+        nextCursor: rows.length === limit ? rows.at(-1)?.id ?? null : null,
+      });
+    }
+
+    if (req.method === 'POST' && action === 'email-content-patches') {
+      const body: unknown = await req.json().catch(() => null);
+      if (!validContentPatches(body)) return response({ error: 'Invalid email content patches' }, 400);
+      // Updating body_text runs identity/triage/review triggers. Apply parser
+      // patches sequentially so messages in one thread cannot deadlock while
+      // those trigger paths reconcile shared state.
+      for (const patch of body.patches) {
+        const { error } = await supabase.from('activities').update({
+          body_text: patch.currentMessageText || null,
+          raw_body_text: patch.rawBodyText || null,
+          quoted_text: patch.quotedText,
+          signature_text: patch.signatureText,
+          has_quoted_content: patch.hasQuotedContent,
+          content_parser_version: patch.parserVersion,
+          content_parse_method: patch.parseMethod,
+          content_parse_confidence: patch.parseConfidence,
+          content_parsed_at: patch.parsedAt,
+        }).eq('workspace_key', 'ottawa-painters').eq('source', 'gmail').eq('id', patch.id);
+        if (error) throw new Error(`Activity ${patch.id}: ${error.message}`);
+      }
+      return response({ updated: body.patches.length });
+    }
 
     if (req.method === 'GET' && action === 'list') {
       const limit = cleanLimit(url.searchParams.get('limit'), 30, 50);
@@ -283,7 +371,7 @@ Deno.serve(async (req: Request) => {
       const { data, error } = await supabase
         .from('activities')
         .select(
-          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
+          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
         )
         .eq('id', signalId)
         .maybeSingle();
@@ -352,7 +440,7 @@ Deno.serve(async (req: Request) => {
       let messagesQuery = supabase
         .from('activities')
         .select(
-          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
+          'id,source,account_email,account_phone,external_id,external_thread_id,event_type,direction,actor_name,actor_email,actor_phone,from_email,from_phone,to_emails,to_phones,cc_emails,subject,preview,body_text,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at,occurred_at,has_attachments,attachment_count,call_status,duration_seconds,contact_id,source_metadata',
         )
         .eq('source', selectedResult.data.source)
         .eq('account_key', selectedResult.data.account_key)
@@ -739,9 +827,7 @@ Deno.serve(async (req: Request) => {
 
     if (req.method === 'GET' && action === 'agent-history') {
       const limit = cleanLimit(url.searchParams.get('limit'), 20, 50);
-      const requestedAgent = url.searchParams.get('agentKey') === 'email-categorizer'
-        ? 'email-categorizer'
-        : 'signal-triage';
+      const requestedAgent = 'signal-triage';
       const { data, error } = await supabase
         .from('agent_runs')
         .select('id,status,model,error,started_at,finished_at,input_revision')
@@ -753,17 +839,13 @@ Deno.serve(async (req: Request) => {
         agentId: requestedAgent,
         jobs: [{
           id: requestedAgent,
-          name: requestedAgent === 'signal-triage'
-            ? 'Fluid Signal Triage — database only — every minute'
-            : 'Fluid Email Categorizer — historical audit',
+          name: 'Fluid Signal Triage — database only — every minute',
           profile: 'default',
         }],
         runs: (data ?? []).map((run) => ({
           id: run.id,
           jobId: requestedAgent,
-          jobName: requestedAgent === 'signal-triage'
-            ? 'Fluid Signal Triage — database only — every minute'
-            : 'Fluid Email Categorizer — historical audit',
+          jobName: 'Fluid Signal Triage — database only — every minute',
           profile: 'default',
           status: run.status,
           source: 'supabase-agent-audit',

@@ -1,6 +1,5 @@
 import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './people.css';
@@ -154,7 +153,7 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
   );
 }
 
-export function PeoplePage({ d, onNavigate, header }: { d: Derived; onNavigate: (label: string) => void; header: ReactNode }) {
+export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string) => void; header: ReactNode }) {
   const [tab, setTab] = useState<'contacts' | 'suggestions'>('contacts');
   const [roles, setRoles] = useState<RoleDefinition[]>([]);
   const [role, setRole] = useState('');
@@ -235,7 +234,7 @@ export function PeoplePage({ d, onNavigate, header }: { d: Derived; onNavigate: 
   };
 
   return <div className="v v-flow v-zen pp-root"><div className="fl-shell">
-    <SideNav d={d} active="Contacts" onNav={onNavigate} />
+    <SideNav active="Contacts" onNav={onNavigate} />
     <div className="fl-frame">{header}<main className="pp-main"><div className="pp-inner">
       <header className="pp-head"><div><h1>Contacts</h1><p>People and businesses connected across Gmail, Quo messages, and calls.</p></div><div className="pp-counts"><span><strong>{contactCount.toLocaleString()}</strong> Contacts</span><span><strong>{suggestionCount.toLocaleString()}</strong> to review</span></div></header>
       <nav className="pp-mode-tabs" aria-label="Contacts sections">

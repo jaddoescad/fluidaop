@@ -84,13 +84,28 @@ enabled = true
 [functions.fluid-gmail-activities]
 verify_jwt = false
 
-[functions.fluid-email-categorizer]
+[functions.fluid-gmail-label-sync]
 verify_jwt = false
 
 [functions.fluid-customer-sync]
 verify_jwt = false
 
 [functions.fluid-quo-events]
+verify_jwt = false
+
+[functions.fluid-slack-events]
+verify_jwt = false
+
+[functions.fluid-operational-context]
+verify_jwt = false
+
+[functions.fluid-real-board]
+verify_jwt = false
+
+[functions.fluid-signal-recommender]
+verify_jwt = false
+
+[functions.fluid-action-runner]
 verify_jwt = false
 
 [studio]

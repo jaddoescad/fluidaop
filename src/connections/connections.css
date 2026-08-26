@@ -197,6 +197,18 @@
 .cn-logo-quo { background: #5b2ee0; border-color: transparent; }
 .cn-logo-quo.cn-logo-dim { background: color-mix(in srgb, #5b2ee0 50%, var(--panel)); }
 .cn-logo-quo.cn-logo-dim svg { filter: none; opacity: 0.6; }
+.cn-logo-slack { background: #fff; border-color: color-mix(in srgb, var(--line) 82%, #fff); }
+.cn-logo-slack.cn-logo-dim svg { filter: grayscale(.7); opacity: .62; }
+
+.cn-gmail-labels {
+  padding: 0 20px;
+}
+
+.cn-gmail-labels .cn-manage-ok,
+.cn-gmail-labels .cn-problem,
+.cn-gmail-labels .cn-hint {
+  margin: 0 0 10px;
+}
 
 .cn-who {
   flex: 1;

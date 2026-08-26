@@ -1,0 +1,800 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Act } from './contract';
+import {
+  ActionCard,
+  ActionDetail,
+  AgentRun,
+  Person,
+  PersonRole,
+  Reminder,
+  Signal,
+  SignalAttachment,
+  SignalDetail,
+  SignalRecommendation,
+  SignalTranscript,
+  State,
+} from '../types';
+
+interface BoardSummaryResponse {
+  signalsToday: number;
+  actionsOpen: number;
+  remindersDue: number;
+}
+
+interface ApiPerson {
+  id: string;
+  displayName: string;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+  entityType: 'person' | 'business';
+  roles: string[];
+  needsAttention: boolean;
+  pendingRecommendationCount: number;
+  recentSignalCount: number;
+  latestActivityAt: string;
+  urgency: string | null;
+}
+
+interface ApiContact {
+  id: string;
+  displayName: string;
+  primaryEmail: string | null;
+  primaryPhone: string | null;
+}
+
+interface ApiLabel {
+  kind: 'topic' | 'urgency';
+  name: string;
+  color?: string | null;
+}
+
+interface ApiCatalogLabel {
+  kind: 'topic' | 'urgency';
+  name: string;
+  color: string;
+  enabled: boolean;
+}
+
+interface ApiSignal {
+  id: number;
+  source: 'gmail' | 'quo';
+  eventType: string;
+  direction: 'inbound' | 'outbound';
+  actorName: string | null;
+  actorEmail: string | null;
+  actorPhone: string | null;
+  subject: string;
+  preview: string;
+  bodyText?: string | null;
+  currentMessageText?: string | null;
+  rawBodyText?: string | null;
+  quotedText?: string | null;
+  signatureText?: string | null;
+  hasQuotedContent?: boolean;
+  contentParserVersion?: string | null;
+  contentParseMethod?: string | null;
+  contentParseConfidence?: number | null;
+  threadMessageCount?: number;
+  occurredAt: string;
+  actionOpen?: boolean;
+  boardSortAt?: string;
+  contact: ApiContact | null;
+  labels?: ApiLabel[];
+  attachmentCount?: number;
+  isAutomated?: boolean;
+  review?: {
+    status: 'pending' | 'action_open' | 'settled';
+    resolution: string | null;
+    pendingRecommendationCount: number;
+    reviewedBy?: string | null;
+    reviewedAt?: string | null;
+  };
+}
+
+interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+  count?: number;
+}
+
+interface ApiSignalDetail {
+  signal: ApiSignal;
+  recommendations: SignalRecommendation[];
+  history: ApiSignal[];
+  historyNextCursor: string | null;
+  attachments?: SignalAttachment[];
+  transcript?: Omit<SignalTranscript, 'updatedAt'> & { updatedAt?: string | null } | null;
+}
+
+interface ApiWorkItem {
+  id: string;
+  caseId: string;
+  contactId: string | null;
+  jobName: string;
+  actionKind: string;
+  title: string;
+  reason: string;
+  status: 'open' | 'waiting';
+  owner: string | null;
+  dueAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ApiAction {
+  id: string;
+  actionDefinitionKey: string | null;
+  actionDefinitionName: string;
+  recommendationId: string;
+  sourceSignalId: string;
+  personId: string | null;
+  contact: ApiContact | null;
+  caseId: string | null;
+  status: 'drafting' | 'awaiting_approval' | 'simulated' | 'failed' | 'completed_external' | 'dismissed';
+  executionMode: 'simulation';
+  title: string;
+  reason: string;
+  recipient: string;
+  subject: string;
+  draftBody: string | null;
+  draftRevision: number;
+  lastError: string | null;
+  simulatedAt: string | null;
+  completedExternalAt: string | null;
+  sourceSignal: {
+    id: string;
+    subject: string;
+    preview: string;
+    bodyText: string | null;
+    currentMessageText?: string | null;
+    rawBodyText?: string | null;
+    quotedText?: string | null;
+    signatureText?: string | null;
+    hasQuotedContent?: boolean;
+    contentParserVersion?: string | null;
+    contentParseMethod?: string | null;
+    contentParseConfidence?: number | null;
+    threadMessageCount?: number;
+    occurredAt: string;
+    actorName: string | null;
+    actorEmail: string | null;
+    threadId: string | null;
+  } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface ApiActionDetail { action: ApiAction; events: ActionDetail['events'] }
+
+function roleOf(roles: string[]): PersonRole {
+  const order: PersonRole[] = ['customer', 'lead', 'applicant', 'contractor', 'supplier', 'employee', 'painter', 'other'];
+  return order.find((role) => roles.includes(role)) ?? 'other';
+}
+
+async function json<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, {
+    ...init,
+    headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  const payload = await response.json().catch(() => null) as T | { error?: string } | null;
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+      ? payload.error
+      : `Board request returned ${response.status}`;
+    throw new Error(message);
+  }
+  return payload as T;
+}
+
+function safeLabelColor(color: string | null | undefined): string | null {
+  return color && /^#[0-9a-f]{6}$/i.test(color) ? color : null;
+}
+
+function apiPersonToPerson(
+  person: ApiPerson,
+  order: number,
+  urgencyLabelByName: ReadonlyMap<string, { name: string; color: string }>,
+): Person {
+  const urgency = person.urgency
+    ? urgencyLabelByName.get(person.urgency.trim().toLowerCase()) ?? null
+    : null;
+  return {
+    id: person.id,
+    name: person.displayName,
+    company: person.entityType === 'business' ? person.displayName : undefined,
+    role: roleOf(person.roles),
+    kind: person.entityType === 'business' ? 'commercial' : 'residential',
+    note: person.primaryEmail ?? person.primaryPhone ?? `${person.recentSignalCount} recent signals`,
+    tags: [],
+    suggestedTags: [],
+    nbas: [],
+    boardVisible: true,
+    boardOrder: order,
+    needsAttention: person.needsAttention,
+    urgency: urgency?.name ?? null,
+    urgencyColor: urgency?.color ?? null,
+    recentSignalCount: person.recentSignalCount,
+  };
+}
+
+function actorName(signal: ApiSignal): string {
+  return signal.contact?.displayName ?? signal.actorName ?? signal.actorEmail ?? signal.actorPhone ?? 'Unknown';
+}
+
+function apiSignalToSignal(signal: ApiSignal, personId?: string): Signal {
+  const topic = signal.labels?.find((label) => label.kind === 'topic');
+  const urgency = signal.labels?.find((label) => label.kind === 'urgency');
+  return {
+    id: String(signal.id),
+    personId: personId ?? signal.contact?.id ?? `signal:${signal.id}`,
+    channel: signal.eventType === 'call.completed' ? 'call' : signal.source === 'gmail' ? 'email' : 'sms',
+    at: Date.parse(signal.occurredAt),
+    text: signal.currentMessageText?.trim() || signal.bodyText?.trim() || signal.preview || signal.subject || '(no message text)',
+    rawText: signal.rawBodyText ?? signal.bodyText ?? null,
+    quotedText: signal.quotedText ?? null,
+    signatureText: signal.signatureText ?? null,
+    hasQuotedContent: signal.hasQuotedContent ?? Boolean(signal.quotedText),
+    threadMessageCount: signal.threadMessageCount,
+    requiresReply: signal.review?.status === 'pending',
+    title: signal.subject,
+    source: signal.source,
+    eventType: signal.eventType,
+    direction: signal.direction,
+    actorEmail: signal.contact?.primaryEmail ?? signal.actorEmail,
+    actorPhone: signal.contact?.primaryPhone ?? signal.actorPhone,
+    topic: topic?.name ?? null,
+    topicColor: safeLabelColor(topic?.color),
+    urgency: urgency?.name ?? null,
+    urgencyColor: safeLabelColor(urgency?.color),
+    reviewStatus: signal.review?.status ?? 'settled',
+    reviewResolution: signal.review?.resolution ?? null,
+    reviewedBy: signal.review?.reviewedBy ?? null,
+    reviewedAt: signal.review?.reviewedAt ? Date.parse(signal.review.reviewedAt) : null,
+    isAutomated: signal.isAutomated ?? false,
+    attachmentCount: signal.attachmentCount ?? 0,
+  };
+}
+
+function hiddenActor(signal: ApiSignal): Person {
+  return {
+    id: signal.contact?.id ?? `signal:${signal.id}`,
+    name: actorName(signal),
+    role: 'other',
+    kind: 'residential',
+    note: signal.actorEmail ?? signal.actorPhone ?? '',
+    tags: [],
+    suggestedTags: [],
+    nbas: [],
+    boardVisible: false,
+  };
+}
+
+function workPerson(work: ApiWorkItem): Person {
+  return {
+    id: work.contactId ?? `case:${work.caseId}`,
+    name: work.jobName,
+    role: 'other',
+    kind: 'residential',
+    note: work.reason,
+    tags: [],
+    suggestedTags: [],
+    nbas: [],
+    boardVisible: false,
+  };
+}
+
+function actionPerson(action: ApiAction): Person {
+  return {
+    id: action.personId ?? `signal:${action.sourceSignalId}`,
+    name: action.contact?.displayName ?? action.recipient,
+    role: 'customer',
+    kind: 'residential',
+    note: action.recipient,
+    tags: [],
+    suggestedTags: [],
+    nbas: [],
+    boardVisible: false,
+  };
+}
+
+function apiActionToAction(action: ApiAction): ActionCard {
+  return {
+    id: action.id,
+    personId: action.personId ?? `signal:${action.sourceSignalId}`,
+    sourceSignalId: action.sourceSignalId,
+    reminderId: null,
+    kind: 'reply',
+    title: action.title,
+    createdAt: Date.parse(action.createdAt),
+    snoozedUntil: 0,
+    status: action.status,
+    reason: action.reason,
+    recipient: action.recipient,
+    subject: action.subject,
+    draftBody: action.draftBody,
+    draftRevision: action.draftRevision,
+    lastError: action.lastError,
+    simulatedAt: action.simulatedAt ? Date.parse(action.simulatedAt) : null,
+    actionDefinitionKey: action.actionDefinitionKey,
+  };
+}
+
+function actionRun(action: ApiAction): AgentRun {
+  const startedAt = Date.parse(action.createdAt);
+  if (action.status === 'drafting') return {
+    agent: 'Hermes', status: 'running', startedAt, resolveAt: Date.now() + 60_000,
+    outcome: 'review', note: '', rec: null, recTaken: false,
+  };
+  if (action.status === 'failed') return {
+    agent: 'Hermes', status: 'fail', startedAt, resolveAt: Date.parse(action.updatedAt),
+    outcome: 'fail', note: action.lastError ?? 'Drafting failed', rec: null, recTaken: false,
+  };
+  return {
+    agent: 'Hermes', status: 'review', startedAt, resolveAt: Date.parse(action.updatedAt),
+    outcome: 'review',
+    note: action.status === 'simulated'
+      ? 'Sent (simulation) — no customer message was sent.'
+      : 'Draft ready for your review.',
+    rec: null, recTaken: false,
+  };
+}
+
+function apiWorkToReminder(work: ApiWorkItem): Reminder {
+  return {
+    id: work.id,
+    personId: work.contactId ?? `case:${work.caseId}`,
+    note: work.title,
+    createdAt: Date.parse(work.createdAt),
+    dueAt: work.dueAt ? Date.parse(work.dueAt) : Number.MAX_SAFE_INTEGER,
+    sourceSignalId: null,
+    sourceLabel: 'User-created',
+    doneAt: null,
+    snoozedUntil: 0,
+    bornLive: false,
+  };
+}
+
+const noOp = () => undefined;
+
+export interface LiveBoardController {
+  s: State;
+  act: Act;
+  error: string | null;
+  signalView: 'all' | 'needs_you';
+  setSignalView: (view: 'all' | 'needs_you') => void;
+  peopleHasMore: boolean;
+  peopleCount: number;
+  signalsHasMore: boolean;
+  peopleLoading: boolean;
+  signalsLoading: boolean;
+  loadMorePeople: () => Promise<void>;
+  loadMoreSignals: () => Promise<void>;
+  openSignal: (id: string) => Promise<void>;
+  openAction: (id: string) => Promise<void>;
+  loadMoreHistory: (id: string) => Promise<void>;
+}
+
+export function useLiveBoard(): LiveBoardController {
+  const [booted, setBooted] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const [paused, setPaused] = useState(false);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [summary, setSummary] = useState<BoardSummaryResponse>({ signalsToday: 0, actionsOpen: 0, remindersDue: 0 });
+  const [apiPeople, setApiPeople] = useState<ApiPerson[]>([]);
+  const [peopleCount, setPeopleCount] = useState(0);
+  const [apiSignals, setApiSignals] = useState<ApiSignal[]>([]);
+  const [apiLabels, setApiLabels] = useState<ApiCatalogLabel[]>([]);
+  const [apiActions, setApiActions] = useState<ApiAction[]>([]);
+  const [apiReminders, setApiReminders] = useState<ApiWorkItem[]>([]);
+  const [peopleCursor, setPeopleCursor] = useState<string | null>(null);
+  const [signalsCursor, setSignalsCursor] = useState<string | null>(null);
+  const [peopleLoading, setPeopleLoading] = useState(false);
+  const [signalsLoading, setSignalsLoading] = useState(false);
+  const [signalView, setSignalView] = useState<'all' | 'needs_you'>('all');
+  const [details, setDetails] = useState<Record<string, SignalDetail>>({});
+  const [actionDetails, setActionDetails] = useState<Record<string, ActionDetail>>({});
+  const [error, setError] = useState<string | null>(null);
+  const requestRevision = useRef(0);
+
+  const loadSummary = useCallback(async () => {
+    setSummary(await json<BoardSummaryResponse>('/api/board/summary'));
+  }, []);
+
+  const loadLabels = useCallback(async () => {
+    const payload = await json<{ labels: ApiCatalogLabel[] }>('/api/labels');
+    setApiLabels(payload.labels);
+  }, []);
+
+  const loadCreatedWork = useCallback(async () => {
+    const [actions, reminders] = await Promise.all([
+      json<CursorPage<ApiAction>>('/api/board/actions?limit=100'),
+      json<CursorPage<ApiWorkItem>>('/api/board/reminders?limit=100'),
+    ]);
+    setApiActions(actions.items);
+    setApiReminders(reminders.items);
+  }, []);
+
+  const loadPeople = useCallback(async (append: boolean) => {
+    if (peopleLoading) return;
+    setPeopleLoading(true);
+    try {
+      const cursor = append ? peopleCursor : null;
+      const page = await json<CursorPage<ApiPerson>>(`/api/board/people?limit=30${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+      setApiPeople((current) => append ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))] : page.items);
+      if (typeof page.count === 'number' && Number.isSafeInteger(page.count)) setPeopleCount(page.count);
+      setPeopleCursor(page.nextCursor);
+    } finally {
+      setPeopleLoading(false);
+    }
+  }, [peopleCursor, peopleLoading]);
+
+  const loadSignals = useCallback(async (append: boolean) => {
+    if (append && signalsLoading) return;
+    const revision = requestRevision.current;
+    setSignalsLoading(true);
+    try {
+      const cursor = append ? signalsCursor : null;
+      const search = new URLSearchParams({ limit: '30', view: signalView });
+      if (focusId) search.set('contactId', focusId);
+      if (cursor) search.set('cursor', cursor);
+      const page = await json<CursorPage<ApiSignal>>(`/api/board/signals?${search}`);
+      if (revision !== requestRevision.current) return;
+      setApiSignals((current) => append ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))] : page.items);
+      setSignalsCursor(page.nextCursor);
+    } finally {
+      if (revision === requestRevision.current) setSignalsLoading(false);
+    }
+  }, [focusId, signalView, signalsCursor, signalsLoading]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels()])
+      .catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Could not load the Board'))
+      .finally(() => active && setBooted(true));
+    return () => { active = false; };
+    // Initial request only; focus and view have their own bounded effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!booted) return;
+    requestRevision.current += 1;
+    setApiSignals([]);
+    setSignalsCursor(null);
+    setSignalsLoading(false);
+    void loadSignals(false).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not load Signals'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusId, signalView]);
+
+  useEffect(() => {
+    if (!booted || paused) return;
+    const timer = window.setInterval(() => {
+      void Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels()])
+        .catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not refresh the Board'));
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [booted, paused, loadCreatedWork, loadLabels, loadPeople, loadSignals, loadSummary]);
+
+  const openSignal = useCallback(async (id: string) => {
+    setDetails((current) => ({
+      ...current,
+      [id]: current[id] ?? {
+        signal: null,
+        recommendations: [],
+        history: [],
+        historyNextCursor: null,
+        attachments: [],
+        transcript: null,
+        loading: true,
+        error: null,
+      },
+    }));
+    try {
+      const payload = await json<ApiSignalDetail>(`/api/board/signals/${id}?historyLimit=30`);
+      const selected = apiSignals.find((signal) => String(signal.id) === id);
+      const personId = selected?.contact?.id ?? `signal:${id}`;
+      setDetails((current) => ({
+        ...current,
+        [id]: {
+          signal: apiSignalToSignal(payload.signal, personId),
+          recommendations: payload.recommendations ?? [],
+          history: (payload.history ?? []).map((signal) => apiSignalToSignal(signal, personId)),
+          historyNextCursor: payload.historyNextCursor,
+          attachments: payload.attachments ?? [],
+          transcript: payload.transcript ? {
+            ...payload.transcript,
+            updatedAt: payload.transcript.updatedAt ? Date.parse(payload.transcript.updatedAt) : null,
+          } : null,
+          loading: false,
+          error: null,
+        },
+      }));
+    } catch (cause) {
+      setDetails((current) => ({
+        ...current,
+        [id]: {
+          signal: null,
+          recommendations: [],
+          history: [],
+          historyNextCursor: null,
+          attachments: [],
+          transcript: null,
+          loading: false,
+          error: cause instanceof Error ? cause.message : 'Could not load Signal context',
+        },
+      }));
+    }
+  }, [apiSignals]);
+
+  const loadMoreHistory = useCallback(async (id: string) => {
+    const current = details[id];
+    if (!current?.historyNextCursor || current.loading) return;
+    setDetails((all) => ({ ...all, [id]: { ...current, loading: true } }));
+    try {
+      const payload = await json<ApiSignalDetail>(`/api/board/signals/${id}?historyLimit=30&historyCursor=${encodeURIComponent(current.historyNextCursor)}`);
+      const selected = apiSignals.find((signal) => String(signal.id) === id);
+      const personId = selected?.contact?.id ?? `signal:${id}`;
+      setDetails((all) => ({
+        ...all,
+        [id]: {
+          ...current,
+          history: [...current.history, ...(payload.history ?? []).map((signal) => apiSignalToSignal(signal, personId))],
+          historyNextCursor: payload.historyNextCursor,
+          loading: false,
+        },
+      }));
+    } catch (cause) {
+      setDetails((all) => ({
+        ...all,
+        [id]: { ...current, loading: false, error: cause instanceof Error ? cause.message : 'Could not load more history' },
+      }));
+    }
+  }, [apiSignals, details]);
+
+  const settleSignal = useCallback(async (id: string) => {
+    await json(`/api/board/signals/${id}/settle`, {
+      method: 'POST',
+      body: JSON.stringify({ resolution: 'no_action' }),
+    });
+    setApiSignals((current) => current.map((signal) => String(signal.id) === id
+      ? { ...signal, review: { status: 'settled', resolution: 'no_action', pendingRecommendationCount: 0 } }
+      : signal));
+    setDetails((current) => current[id] ? {
+      ...current,
+      [id]: {
+        ...current[id],
+        signal: current[id].signal ? {
+          ...current[id].signal,
+          reviewStatus: 'settled',
+          reviewResolution: 'no_action',
+          reviewedBy: 'manager',
+          reviewedAt: Date.now(),
+        } : null,
+        recommendations: [],
+      },
+    } : current);
+    await Promise.all([loadSummary(), loadPeople(false)]);
+  }, [loadPeople, loadSummary]);
+
+  const openAction = useCallback(async (id: string) => {
+    setActionDetails((current) => ({
+      ...current,
+      [id]: current[id] ?? { action: null, sourceSignal: null, events: [], loading: true, error: null },
+    }));
+    try {
+      const payload = await json<ApiActionDetail>(`/api/board/actions/${id}`);
+      const action = apiActionToAction(payload.action);
+      const source = payload.action.sourceSignal;
+      setActionDetails((current) => ({
+        ...current,
+        [id]: {
+          action,
+          sourceSignal: source ? {
+            id: source.id,
+            personId: action.personId,
+            channel: 'email',
+            at: Date.parse(source.occurredAt),
+            text: source.currentMessageText?.trim() || source.bodyText?.trim() || source.preview || source.subject,
+            rawText: source.rawBodyText ?? source.bodyText ?? null,
+            quotedText: source.quotedText ?? null,
+            signatureText: source.signatureText ?? null,
+            hasQuotedContent: source.hasQuotedContent ?? Boolean(source.quotedText),
+            threadMessageCount: source.threadMessageCount,
+            requiresReply: true,
+            title: source.subject,
+            source: 'gmail',
+            eventType: 'email.received',
+            direction: 'inbound',
+          } : null,
+          events: payload.events ?? [],
+          loading: false,
+          error: null,
+        },
+      }));
+    } catch (cause) {
+      setActionDetails((current) => ({
+        ...current,
+        [id]: { action: null, sourceSignal: null, events: [], loading: false,
+          error: cause instanceof Error ? cause.message : 'Could not load Action' },
+      }));
+    }
+  }, []);
+
+  const acceptRecommendation = useCallback(async (signalId: string, recommendationId: string) => {
+    const result = await json<{ action: { id: string } }>(
+      `/api/board/signals/${signalId}/recommendations/${recommendationId}/accept`,
+      { method: 'POST', body: '{}' },
+    );
+    setDetails((current) => current[signalId] ? {
+      ...current,
+      [signalId]: {
+        ...current[signalId],
+        signal: current[signalId].signal ? {
+          ...current[signalId].signal,
+          reviewStatus: 'action_open',
+          reviewResolution: 'action_created',
+          reviewedBy: 'manager',
+          reviewedAt: Date.now(),
+        } : null,
+        recommendations: [],
+      },
+    } : current);
+    setApiSignals((current) => current.map((signal) => String(signal.id) === signalId
+      ? { ...signal, review: { status: 'action_open', resolution: 'action_created', pendingRecommendationCount: 0 } }
+      : signal));
+    await Promise.all([loadCreatedWork(), loadSummary(), loadPeople(false), loadSignals(false)]);
+    return result.action.id;
+  }, [loadCreatedWork, loadPeople, loadSignals, loadSummary]);
+
+  const updateActionDraft = useCallback(async (actionId: string, revision: number, draftBody: string) => {
+    await json(`/api/board/actions/${actionId}/draft`, {
+      method: 'PATCH', body: JSON.stringify({ revision, draftBody }),
+    });
+    await Promise.all([openAction(actionId), loadCreatedWork()]);
+  }, [loadCreatedWork, openAction]);
+
+  const simulateActionSend = useCallback(async (actionId: string, revision: number) => {
+    await json(`/api/board/actions/${actionId}/simulate-send`, {
+      method: 'POST', body: JSON.stringify({ revision }),
+    });
+    await Promise.all([openAction(actionId), loadCreatedWork(), loadSummary()]);
+  }, [loadCreatedWork, loadSummary, openAction]);
+
+  const retryAction = useCallback(async (actionId: string) => {
+    await json(`/api/board/actions/${actionId}/retry`, { method: 'POST', body: '{}' });
+    await Promise.all([openAction(actionId), loadCreatedWork()]);
+  }, [loadCreatedWork, openAction]);
+
+  const dismissAction = useCallback(async (actionId: string) => {
+    await json(`/api/board/actions/${actionId}/dismiss`, { method: 'POST', body: '{}' });
+    setActionDetails((current) => {
+      const next = { ...current };
+      delete next[actionId];
+      return next;
+    });
+    await Promise.all([loadCreatedWork(), loadSummary(), loadPeople(false), loadSignals(false)]);
+  }, [loadCreatedWork, loadPeople, loadSignals, loadSummary]);
+
+  const urgencyLabelByName = useMemo(() => new Map(
+    apiLabels
+      .filter((label) => label.kind === 'urgency')
+      .flatMap((label) => {
+        const color = safeLabelColor(label.color);
+        return color
+          ? [[label.name.trim().toLowerCase(), { name: label.name, color }] as const]
+          : [];
+      }),
+  ), [apiLabels]);
+  const people = useMemo(
+    () => apiPeople.map((person, order) => apiPersonToPerson(person, order, urgencyLabelByName)),
+    [apiPeople, urgencyLabelByName],
+  );
+  const signals = useMemo(
+    // The API owns the ranked order (action-open first, then newest). State is
+    // stored oldest-first because the fixed Board's derive() reverses it.
+    () => apiSignals.slice().reverse().map((signal) => apiSignalToSignal(signal)),
+    [apiSignals],
+  );
+  const allPeople = useMemo(() => {
+    const map = new Map(people.map((person) => [person.id, person]));
+    for (const signal of apiSignals) {
+      const id = signal.contact?.id ?? `signal:${signal.id}`;
+      if (!map.has(id)) map.set(id, hiddenActor(signal));
+    }
+    for (const action of apiActions) {
+      const id = action.personId ?? `signal:${action.sourceSignalId}`;
+      if (!map.has(id)) map.set(id, actionPerson(action));
+    }
+    for (const work of apiReminders) {
+      const id = work.contactId ?? `case:${work.caseId}`;
+      if (!map.has(id)) map.set(id, workPerson(work));
+    }
+    return [...map.values()];
+  }, [apiActions, apiPeople, apiReminders, apiSignals, people]);
+
+  const actions = useMemo(() => apiActions.map(apiActionToAction), [apiActions]);
+  const runs = useMemo(() => Object.fromEntries(apiActions.map((action) => [action.id, actionRun(action)])), [apiActions]);
+  const reminders = useMemo(() => apiReminders.map(apiWorkToReminder), [apiReminders]);
+
+  const s = useMemo<State>(() => ({
+    booted,
+    now,
+    startedAt: now,
+    paused,
+    focusId,
+    people: allPeople,
+    signals,
+    reminders,
+    actions,
+    runs,
+    completed: {},
+    handled: [],
+    log: [],
+    script: [],
+    nextRandomAt: Number.MAX_SAFE_INTEGER,
+    autoEnabled: { reply: false, reminder: false, stale: false, capture: false },
+    autoRuns: { reply: 0, reminder: 0, stale: 0, capture: 0 },
+    autoTrace: [],
+    sequences: [],
+    seqInstances: [],
+    boardSummary: {
+      signalsToday: summary.signalsToday,
+      openActions: summary.actionsOpen,
+      remindersDue: summary.remindersDue,
+    },
+    signalDetails: details,
+    actionDetails,
+  }), [actionDetails, actions, allPeople, booted, details, focusId, now, paused, reminders, runs, signals, summary]);
+
+  const act = useMemo<Act>(() => ({
+    focus: setFocusId,
+    togglePause: () => setPaused((value) => !value),
+    settleSignal,
+    acceptRecommendation,
+    updateActionDraft,
+    simulateActionSend,
+    retryAction,
+    dismissAction,
+    done: noOp,
+    snooze: noOp,
+    remDone: noOp,
+    remSnooze: noOp,
+    acceptTag: noOp,
+    runNba: noOp,
+    toggleAuto: noOp,
+    toggleSeq: noOp,
+    createReminder: noOp,
+    createAction: noOp,
+    enrollSeq: noOp,
+    undoAction: noOp,
+    undoReminder: noOp,
+    retryRun: noOp,
+    takeRec: noOp,
+    triggerReminder: noOp,
+    cancelReminder: noOp,
+    stopSeq: noOp,
+  }), [acceptRecommendation, dismissAction, retryAction, settleSignal, simulateActionSend, updateActionDraft]);
+
+  return {
+    s,
+    act,
+    error,
+    signalView,
+    setSignalView,
+    peopleHasMore: peopleCursor !== null,
+    peopleCount,
+    signalsHasMore: signalsCursor !== null,
+    peopleLoading,
+    signalsLoading,
+    loadMorePeople: () => loadPeople(true),
+    loadMoreSignals: () => loadSignals(true),
+    openSignal,
+    openAction,
+    loadMoreHistory,
+  };
+}

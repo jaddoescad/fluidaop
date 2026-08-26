@@ -6,7 +6,17 @@ export interface Nba {
 }
 
 /** What this person IS to the business — not everyone is a lead. */
-export type PersonRole = 'lead' | 'client' | 'vendor';
+export type PersonRole =
+  | 'lead'
+  | 'customer'
+  | 'applicant'
+  | 'contractor'
+  | 'supplier'
+  | 'employee'
+  | 'painter'
+  | 'other'
+  | 'client'
+  | 'vendor';
 
 export interface Person {
   id: string;
@@ -18,6 +28,52 @@ export interface Person {
   tags: string[];
   suggestedTags: string[];
   nbas: Nba[];
+  /** Live Board ordering and canonical review state. */
+  boardVisible?: boolean;
+  boardOrder?: number;
+  needsAttention?: boolean;
+  urgency?: string | null;
+  urgencyColor?: string | null;
+  recentSignalCount?: number;
+}
+
+export interface SignalRecommendation {
+  id: string;
+  kind: 'action' | 'reminder' | 'automation';
+  label: string;
+  reason: string;
+  confidence: number;
+  capabilityKey: string | null;
+  actionDefinitionKey: string | null;
+  actionDefinitionVersion: number | null;
+  available: boolean;
+  locked: boolean;
+}
+
+export interface SignalDetail {
+  signal: Signal | null;
+  recommendations: SignalRecommendation[];
+  history: Signal[];
+  historyNextCursor: string | null;
+  attachments: SignalAttachment[];
+  transcript: SignalTranscript | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export interface SignalAttachment {
+  attachmentKey: string;
+  filename: string;
+  mimeType: string | null;
+  status: string;
+  extractedText: string | null;
+}
+
+export interface SignalTranscript {
+  status: string;
+  text: string | null;
+  dialogue: unknown;
+  updatedAt: number | null;
 }
 
 export interface Signal {
@@ -26,7 +82,30 @@ export interface Signal {
   channel: Channel;
   at: number;
   text: string;
+  /** Immutable provider body retained for audit and parser upgrades. */
+  rawText?: string | null;
+  /** Reply history separated by the versioned ingestion parser. */
+  quotedText?: string | null;
+  signatureText?: string | null;
+  hasQuotedContent?: boolean;
+  threadMessageCount?: number;
   requiresReply: boolean;
+  title?: string;
+  source?: 'gmail' | 'quo';
+  eventType?: string;
+  direction?: 'inbound' | 'outbound';
+  actorEmail?: string | null;
+  actorPhone?: string | null;
+  topic?: string | null;
+  topicColor?: string | null;
+  urgency?: string | null;
+  urgencyColor?: string | null;
+  reviewStatus?: 'pending' | 'action_open' | 'settled';
+  reviewResolution?: string | null;
+  reviewedBy?: string | null;
+  reviewedAt?: number | null;
+  isAutomated?: boolean;
+  attachmentCount?: number;
 }
 
 export interface Reminder {
@@ -69,6 +148,40 @@ export interface ActionCard {
   title: string;
   createdAt: number;
   snoozedUntil: number;
+  status?: ActionInstanceStatus;
+  reason?: string;
+  recipient?: string;
+  subject?: string;
+  draftBody?: string | null;
+  draftRevision?: number;
+  lastError?: string | null;
+  simulatedAt?: number | null;
+  actionDefinitionKey?: string | null;
+}
+
+export type ActionInstanceStatus =
+  | 'drafting'
+  | 'awaiting_approval'
+  | 'simulated'
+  | 'failed'
+  | 'completed_external'
+  | 'dismissed';
+
+export interface ActionEvent {
+  id: number;
+  event_type: string;
+  actor_type: 'system' | 'hermes' | 'user';
+  actor_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ActionDetail {
+  action: ActionCard | null;
+  sourceSignal: Signal | null;
+  events: ActionEvent[];
+  loading: boolean;
+  error: string | null;
 }
 
 export interface LogEntry {
@@ -145,4 +258,7 @@ export interface State {
   autoTrace: AutoEvent[];
   sequences: Sequence[];
   seqInstances: SeqInstance[];
+  boardSummary?: { signalsToday: number; openActions: number; remindersDue: number };
+  signalDetails?: Record<string, SignalDetail>;
+  actionDetails?: Record<string, ActionDetail>;
 }

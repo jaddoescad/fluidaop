@@ -10,16 +10,22 @@
     "typecheck": "tsc --noEmit",
     "typecheck:server": "tsc --noEmit -p tsconfig.server.json",
     "build": "npm run typecheck && npm run typecheck:server && vite build",
+    "test:email": "tsx --test server/emailContent.test.ts server/gmailLabelSync.test.ts",
+    "backfill:email-content": "tsx scripts/backfillEmailContent.ts",
+    "test:visual": "playwright test",
+    "test:visual:update": "playwright test --update-snapshots",
     "preview": "vite preview",
     "start": "tsx server/index.ts"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
+    "email-reply-parser": "^2.3.9",
     "express": "^5.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.12",

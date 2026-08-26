@@ -1,6 +1,5 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './activities.css';
@@ -101,6 +100,14 @@ interface SignalSummary {
 
 interface SignalDetail extends SignalSummary {
   body_text: string | null;
+  currentMessageText?: string | null;
+  rawBodyText?: string | null;
+  quotedText?: string | null;
+  signatureText?: string | null;
+  hasQuotedContent?: boolean;
+  contentParserVersion?: string | null;
+  contentParseMethod?: string | null;
+  contentParseConfidence?: number | null;
   source_metadata?: Record<string, unknown>;
   attachmentEvidence?: AttachmentEvidence[];
   transcript?: CallTranscript | null;
@@ -406,7 +413,7 @@ function AttachmentClip({ count }: { count: number }) {
 // ---------- Gmail history (context only, fetched on demand) ----------
 
 function HistoryItem({ message }: { message: SignalDetail }) {
-  const body = message.body_text;
+  const body = message.currentMessageText ?? message.body_text;
   const hasBody = body !== null && body.trim() !== '';
   return (
     <li className="ac-hist-item">
@@ -612,7 +619,7 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
   // readable immediately while the detail request fills in the body
   const s = detail ?? signal;
   const subject = signalHeadline(s);
-  const body = detail?.body_text ?? null;
+  const body = detail ? detail.currentMessageText ?? detail.body_text : null;
   const hasBody = body !== null && body.trim() !== '';
   const isCall = s.event_type === 'call.completed';
   const triageLabels = s.classifications?.filter((classification) => classification.label !== null) ?? [];
@@ -752,11 +759,9 @@ function SignalDrawer({ signal, onClose }: { signal: SignalSummary; onClose: () 
 // ---------- the page ----------
 
 export function ActivitiesPage({
-  d,
   onNavigate,
   header,
 }: {
-  d: Derived;
   onNavigate: (label: string) => void;
   header: ReactNode;
 }) {
@@ -886,7 +891,7 @@ export function ActivitiesPage({
   return (
     <div className="v v-flow v-zen ac-root">
       <div className="fl-shell">
-        <SideNav d={d} active="Activity" onNav={onNavigate} />
+        <SideNav active="Activity" onNav={onNavigate} />
         <div className="fl-frame">
           {header}
           <main className="ac-main">

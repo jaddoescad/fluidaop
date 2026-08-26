@@ -1,6 +1,5 @@
 import { ReactNode, useCallback, useEffect, useState } from 'react';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import {
   HermesAgentDefinition,
   HermesAgentHistory,
@@ -16,11 +15,9 @@ import '../variants/zen.css';
 import './agents.css';
 
 export function AgentsPage({
-  d,
   onNavigate,
   header,
 }: {
-  d: Derived;
   onNavigate: (label: string) => void;
   header: ReactNode;
 }) {
@@ -102,7 +99,7 @@ export function AgentsPage({
   return (
     <div className="v v-flow v-zen ag-root">
       <div className="fl-shell">
-        <SideNav d={d} active="Agents" onNav={onNavigate} />
+        <SideNav active="Agents" onNav={onNavigate} />
         <div className="fl-frame">
           {header}
           <main className="ag-main">

@@ -140,6 +140,15 @@
 
 /* ---------- the agent roster, tucked into the side nav ---------- */
 
+.fl-nav-agents {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
 .fl-nav-label {
   font-family: var(--font-mono);
   font-size: 8.5px;
@@ -253,6 +262,14 @@
   gap: 16px;
 }
 
+/* Before the first history page arrives, keep the selected Signal and its
+   decision controls in their eventual bottom position. The auto margin
+   collapses to zero if the ticket itself is taller than the viewport. */
+.fc-body-signal-pending::before {
+  content: '';
+  margin-top: auto;
+}
+
 .fc-day {
   display: flex;
   align-items: center;
@@ -337,6 +354,18 @@
   color: #8f93a0;
 }
 
+.fd-meta-signal,
+.fd-sel-src,
+.fd-inline-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fd-meta-signal .src,
+.fd-sel-src .src,
+.fd-inline-source .src { font-size: 10px; }
+
 .fd-trig {
   font-size: 12px;
   color: #b8b3fa;
@@ -350,6 +379,122 @@
 }
 
 .fd-text b { font-weight: 650; color: #f2f3f7; }
+
+/* selected signal: one readable message, separate from its conversation */
+.fd-sel {
+  margin-left: 46px;
+  padding: 14px 16px;
+  border: 1px solid #2b2b34;
+  border-radius: 12px;
+  background: #17171d;
+}
+
+.fd-sel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.fd-sel-src {
+  color: #8f93a0;
+  font-size: 12px;
+}
+
+.fd-sel-line {
+  color: #8f93a0;
+  font-size: 12px;
+}
+
+.fd-sel-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 8px;
+}
+
+.fd-sel-tags .fl-plabel { margin: 0; }
+
+.fd-sel-subject {
+  margin: 6px 0 4px;
+  color: #f2f3f7;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.fd-sel-text {
+  max-width: 60ch;
+  color: #e7e9ee;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.fd-sel-text-reply,
+.fd-sel-text-quoted { margin: 0; }
+
+.fd-sel-text-reply { white-space: pre-wrap; }
+
+.fd-sel-quote { margin-top: 10px; }
+
+.fd-sel-quote summary {
+  width: fit-content;
+  color: #8f93a0;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.fd-sel-quote summary:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid #b8b3fa;
+  outline-offset: 2px;
+}
+
+.fd-sel-quote-hide { display: none; }
+.fd-sel-quote[open] .fd-sel-quote-show { display: none; }
+.fd-sel-quote[open] .fd-sel-quote-hide { display: inline; }
+
+.fd-sel-text-quoted {
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid #2b2b34;
+  color: #8f93a0;
+  white-space: pre-wrap;
+}
+
+.fd-sel-evidence {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #22222a;
+}
+
+.fd-sel-evidence-row {
+  display: grid;
+  gap: 3px;
+  color: #8f93a0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.fd-sel-evidence-row b { color: #e7e9ee; font-weight: 650; }
+
+/* one useful summary, followed directly by the existing decision buttons */
+.fd-dec {
+  margin-left: 46px;
+  padding: 0 2px;
+}
+
+.fd-dec-summary {
+  max-width: 60ch;
+  margin: 0;
+  color: #e7e9ee;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.fd-dec-summary b { color: #f2f3f7; font-weight: 650; }
 
 /* the work product */
 .fd-work {

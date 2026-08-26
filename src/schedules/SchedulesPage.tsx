@@ -1,6 +1,5 @@
 import { ReactNode, useEffect, useState } from 'react';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import {
   HermesAgentDefinition,
   HermesAgentHistory,
@@ -22,7 +21,6 @@ const FILTERS: { id: ScheduleFilter; label: string }[] = [
 ];
 
 export function SchedulesPage({
-  d,
   onNavigate,
   header,
   status,
@@ -30,7 +28,6 @@ export function SchedulesPage({
   error,
   onRefresh,
 }: {
-  d: Derived;
   onNavigate: (label: string) => void;
   header: ReactNode;
   status: HermesStatus | null;
@@ -103,7 +100,7 @@ export function SchedulesPage({
   return (
     <div className="v v-flow v-zen sc-root">
       <div className="fl-shell">
-        <SideNav d={d} active="Schedules" onNav={onNavigate} />
+        <SideNav active="Schedules" onNav={onNavigate} />
         <div className="fl-frame">
           {header}
           <main className="sc-main">

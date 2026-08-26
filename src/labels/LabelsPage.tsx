@@ -1,6 +1,5 @@
 import { CSSProperties, ReactNode, useEffect, useState } from 'react';
-import { Derived } from '../variants/shared';
-import { SideNav } from '../variants/kit';
+import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './labels.css';
@@ -78,11 +77,9 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function LabelsPage({
-  d,
   onNavigate,
   header,
 }: {
-  d: Derived;
   onNavigate: (label: string) => void;
   header: ReactNode;
 }) {
@@ -271,7 +268,7 @@ export function LabelsPage({
   return (
     <div className="v v-flow v-zen lb-root">
       <div className="fl-shell">
-        <SideNav d={d} active="Labels" onNav={onNavigate} />
+        <SideNav active="Labels" onNav={onNavigate} />
         <div className="fl-frame">
           {header}
           <main className="lb-main">

@@ -1,9 +1,9 @@
 import { ReactNode, useRef, useState } from 'react';
-import { CHANNEL_LABEL } from '../data';
+import { CHANNEL_LABEL } from '../channels';
 import { counters, heatOf, openReminders, personById, signalById, visibleActions } from '../engine';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, isOverdue, startOfToday } from '../time';
 import { ActionCard, Channel, Person, PersonRole, Reminder, Signal, State, StepKind } from '../types';
-import { Act } from '../useFluid';
+import { Act } from '../board/contract';
 import './shared.css';
 
 export interface VProps {
@@ -24,8 +24,9 @@ export interface Derived {
 export function derive(s: State): Derived {
   const focusPerson = s.focusId ? personById(s, s.focusId) : undefined;
   const ranked = s.people
+    .filter((p) => p.boardVisible !== false)
     .map((p) => ({ p, heat: heatOf(s, p.id) }))
-    .sort((a, b) => b.heat - a.heat || a.p.name.localeCompare(b.p.name));
+    .sort((a, b) => (a.p.boardOrder ?? Number.MAX_SAFE_INTEGER) - (b.p.boardOrder ?? Number.MAX_SAFE_INTEGER));
   const all = visibleActions(s);
   return {
     focusPerson,
@@ -54,6 +55,13 @@ export const ROLE_META: Record<PersonRole, { emoji: string; label: string; hint:
   lead: { emoji: '✨', label: 'lead', hint: 'Potential client — not booked yet' },
   client: { emoji: '🤝', label: 'client', hint: 'Active or repeat customer' },
   vendor: { emoji: '🛠️', label: 'vendor', hint: 'Someone you hire and pay — subs, suppliers' },
+  customer: { emoji: '🤝', label: 'customer', hint: 'Customer Contact' },
+  applicant: { emoji: '🧑‍🎨', label: 'applicant', hint: 'Job applicant' },
+  contractor: { emoji: '🛠️', label: 'contractor', hint: 'Contractor Contact' },
+  supplier: { emoji: '📦', label: 'supplier', hint: 'Supplier Contact' },
+  employee: { emoji: '👤', label: 'employee', hint: 'Team member' },
+  painter: { emoji: '🎨', label: 'painter', hint: 'Painter Contact' },
+  other: { emoji: '👤', label: 'contact', hint: 'Contact' },
 };
 
 export function RoleTag({ role }: { role: PersonRole }) {
@@ -156,6 +164,16 @@ export function SourceTag({ channel }: { channel: Channel }) {
     <span className={`src src-${channel}`}>
       <i className="src-dot" />
       {CHANNEL_LABEL[channel]}
+    </span>
+  );
+}
+
+export function DirectionTag({ direction }: { direction: 'inbound' | 'outbound' }) {
+  const received = direction === 'inbound';
+  return (
+    <span className="src-direction" title={received ? 'Received' : 'Sent'}>
+      <span aria-hidden="true">{received ? '↙' : '↗'}</span>
+      <span className="src-direction-label">{received ? 'Received' : 'Sent'}</span>
     </span>
   );
 }

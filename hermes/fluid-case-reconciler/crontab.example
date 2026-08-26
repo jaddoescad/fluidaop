@@ -1,0 +1,3 @@
+# Durable deterministic repair. The AI agent itself is scheduled in Hermes
+# every minute with fluid-case-reconciler-precheck.sh as its pre-check.
+47 2 * * * /opt/data/bin/fluid-case-reconcile.sh >> /opt/data/logs/fluid-case-reconcile.log 2>&1

@@ -1,3 +1,5 @@
+import { parseEmailContent } from './emailContent.js';
+
 export interface GmailActivityRow {
   source: 'gmail';
   account_email: string;
@@ -13,6 +15,14 @@ export interface GmailActivityRow {
   subject: string;
   preview: string;
   body_text: string | null;
+  raw_body_text: string | null;
+  quoted_text: string | null;
+  signature_text: string | null;
+  has_quoted_content: boolean;
+  content_parser_version: string;
+  content_parse_method: string;
+  content_parse_confidence: number;
+  content_parsed_at: string;
   occurred_at: string;
   has_attachments: boolean;
   attachment_count: number;
@@ -242,6 +252,7 @@ function toActivity(message: GmailMessage, accountEmail: string, syncedAt: strin
   const plain = findBody(message.payload, 'text/plain');
   const html = plain ? '' : findBody(message.payload, 'text/html');
   const body = normalizeBody(plain || htmlToText(html));
+  const parsedContent = parseEmailContent(body);
   const attachments = attachmentCount(message.payload);
   const subject = (headers.get('subject') ?? '(no subject)').replace(/\s+/g, ' ').trim() || '(no subject)';
   const preview = normalizeBody(decodeHtmlEntities(message.snippet ?? body)).replace(/\s+/g, ' ').slice(0, 260);
@@ -262,7 +273,17 @@ function toActivity(message: GmailMessage, accountEmail: string, syncedAt: strin
     cc_emails: cc.map((address) => address.email),
     subject,
     preview,
-    body_text: body || null,
+    // body_text is the canonical current message used by Fluid and Hermes.
+    // raw_body_text preserves Gmail's flattened body for audit/reprocessing.
+    body_text: parsedContent.currentMessageText || null,
+    raw_body_text: body || null,
+    quoted_text: parsedContent.quotedText,
+    signature_text: parsedContent.signatureText,
+    has_quoted_content: parsedContent.hasQuotedContent,
+    content_parser_version: parsedContent.parserVersion,
+    content_parse_method: parsedContent.parseMethod,
+    content_parse_confidence: parsedContent.parseConfidence,
+    content_parsed_at: syncedAt,
     occurred_at: messageDate(message, headers),
     has_attachments: attachments > 0,
     attachment_count: attachments,

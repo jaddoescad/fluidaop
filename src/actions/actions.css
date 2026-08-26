@@ -1,0 +1,38 @@
+.v.al-root { min-width: 0; }
+.al-main { flex: 1; min-height: 0; overflow: auto; }
+.al-inner { max-width: 900px; padding: 48px clamp(20px, 5vw, 56px) 64px; }
+.al-head { margin-bottom: 22px; }
+.al-head h1 { margin: 0 0 6px; color: var(--ink); font-size: 26px; letter-spacing: -.02em; }
+.al-head p { margin: 0; color: var(--dim); font-size: 13px; }
+.al-trust { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; color: var(--faint); font-size: 12px; }
+.al-trust span { padding: 4px 8px; border-radius: 5px; color: var(--gold); background: var(--warn-soft); font-weight: 650; }
+.al-error { color: var(--danger); font-size: 12px; }
+.al-state { color: var(--dim); font-size: 13px; }
+.al-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.al-row { display: grid; grid-template-columns: 36px minmax(0,1fr) auto; gap: 14px; align-items: start; padding: 18px 4px; border-bottom: 1px solid var(--line); }
+.al-row:not(.is-enabled) { opacity: .72; }
+.al-row:hover { opacity: 1; }
+.al-icon { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--line-2); border-radius: 8px; color: var(--faint); }
+.al-row.is-enabled .al-icon { color: var(--accent); border-color: color-mix(in srgb,var(--accent) 42%,var(--line)); background: var(--accent-soft); }
+.al-title-line { display: flex; align-items: center; gap: 9px; }
+.al-title-line h2 { margin: 0; color: var(--ink); font-size: 14px; font-weight: 650; }
+.al-title-line span { padding: 2px 6px; border-radius: 4px; color: var(--faint); background: var(--card); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
+.al-row.is-enabled .al-title-line span { color: var(--ok); background: var(--ok-soft); }
+.al-copy p { max-width: 620px; margin: 5px 0; color: var(--dim); font-size: 12.5px; line-height: 1.5; }
+.al-copy small { color: var(--faint); font-size: 10.5px; }
+.al-controls { display: flex; align-items: center; gap: 12px; padding-top: 5px; }
+.al-config,.al-edit-actions button { border: 0; background: transparent; color: var(--dim); font-size: 12px; cursor: pointer; }
+.al-config:hover,.al-edit-actions button:hover { color: var(--ink); }
+.al-toggle { position: relative; width: 30px; height: 17px; padding: 0; border: 1px solid var(--line-2); border-radius: 999px; background: var(--card); cursor: pointer; }
+.al-toggle::after { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--faint); content: ''; transition: transform 120ms ease; }
+.al-toggle[aria-checked='true'] { background: var(--accent-soft); border-color: var(--accent); }
+.al-toggle[aria-checked='true']::after { transform: translateX(13px); background: var(--accent); }
+.al-toggle:disabled { cursor: not-allowed; opacity: .45; }
+.al-edit { display: grid; gap: 10px; }
+.al-edit label { display: grid; gap: 4px; color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; }
+.al-edit input,.al-edit textarea { width: 100%; border: 1px solid var(--line-2); border-radius: 7px; background: var(--card); color: var(--ink); padding: 8px 10px; font: inherit; font-size: 12.5px; text-transform: none; letter-spacing: 0; outline: 0; }
+.al-edit textarea { min-height: 68px; resize: vertical; }
+.al-edit input:focus,.al-edit textarea:focus { border-color: var(--accent); }
+.al-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.al-edit-actions .is-primary { padding: 6px 12px; border-radius: 7px; background: var(--accent); color: white; }
+.al-edit-actions button:disabled { opacity: .45; cursor: default; }

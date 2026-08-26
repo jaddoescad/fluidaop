@@ -1,88 +1,134 @@
-# Fluid — signal triage
+# Fluid
 
-Every inbound client signal (SMS · Quo, Email · Gmail, Call, Form · Website) becomes
-a card. Cards are enriched into actions and reminders and triaged in one place. The
-board still uses seeded concept data, while `/connections` now has a real server-side
-Gmail OAuth connection.
+Fluid turns connected business signals into reliable operational context for Ottawa
+Painters. Gmail and Quo remain customer-facing Activity sources. Slack is read-only
+internal context attached to Jobs. The Board is backed by canonical Job cases and
+persistent work items; it does not use seeded demo cards.
 
-## Run
+## Run locally
 
 ```sh
 npm install
-npm run dev        # starts Vite and the connections API
-npm run typecheck  # tsc --noEmit
-npm run build      # checks the client + server and builds the UI
+cp .env.example .env
+npm run dev
+npm run typecheck
+npm run typecheck:server
+npm run build
 ```
 
-## Connect Gmail
+The Vite app and local API share `http://localhost:5173` in development. Browser code
+never receives provider tokens, the Supabase service role, or raw Slack data.
 
-1. In Google Cloud, enable the Gmail API and create an OAuth 2.0 **Web application**
-   client.
-2. Add `http://localhost:5173/api/oauth/google/callback` as an authorized redirect URI
-   for local development. Use the same `/api/oauth/google/callback` path on the deployed
-   origin later.
-3. Configure the OAuth audience. If `paintersottawa.com` is a Google Workspace
-   organization you control, an Internal app is the simplest durable option. An External
-   app left in Testing issues Gmail refresh tokens that expire after seven days, so move
-   it to Production before relying on unattended checks.
-4. Copy `.env.example` to `.env`, add the Google client ID and secret, and generate a
-   stable token encryption key with `openssl rand -hex 32`.
-5. Run `npm run dev`, open `/connections`, and choose **Connect Gmail**. Google must be
-   authorized as `info@paintersottawa.com`; the server rejects a different mailbox.
+## Connections
 
-The server encrypts the refresh token at rest and checks the live Gmail profile every
-five minutes. A manual **Check now** uses the same refresh-and-profile path. Disconnecting
-revokes the Google grant and removes the local credential.
+### Gmail
 
-## Sync Gmail activity
+Create a Google OAuth Web application with the Gmail modify scope and add:
 
-`/activity` is backed by the real `activities` and `gmail_sync_state` tables in Supabase.
-The first sync imports the connected account's last 30 days of mail. After that, the server
-automatically checks Gmail's incremental history every five minutes and imports only new
-messages. If Google expires the saved history cursor, Fluid safely rebuilds the recent cache.
-The import is idempotent by Gmail message ID, stores plain text rather than remote email HTML,
-matches counterparties to existing contacts by normalized email, and writes to Supabase through
-a server-authenticated Edge Function. The browser never receives a Supabase secret key.
+```text
+http://localhost:5173/api/oauth/google/callback
+```
 
-The Activity page refreshes itself while it is open. **Check now** remains available as a
-fallback, but normal operation does not require manually checking the page.
+Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and a stable
+`CONNECTION_TOKEN_ENCRYPTION_KEY`. Fluid accepts only `info@paintersottawa.com`, stores
+the refresh token encrypted, checks the connection every five minutes, and imports
+messages incrementally. Each Activity is one email; Gmail thread history is separate,
+collapsed context. Signal triage is the only classifier. A deterministic worker projects
+its topic onto new inbound messages as a single `Fluid/<topic>` Gmail label. It removes
+only superseded `Fluid/` topic labels and never sends, archives, deletes, or changes
+personal labels. Existing mail is not backfilled.
 
-Each Gmail message is its own signal in Activity. The feed uses cursor pagination and loads 30
-signals at a time. Opening a signal loads only that email; its Gmail thread is shown separately as
-optional context, collapsed by default and paginated five emails at a time. Labels and links belong
-to the selected signal, never automatically to its Gmail history. Read/unread and “needs reply”
-inbox states are intentionally not part of the interface. Fluid does not send, label, archive, or
-otherwise modify Gmail.
+### Quo
 
-## The five panes
+Quo messages and calls are ingested for the selected Sales line. Signed webhook events
+provide live updates, while bounded backfill and contact enrichment fill provider
+context without importing every workspace contact.
 
-1. **People** — sorted by relationship heat (rises with inbound activity, decays over
-   time). "Waiting on us" badge = open action. Click to isolate every pane to that
-   person; click again or use the clear-filter banner to reset.
-2. **Streams** — raw inbound signals, newest first.
-3. **Actions** — open actions only, each with provenance (the quoted source message).
-   Hover a card for Done / Snooze (snoozed items return after 45 s).
-4. **Reminders** — sorted by due date; overdue is red, upcoming is neutral. A reminder
-   that reaches its date also becomes an action.
-5. **Context** — profile, heat, tags + accept-able suggested tags, one-click
-   next-best-actions, open reminders, full history grouped by day, completed-today,
-   and the global activity log.
+### Slack
 
-## Action generators
+Create a Slack OAuth app with the read-only user scopes `channels:read`,
+`channels:history`, and `users:read`, then add:
 
-- **Reply-due** — the latest inbound signal from a person requires a response.
-- **Reminder-due** — a reminder reached its date.
-- **Staleness** — suggestions sit untouched while a thread goes quiet (5–45 min).
+```text
+http://localhost:5173/api/oauth/slack/callback
+```
 
-## Demo script
+Set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` locally. Set `SLACK_SIGNING_SECRET` as a
+Supabase Edge Function secret, then subscribe the app's `message.channels` user event
+to:
 
-On load, 8 seeded people carry weeks of history. In the first ~40 s a scripted story
-plays (history → today's signal → action), including an SMS whose "reach out in about
-three months" births a ~90-day reminder, and a pre-seeded reminder that comes due at
-45 s. After the script, plausible random signals arrive every few seconds; Pause/Resume
-in the header freezes the simulation (pending events shift forward while paused).
+```text
+https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-slack-events
+```
 
-Implementation notes: actions/reminders use stable keys (`action:{signalId}`,
-`action:rem:{id}`); a completed-set prevents resurrection; stored signals are capped at
-40 (signals still referenced by open actions/reminders are never dropped) and the log
-at 12 entries.
+Fluid automatically selects public `#job-*` channels and `#sales`. A job channel links
+only when its final numeric suffix exactly matches the Job's DripJobs proposal ID.
+`#all-ottawa-painters`, private channels, Slack writeback, and file downloads are out of
+scope. Initial backfill is resumable and bounded to the latest 15 messages per selected
+channel, with thread replies fetched only for sampled messages that have replies.
+
+## Operational cases and the fixed Board
+
+Every Job has one operational Case. Structured DripJobs, scheduling, completion, and
+payment facts outrank communication evidence. Gmail, Quo, and Slack support the case;
+Hermes interprets them but cannot override stronger facts.
+
+The Case tracks production, scheduling, assignment, and financial state independently.
+Work items use stable fingerprints and reconcile on every Case revision, so retries do
+not duplicate records and completed or cancelled production cannot be resurrected by
+old messages. Job context contains bounded, paginated evidence and work-item history.
+
+The Board keeps its fixed five-column UI: People, Signals, Actions, Reminders, and
+Automations. People and Gmail/Quo Signals are live, cursor-paginated data. Slack stays
+inside linked Job context and never appears as a global Signal. Actions, Reminders, and
+Automations show only user-created records, so earlier generated operational work items
+remain available for audit without appearing on the Board.
+
+Opening an eligible inbound Gmail Signal can show one concrete Hermes recommendation
+for an enabled capability. The user must accept it before an Action exists. The first
+working capability is **Draft email to customer**; it creates an editable draft in the
+existing Board Actions column. **Send (simulation)** records an audit event only: it
+does not call Gmail, create an outbound Activity, or claim the customer received it.
+The Signal stays unresolved until a real outbound Gmail message appears or the Action
+is cancelled. **No action needed** remains an explicit, idempotent dismissal.
+
+`/actions` is the built-in Action Library. It separates reusable Hermes capabilities
+from live Board instances. Draft email is enabled; SMS draft, follow-up reminder, and
+internal task remain disabled placeholders until their handlers exist. Playwright
+screenshot coverage locks the five-column Board layout against silent redesigns.
+
+## Hermes reconciliation
+
+`hermes/fluid-case-reconciler` contains the `case-reconciler` skill, one-minute precheck,
+and nightly deterministic reconciliation script. Hermes receives bounded canonical
+state, unresolved work, and evidence references. Its structured proposal is validated
+inside the database before any write. The first 50 proposed actions stay in shadow mode.
+
+`hermes/fluid-signal-recommender` contains the v2 Signal recommendation skill,
+one-minute precheck, and nightly deterministic repair script. It runs only after triage
+and identity resolution, uses bounded attachment/transcript, conversation, Contact, Job,
+Case, and linked Slack context, and returns zero or one enabled Action recommendation.
+The first 25 eligible Gmail Signals remain shadow-only until their quality is reviewed.
+
+`hermes/fluid-action-runner` contains the separate drafting skill and one-minute
+precheck. It receives only user-accepted Actions and returns the email body. Fluid owns
+and locks the recipient, Gmail thread, and subject, then rejects stale completions so an
+agent result cannot overwrite a user's newer edit.
+
+## Supabase
+
+Migrations live in `supabase/migrations`. The deployed Edge Functions are:
+
+- `fluid-gmail-activities` — server-only Gmail activity ingestion and Signal read models.
+- `fluid-gmail-label-sync` — server-only leased outbox for deterministic Gmail labels.
+- `fluid-slack-events` — custom Slack signature verification and event ingestion.
+- `fluid-operational-context` — authenticated Board, Job context, work-item resolution,
+  and reconciliation RPC bridge.
+- `fluid-real-board` — authenticated, cursor-paginated five-column Board read models
+  and the idempotent no-action settlement endpoint.
+- `fluid-signal-recommender` — server-only Hermes claim, completion, failure, and
+  reconciliation bridge.
+- `fluid-action-runner` — server-only leased drafting jobs and revision-safe completion.
+
+New raw-provider and reconciliation tables are server-only with RLS enabled. Manager
+read access is limited to the public case/work-item projections required by the app.

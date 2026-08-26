@@ -1,15 +1,16 @@
-import { ReactNode, useEffect, useRef, useState } from 'react';
-import { CHANNEL_LABEL } from '../data';
+import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { CHANNEL_LABEL } from '../channels';
 import { agentFor } from '../engine';
 import { HermesStatus } from '../agents/hermes';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, MIN } from '../time';
 import { ActionCard, AgentRun, Person, Signal, State } from '../types';
-import { Act } from '../useFluid';
+import { Act } from '../board/contract';
 import {
   Avatar,
   Burst,
   classifyIntent,
   Derived,
+  DirectionTag,
   DueChip,
   Empty,
   firstNameOf,
@@ -137,11 +138,20 @@ export function playsFor(sig: Signal, s: State): PlaySpec[] {
 // ---------- settled state: every signal declares whether it still needs
 // you, and if not, exactly HOW it was handled ----------
 
-export type SigStatus = { key: 'open' | 'rem' | 'auto' | 'done' | 'quiet'; icon: string; label: string };
+export type SigStatus = { key: 'open' | 'action' | 'rem' | 'auto' | 'done' | 'quiet'; icon: string; label: string };
 
 export function statusOf(s: State, sig: Signal): SigStatus {
+  if (sig.reviewStatus === 'pending') return { key: 'open', icon: '●', label: 'needs you' };
+  if (sig.reviewStatus === 'action_open') return { key: 'action', icon: '✦', label: 'action open' };
+  if (sig.reviewStatus === 'settled') {
+    if (sig.direction === 'outbound') return { key: 'quiet', icon: '→', label: 'sent' };
+    if (sig.reviewResolution === 'shadow_only') return { key: 'quiet', icon: '◌', label: 'calibrating' };
+    if (sig.reviewResolution === 'no_action') return { key: 'quiet', icon: '✓', label: 'dismissed' };
+    if (sig.isAutomated) return { key: 'quiet', icon: '·', label: 'system context' };
+    return { key: 'quiet', icon: '·', label: 'reviewed' };
+  }
   if (s.actions.some((a) => a.sourceSignalId === sig.id)) {
-    return { key: 'open', icon: '●', label: 'needs you' };
+    return { key: 'action', icon: '✦', label: 'action open' };
   }
   const rem = s.reminders.find((r) => r.sourceSignalId === sig.id);
   if (rem && rem.doneAt === null) return { key: 'rem', icon: '⏰', label: 'reminder set' };
@@ -184,15 +194,19 @@ export function isUrgent(s: State, personId: string): boolean {
 
 // ---------- one label per person, ranked purely by urgency ----------
 
-export type PersonLabel = { text: string; tone: 'danger' | 'gold' | 'warn' | 'ok' | 'lead' | 'quiet' };
+export type PersonLabel = {
+  text: string;
+  tone: 'danger' | 'gold' | 'warn' | 'ok' | 'lead' | 'quiet';
+  color?: string | null;
+};
 
-export function urgencyLabel(s: State, d: Derived, p: Person): PersonLabel {
-  if (isUrgent(s, p.id)) return { text: '🚨 urgent', tone: 'danger' };
-  if (s.reminders.some((r) => r.personId === p.id && r.doneAt === null && r.dueAt <= s.now)) {
-    return { text: '⏰ overdue', tone: 'danger' };
-  }
-  if (d.waiting.has(p.id)) return { text: 'waiting on us', tone: 'warn' };
-  return { text: 'all settled', tone: 'quiet' };
+export function urgencyLabel(p: Person): PersonLabel | null {
+  if (!p.urgency) return null;
+  return { text: p.urgency, tone: 'quiet', color: p.urgencyColor };
+}
+
+function canonicalLabelStyle(color: string | null | undefined): CSSProperties | undefined {
+  return color ? ({ ['--label-color' as string]: color } as CSSProperties) : undefined;
 }
 
 // ---------- the action catalog: company actions are precreated, not authored ad hoc ----------
@@ -235,7 +249,7 @@ export function personStory(s: State, p: Person): StoryBeat[] {
   const sigs = s.signals.filter((x) => x.personId === p.id);
   const beats: StoryBeat[] = [];
   sigs.forEach((sig, idx) => {
-    const intent = classifyIntent(sig);
+    const intent = sig.source ? null : classifyIntent(sig);
     let icon = '💬';
     let text = 'Shared an update';
     let tone: PersonLabel['tone'] = 'quiet';
@@ -524,30 +538,54 @@ export function PeopleCol({
   act,
   d,
   onPick,
+  onLoadMore,
+  totalCount,
+  hasMore = false,
+  loading = false,
 }: {
   s: State;
   act: Act;
   d: Derived;
   onPick?: (p: Person) => void;
+  onLoadMore?: () => void;
+  totalCount?: number;
+  hasMore?: boolean;
+  loading?: boolean;
 }) {
+  const brightPersonIds = new Set(
+    s.signals
+      .filter((signal) => ['open', 'action'].includes(statusOf(s, signal).key))
+      .map((signal) => signal.personId),
+  );
+  const rankedPeople = d.ranked.slice().sort((a, b) =>
+    Number(brightPersonIds.has(b.p.id)) - Number(brightPersonIds.has(a.p.id))
+  );
+
   return (
     <section className="pane fl-people">
-      <PaneHead title="People" count={d.ranked.length} />
+      <PaneHead title="People" count={totalCount ?? d.ranked.length} />
       {s.focusId && (
         <button className="fl-clear" onClick={() => act.focus(null)}>
           ✕ Show everyone
         </button>
       )}
-      <div className="pane-scroll">
-        {d.ranked.map(({ p }) => {
+      <div
+        className="pane-scroll"
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          if (hasMore && !loading && node.scrollHeight - node.scrollTop - node.clientHeight < 180) onLoadMore?.();
+        }}
+      >
+        {rankedPeople.map(({ p }) => {
           const focused = s.focusId === p.id;
           const first = s.signals.find((x) => x.personId === p.id);
           const origin = first ? SHORT_CHANNEL[first.channel] : p.kind;
-          const label = urgencyLabel(s, d, p);
+          const label = urgencyLabel(p);
+          const hasBrightSignal = brightPersonIds.has(p.id);
           return (
             <button
               key={p.id}
-              className={`fl-person${focused ? ' focused' : ''}${d.waiting.has(p.id) ? ' owed' : ''}`}
+              className={`fl-person ${hasBrightSignal ? 'signal-bright' : 'signal-dim'}${focused ? ' focused' : ''}${d.waiting.has(p.id) ? ' owed' : ''}`}
               onClick={() => (onPick ? onPick(p) : act.focus(focused ? null : p.id))}
               title={d.waiting.has(p.id) ? 'waiting on us' : undefined}
             >
@@ -558,12 +596,17 @@ export function PeopleCol({
                 </span>
                 <span className="fl-plabels">
                   <RoleTag role={p.role} />
-                  <em className={`fl-plabel tone-${label.tone}`}>{label.text}</em>
+                  {label && (
+                    <em className="fl-plabel canonical-label" style={canonicalLabelStyle(label.color)}>
+                      {label.text}
+                    </em>
+                  )}
                 </span>
               </span>
             </button>
           );
         })}
+        {loading && <Empty>Loading Contacts…</Empty>}
       </div>
     </section>
   );
@@ -571,6 +614,7 @@ export function PeopleCol({
 
 /** A short SUMMARY of what the signal is about — not the message re-worded. */
 export function signalTitle(sig: Signal): string {
+  if (sig.title && sig.title.trim() && sig.title !== '(no subject)') return sig.title;
   const t = sig.text;
   const intent = classifyIntent(sig);
   const amt = /\$[\d,]+(?:\.\d+)?/.exec(t)?.[0];
@@ -634,34 +678,57 @@ export function signalTitle(sig: Signal): string {
   }
 }
 
+function formatSignalPhone(value: string): string {
+  const digits = value.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `+1 ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+  }
+  return value;
+}
+
 export function SignalsCol({
   s,
   act,
   d,
   onOpen,
   selId,
+  view,
+  onView,
+  onLoadMore,
+  hasMore = false,
+  loading = false,
 }: {
   s: State;
   act: Act;
   d: Derived;
   onOpen: (sig: Signal) => void;
   selId?: string | null;
+  view?: 'all' | 'open';
+  onView?: (view: 'all' | 'open') => void;
+  onLoadMore?: () => void;
+  hasMore?: boolean;
+  loading?: boolean;
 }) {
-  const [view, setView] = useState<'all' | 'open'>('all');
+  const [localView, setLocalView] = useState<'all' | 'open'>('all');
+  const activeView = view ?? localView;
+  const setView = (next: 'all' | 'open') => {
+    setLocalView(next);
+    onView?.(next);
+  };
   const fname = d.focusPerson?.name ?? null;
   const clear = () => act.focus(null);
   const stById = new Map(d.streams.map((sig) => [sig.id, statusOf(s, sig)]));
-  const openSigs = d.streams.filter((sig) => stById.get(sig.id)?.key === 'open');
-  const settledSigs = d.streams.filter((sig) => stById.get(sig.id)?.key !== 'open');
+  const openSigs = d.streams.filter((sig) => ['open', 'action'].includes(stById.get(sig.id)?.key ?? ''));
+  const settledSigs = d.streams.filter((sig) => !['open', 'action'].includes(stById.get(sig.id)?.key ?? ''));
 
   const renderCard = (sig: Signal) => {
     const p = s.people.find((x) => x.id === sig.personId);
     const fresh = s.now - sig.at < 4000;
-    const intent = classifyIntent(sig);
+    const intent = sig.source ? null : classifyIntent(sig);
     const meta = intent ? INTENT_META[intent] : null;
     const money = intent === 'ready' || intent === 'paid';
     const st = stById.get(sig.id) ?? statusOf(s, sig);
-    const settled = st.key !== 'open';
+    const settled = !['open', 'action'].includes(st.key);
     return (
       <article
         key={sig.id}
@@ -669,14 +736,18 @@ export function SignalsCol({
         onClick={() => onOpen(sig)}
       >
         {money && fresh && <Burst emojis={['💰', '✨', '🎉']} />}
+        <div className="fl-sig-head">
+          <span className="fl-sig-identity">
+            <span className="fl-sig-name">{p?.name ?? 'Unknown'}</span>
+            {sig.actorPhone ? <span className="fl-sig-phone">{formatSignalPhone(sig.actorPhone)}</span> : null}
+          </span>
+          {p && <RoleTag role={p.role} />}
+          {st.key === 'action' && <span className="fl-sig-status">Draft in Actions</span>}
+        </div>
         <h3 className="fl-act-title">
           {meta?.emoji ?? (sig.channel === 'call' ? '📞' : sig.channel === 'form' ? '🌐' : '💬')} {signalTitle(sig)}
         </h3>
         <p className="card-text">{sig.text}</p>
-        <div className="fl-act-person">
-          {p?.name ?? '—'}
-          {p && <RoleTag role={p.role} />}
-        </div>
         <div className="card-sub">
           <SourceTag channel={sig.channel} />
           <span className="card-age">{fmtAge(sig.at, s.now)}</span>
@@ -694,16 +765,22 @@ export function SignalsCol({
         onClear={clear}
         extra={
           <span className="fl-viewtoggle">
-            <button className={view === 'open' ? 'on' : ''} onClick={() => setView('open')}>
+            <button className={activeView === 'open' ? 'on' : ''} onClick={() => setView('open')}>
               needs you · {openSigs.length}
             </button>
-            <button className={view === 'all' ? 'on' : ''} onClick={() => setView('all')}>
+            <button className={activeView === 'all' ? 'on' : ''} onClick={() => setView('all')}>
               all
             </button>
           </span>
         }
       />
-      <div className="pane-scroll">
+      <div
+        className="pane-scroll"
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          if (hasMore && !loading && node.scrollHeight - node.scrollTop - node.clientHeight < 240) onLoadMore?.();
+        }}
+      >
         {/* unsettled on top — never buried under settled cards */}
         {groupStreamByDay(openSigs, s.now).map((g) => (
           <div key={g.label} className="sday">
@@ -714,7 +791,7 @@ export function SignalsCol({
         {openSigs.length === 0 && (
           <Empty>Nothing needs you right now{fname ? ` from ${fname}` : ''} — all settled. 🏁</Empty>
         )}
-        {view === 'all' && settledSigs.length > 0 && (
+        {activeView === 'all' && settledSigs.length > 0 && (
           <>
             <h4 className="autos-h">Settled</h4>
             {groupStreamByDay(settledSigs, s.now).map((g) => (
@@ -725,6 +802,7 @@ export function SignalsCol({
             ))}
           </>
         )}
+        {loading && <Empty>Loading Signals…</Empty>}
       </div>
     </section>
   );
@@ -896,7 +974,8 @@ export function PlaybooksCol({ s, act, onOpen }: { s: State; act: Act; onOpen?: 
           <button
             className={`fl-gear${cfg ? ' on' : ''}`}
             onClick={() => setCfg(!cfg)}
-            title={cfg ? 'Back to what’s running' : 'Configure automations'}
+            disabled={s.sequences.length === 0}
+            title={s.sequences.length === 0 ? 'Automation creation is locked in v1' : cfg ? 'Back to what’s running' : 'Configure automations'}
           >
             ⚙
           </button>
@@ -943,7 +1022,7 @@ export function PlaybooksCol({ s, act, onOpen }: { s: State; act: Act; onOpen?: 
         ) : (
           <>
             {running === 0 && (
-              <Empty>Nothing running right now — automations start when a trigger matches, or from a signal’s play panel.</Empty>
+              <Empty>No user-created automations yet.</Empty>
             )}
             {s.seqInstances
               .filter((i) => i.doneAt === null)
@@ -1035,6 +1114,7 @@ const NAV_MAIN: { icon: string; label: string }[] = [
   { icon: '📡', label: 'Board' },
   { icon: '🤖', label: 'Agents' },
   { icon: '🧩', label: 'Skills' },
+  { icon: '✓', label: 'Actions' },
   { icon: '⚡', label: 'Activity' },
   { icon: '🏷️', label: 'Labels' },
   { icon: '◷', label: 'Schedules' },
@@ -1069,7 +1149,7 @@ export function SideNav({
   active?: string;
   onNav?: (label: string) => void;
 }) {
-  const LIVE = ['Board', 'Agents', 'Skills', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts'];
+  const LIVE = ['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts'];
   const item = (n: { icon: string; label: string }) => {
     const on = n.label === active;
     const live = onNav !== undefined && LIVE.includes(n.label);
@@ -1092,7 +1172,7 @@ export function SideNav({
         <span className="fl-mark" />
         <div className="fl-nav-names">
           <b className="fl-nav-logo">FLUID</b>
-          <span className="fl-nav-co">Meridian Painting Co.</span>
+          <span className="fl-nav-co">Ottawa Painters</span>
         </div>
       </div>
       {NAV_MAIN.map(item)}
@@ -1188,9 +1268,9 @@ export function KitHeader({
         🔔
         {d.c.remindersDue > 0 && <i className="fl-bell-dot" />}
       </button>
-      <div className="fl-user" title="Sam Ortiz — owner, Meridian Painting Co.">
-        <Avatar name="Sam Ortiz" />
-        <span className="fl-user-name">Sam</span>
+      <div className="fl-user" title="Jad — Ottawa Painters">
+        <Avatar name="Jad" />
+        <span className="fl-user-name">Jad</span>
       </div>
     </header>
   );
@@ -1271,7 +1351,7 @@ export function DecidePopup({
 
   if (!person || !anchor) return null;
 
-  const labels = [urgencyLabel(s, d, person)];
+  const label = urgencyLabel(person);
   const summary = personSummary(s, d, person);
   // obligations merge open + recently completed so nothing vanishes on Done
   const personActRows: { a: ActionCard; doneAt: number | null }[] = [
@@ -1303,11 +1383,11 @@ export function DecidePopup({
             <div className="fl-mega-row">
               <h2 className="fl-mega-name">{person.name}</h2>
               <RoleTag role={person.role} />
-              {labels.map((l) => (
-                <em key={l.text} className={`fl-plabel tone-${l.tone}`}>
-                  {l.text}
+              {label && (
+                <em className="fl-plabel canonical-label" style={canonicalLabelStyle(label.color)}>
+                  {label.text}
                 </em>
-              ))}
+              )}
             </div>
             <div className="fl-mega-kind">
               {person.company ? `${person.company} · ` : ''}
@@ -1547,12 +1627,12 @@ export function DecidePopup({
                     </div>
                   </div>
                 ))}
-                {labels[0] && (
-                  <div className={`fk-beat fk-beat-now tone-${labels[0].tone}`}>
+                {label && (
+                  <div className={`fk-beat fk-beat-now tone-${label.tone}`}>
                     <span className="fk-beat-node">◉</span>
                     <div className="fk-beat-body">
                       <span className="fk-beat-text">
-                        <b>Now</b> — {labels[0].text}
+                        <b>Now</b> — {label.text}
                         {personActions[0] ? `: ${personActions[0].title}` : ''}
                       </span>
                     </div>
@@ -1581,6 +1661,7 @@ export function DecidePopup({
 // ---------- the run inspector: what the agent is doing with an action ----------
 
 export const AGENT_EMOJI: Record<string, string> = {
+  Hermes: '✦',
   Scout: '📡',
   Scribe: '✉️',
   Chaser: '⏰',
@@ -1665,24 +1746,34 @@ function draftFor(run: AgentRun, a: ActionCard, s: State): { label: string; text
 
 export type RunSubject = { type: 'action' | 'reminder' | 'auto' | 'signal'; id: string };
 
+function splitSelectedEmailBody(signal: Signal): { reply: string; quoted: string | null } {
+  return { reply: signal.text, quoted: signal.quotedText?.trim() || null };
+}
+
 export function RunPopup({
   s,
   act,
   subject,
   onClose,
+  onLoadMoreHistory,
+  onOpenAction,
 }: {
   s: State;
   act: Act;
   subject: RunSubject;
   onClose: () => void;
+  onLoadMoreHistory?: (signalId: string) => void;
+  onOpenAction?: (actionId: string) => void;
 }) {
   const [text, setText] = useState('');
   const [notes, setNotes] = useState<{ who: 'you' | 'agent' | 'sys'; text: string }[]>([]);
-  const [played, setPlayed] = useState<ReadonlySet<string>>(new Set());
+  const [settling, setSettling] = useState(false);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
   useEffect(() => {
     setNotes([]);
     setText('');
-    setPlayed(new Set());
+    setSettling(false);
+    setAcceptingId(null);
   }, [subject.type, subject.id]);
 
   useEffect(() => {
@@ -1706,13 +1797,66 @@ export function RunPopup({
 
   const doneAt = a ? s.completed[subject.id] ?? null : null;
   const run = a ? s.runs[subject.id] : undefined;
-  const ctx = personId ? s.signals.filter((x) => x.personId === personId) : [];
+  const signalDetail = sg ? s.signalDetails?.[sg.id] : undefined;
+  const selectedSignal = signalDetail?.signal ?? sg;
+  const ctx = subject.type === 'signal' && sg
+    ? [...new Map((signalDetail?.history ?? []).map((item) => [item.id, item])).values()]
+      .sort((left, right) => left.at - right.at || left.id.localeCompare(right.id))
+    : personId ? s.signals.filter((x) => x.personId === personId) : [];
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const historyScrollAnchorRef = useRef<{
+    historyId: string | null;
+    historyLength: number;
+    viewportTop: number;
+  } | null>(null);
+  const previousHistoryLengthRef = useRef(0);
+  const previousSubjectRef = useRef('');
+  const subjectKey = `${subject.type}:${subject.id}`;
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    if (previousSubjectRef.current !== subjectKey) {
+      previousSubjectRef.current = subjectKey;
+      previousHistoryLengthRef.current = ctx.length;
+      historyScrollAnchorRef.current = null;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+
+    const anchor = historyScrollAnchorRef.current;
+    if (anchor && ctx.length > anchor.historyLength) {
+      const anchoredMessage = anchor.historyId === null
+        ? null
+        : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+          .find((item) => item.dataset.historyId === anchor.historyId);
+      if (anchoredMessage) {
+        // Earlier messages are inserted above the existing conversation. Keep
+        // the first previously loaded message at the same viewport position.
+        el.scrollTop += anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
+      }
+      historyScrollAnchorRef.current = null;
+    } else if (anchor && signalDetail?.loading === false) {
+      // The request completed without adding messages (for example, an error).
+      historyScrollAnchorRef.current = null;
+    } else if (
+      subject.type === 'signal' &&
+      previousHistoryLengthRef.current === 0 &&
+      ctx.length > 0
+    ) {
+      // History is inserted above the selected Signal. Pin the bottom during
+      // layout so the user never sees the primary ticket jump between frames.
+      el.scrollTop = el.scrollHeight;
+    }
+    previousHistoryLengthRef.current = ctx.length;
+  }, [ctx.length, signalDetail?.loading, subject.type, subjectKey]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [subject.id, notes.length, run?.status, doneAt, ctx.length, r?.dueAt, inst?.doneAt]);
+  }, [subject.id, subject.type, notes.length, run?.status, doneAt, r?.dueAt, inst?.doneAt]);
 
   if (
     !personId ||
@@ -1733,7 +1877,7 @@ export function RunPopup({
       : subject.type === 'auto'
         ? 'Runner'
         : subject.type === 'signal'
-          ? 'Scout'
+          ? 'Hermes'
           : a
             ? run?.agent ?? agentFor(s, a)
             : null;
@@ -1790,20 +1934,19 @@ export function RunPopup({
   const remActionOpen = r ? s.actions.some((x) => x.id === `action:rem:${r.id}`) : false;
   const nextStep = inst && seq ? seq.steps[inst.stepIdx] : undefined;
 
-  // ----- signal state: what Scout knows + what it suggests -----
-  const sgStatus = sg ? statusOf(s, sg) : null;
-  const plays = sg && sgStatus?.key === 'open' ? playsFor(sg, s).filter((pl) => !played.has(pl.key)) : [];
+  // ----- signal state: stored review state + locked Hermes recommendations -----
+  const sgStatus = selectedSignal ? statusOf(s, selectedSignal) : null;
+  const recommendations = sg && sgStatus?.key === 'open' ? signalDetail?.recommendations ?? [] : [];
+  const laterOutboundCandidates = selectedSignal
+    ? ctx.filter((item) => (
+        item.direction === 'outbound' &&
+        item.at > selectedSignal.at &&
+        item.at - selectedSignal.at <= 14 * DAY
+      ))
+    : [];
+  const laterOutbound = laterOutboundCandidates[laterOutboundCandidates.length - 1];
   const sgReplyAction = sg ? s.actions.find((x) => x.sourceSignalId === sg.id && x.kind === 'reply') : undefined;
   const sgReplyRun = sgReplyAction ? s.runs[sgReplyAction.id] : undefined;
-
-  const runPlay = (pl: PlaySpec) => {
-    if (!sg) return;
-    if (pl.kind === 'reminder') act.createReminder(sg.id, pl.note, pl.dueInMs);
-    else if (pl.kind === 'action') act.createAction(sg.id, pl.title);
-    else act.enrollSeq(sg.id, pl.seqId);
-    setPlayed((prev) => new Set(prev).add(pl.key));
-    setNotes((n) => [...n, { who: 'you', text: pl.label }, { who: 'agent', text: 'Queued ✓' }]);
-  };
 
   // ----- header title + status -----
   const title = a ? a.title : r ? r.note : sg ? signalTitle(sg) : seq?.name ?? '';
@@ -1811,13 +1954,15 @@ export function RunPopup({
     subject.type === 'signal'
       ? sgStatus?.key === 'open'
         ? { key: 'review', word: 'needs a decision' }
+        : sgStatus?.key === 'action'
+          ? { key: 'run', word: 'Action open' }
         : sgStatus?.key === 'rem'
           ? { key: 'run', word: 'reminder set' }
           : sgStatus?.key === 'auto'
             ? { key: 'run', word: 'automation running' }
             : sgStatus?.key === 'done'
               ? { key: 'ok', word: sgStatus.label }
-              : { key: 'queued', word: 'no action needed' }
+            : { key: 'queued', word: sgStatus?.label ?? 'reviewed' }
       : subject.type === 'reminder'
       ? r?.doneAt !== null && r?.doneAt !== undefined
         ? { key: 'ok', word: 'done' }
@@ -1888,16 +2033,27 @@ export function RunPopup({
     );
   };
 
-  const youTurn = (key: string, t: string) => {
+  const youTurn = (key: string, t: string, signal?: Signal) => {
     const cont = lastSpeaker === 'you';
     lastSpeaker = 'you';
     return (
-      <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={key}>
-        <span className="fd-avatar">{!cont && <Avatar name="Sam Ortiz" />}</span>
+      <div
+        className={`fd-turn${cont ? ' fd-cont' : ''}`}
+        key={key}
+        data-history-id={signal?.id}
+      >
+        <span className="fd-avatar">{!cont && <Avatar name="Jad" />}</span>
         <div className="fd-main">
           {!cont && (
             <div className="fd-name">
               <b>You</b>
+              {signal && (
+                <span className="fd-meta fd-meta-signal">
+                  <SourceTag channel={signal.channel} />
+                  <DirectionTag direction="outbound" />
+                  <span>· {fmtAge(signal.at, s.now)}</span>
+                </span>
+              )}
             </div>
           )}
           <div className="fd-text">{t}</div>
@@ -1917,14 +2073,16 @@ export function RunPopup({
     lastSpeaker = 'them';
     lastSigMeta = { channel: sig.channel, at: sig.at };
     return (
-      <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={sig.id}>
+      <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={sig.id} data-history-id={sig.id}>
         <span className="fd-avatar">{!cont && <Avatar name={p?.name ?? '—'} />}</span>
         <div className="fd-main">
           {!cont && (
             <div className="fd-name">
               <b>{p?.name ?? '—'}</b>
-              <span className="fd-meta">
-                {CHANNEL_LABEL[sig.channel]} · {fmtAge(sig.at, s.now)}
+              <span className="fd-meta fd-meta-signal">
+                <SourceTag channel={sig.channel} />
+                <DirectionTag direction={sig.direction ?? 'inbound'} />
+                <span>· {fmtAge(sig.at, s.now)}</span>
               </span>
               {isTrig && <span className="fd-trig">{subject.type === 'signal' ? 'this one' : 'triggered this'}</span>}
             </div>
@@ -1968,6 +2126,57 @@ export function RunPopup({
     }
   };
 
+  const loadEarlierHistory = () => {
+    if (!sg || !onLoadMoreHistory || signalDetail?.loading) return;
+    const el = scrollRef.current;
+    if (el) {
+      const firstHistoryId = ctx[0]?.id ?? null;
+      const firstHistoryMessage = firstHistoryId === null
+        ? null
+        : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+          .find((item) => item.dataset.historyId === firstHistoryId);
+      historyScrollAnchorRef.current = {
+        historyId: firstHistoryId,
+        historyLength: ctx.length,
+        viewportTop: firstHistoryMessage?.getBoundingClientRect().top ?? el.getBoundingClientRect().top,
+      };
+    }
+    onLoadMoreHistory(sg.id);
+  };
+
+  const selectedBody = selectedSignal ? splitSelectedEmailBody(selectedSignal) : null;
+  const selectedHasEvidence = Boolean(
+    signalDetail?.attachments.length || signalDetail?.transcript?.text,
+  );
+
+  let signalDecisionSummary: ReactNode = null;
+  if (subject.type === 'signal' && sg && selectedSignal && sgStatus) {
+    signalDecisionSummary = sgStatus.key === 'open'
+      ? recommendations[0]?.reason ?? (!signalDetail?.loading
+        ? 'Hermes has no suggested action. You still need to decide whether this Signal needs one.'
+        : null)
+      : sgStatus.key === 'action'
+        ? <>A reply draft is ready in Actions.</>
+        : sgStatus.key === 'rem'
+          ? <>A reminder is set for this Signal. Chaser has it.</>
+          : sgStatus.key === 'auto'
+            ? <>An automation is running for this Signal. Runner has it.</>
+            : sgStatus.key === 'done'
+              ? <>{sgStatus.label} ✓ Nothing is left here.</>
+              : selectedSignal.direction === 'outbound'
+                ? <>This was sent by your team. Wait for a new inbound reply; Fluid will review that reply as its own Signal.</>
+                : selectedSignal.reviewResolution === 'no_action'
+                  ? <>You marked this Signal “No action needed”{selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}. No follow-up will be created.</>
+                  : laterOutbound
+                    ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. Wait for the contact&apos;s next response.</>
+                    : selectedSignal.reviewResolution === 'performed_external'
+                      ? <>Your team handled this through a real provider message.</>
+                      : <>No handling evidence is available for this Signal.</>;
+  }
+  const signalDecision = signalDecisionSummary ? (
+    <article className="fd-dec"><p className="fd-dec-summary">{signalDecisionSummary}</p></article>
+  ) : null;
+
   return (
     <div className="fl-scrim" onClick={onClose}>
       <div className="fc" onClick={(e) => e.stopPropagation()}>
@@ -1989,21 +2198,82 @@ export function RunPopup({
           </button>
         </header>
 
-        <div className="fc-body" ref={scrollRef}>
+        <div
+          className={`fc-body${subject.type === 'signal' && ctx.length === 0 ? ' fc-body-signal-pending' : ''}`}
+          ref={scrollRef}
+        >
           {day('d-hist', `History with ${first}`)}
-          {ctx.map(themTurn)}
-          {day('d-agent', agent ? `${agent} on “${title}”` : 'Your move')}
-
-          {/* ================= signal: Scout triaged it ================= */}
-          {subject.type === 'signal' && sg && sgStatus && (
+          {subject.type === 'signal' && sg && signalDetail?.historyNextCursor &&
+            sys('history-more', (
+              <button className="fc-chip" onClick={loadEarlierHistory} disabled={signalDetail.loading}>
+                {signalDetail.loading ? 'Loading history…' : 'Load earlier history'}
+              </button>
+            ))}
+          {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
+          {subject.type === 'signal' && selectedSignal && (
             <>
-              {agentTurn(
-                'g-in',
-                <>
-                  This came in {fmtAge(sg.at, s.now)} via {CHANNEL_LABEL[sg.channel]} — reads like{' '}
-                  <b>{classifyIntent(sg) ? INTENT_META[classifyIntent(sg)!].label.toLowerCase() : 'a general update'}</b>.
-                </>,
-              )}
+              {day('d-selected', 'Selected Signal')}
+              <article className="fd-sel">
+                <div className="fd-sel-head">
+                  <span className="fd-sel-src">
+                    <SourceTag channel={selectedSignal.channel} />
+                    <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
+                    <span>· {fmtAge(selectedSignal.at, s.now)}</span>
+                  </span>
+                  <span className="fd-trig">this one</span>
+                </div>
+                {(selectedSignal.topic || selectedSignal.urgency) && (
+                  <div className="fd-sel-tags" aria-label="Signal labels">
+                    {selectedSignal.topic && (
+                      <span className="fl-plabel canonical-label" style={canonicalLabelStyle(selectedSignal.topicColor)}>
+                        {selectedSignal.topic}
+                      </span>
+                    )}
+                    {selectedSignal.urgency && (
+                      <span className="fl-plabel canonical-label" style={canonicalLabelStyle(selectedSignal.urgencyColor)}>
+                        {selectedSignal.urgency}
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div className="fd-sel-line">
+                  {selectedSignal.direction === 'outbound' ? 'To' : 'From'} {p?.name ?? '—'}
+                </div>
+                {selectedSignal.channel === 'email' && (
+                  <h3 className="fd-sel-subject">{selectedSignal.title?.trim() || '(no subject)'}</h3>
+                )}
+                <div className="fd-sel-text">
+                  <p className="fd-sel-text-reply">{selectedBody?.reply ?? selectedSignal.text}</p>
+                  {selectedBody?.quoted && (
+                    <details className="fd-sel-quote">
+                      <summary><span className="fd-sel-quote-show">Show quoted history</span><span className="fd-sel-quote-hide">Hide quoted history</span></summary>
+                      <p className="fd-sel-text-quoted">{selectedBody.quoted}</p>
+                    </details>
+                  )}
+                </div>
+                {selectedHasEvidence && (
+                  <div className="fd-sel-evidence">
+                    {signalDetail?.attachments.map((attachment) => (
+                      <div className="fd-sel-evidence-row" key={attachment.attachmentKey}>
+                        <span>Attachment: <b>{attachment.filename}</b> · {attachment.status}</span>
+                        {attachment.extractedText ? <span>{attachment.extractedText.slice(0, 800)}</span> : null}
+                      </div>
+                    ))}
+                    {signalDetail?.transcript?.text && (
+                      <div className="fd-sel-evidence-row"><span><b>Call transcript:</b> {signalDetail.transcript.text.slice(0, 1_500)}</span></div>
+                    )}
+                  </div>
+                )}
+              </article>
+            </>
+          )}
+          {day('d-agent', subject.type === 'signal' ? 'Summary & next step' : agent ? `${agent} on “${title}”` : 'Your move')}
+
+          {/* ================= signal: Hermes recommends; the user decides ================= */}
+          {subject.type === 'signal' && sg && selectedSignal && sgStatus && (
+            <>
+              {signalDetail?.loading && agentTurn('g-loading', <>Loading the bounded conversation and operational context…</>)}
+              {signalDetail?.error && agentTurn('g-error', <>I could not load trustworthy context: {signalDetail.error}</>)}
               {sgStatus.key === 'open' && sgReplyRun && (
                 agentTurn(
                   'g-scribe',
@@ -2018,17 +2288,7 @@ export function RunPopup({
                   ),
                 )
               )}
-              {sgStatus.key === 'open' ? (
-                plays.length > 0 && agentTurn('g-ask', <>Beyond that, here’s what I’d queue — pick any:</>)
-              ) : sgStatus.key === 'rem' ? (
-                agentTurn('g-rem', <>Settled — a reminder is set for this one. Chaser has it.</>)
-              ) : sgStatus.key === 'auto' ? (
-                agentTurn('g-auto', <>Settled — an automation is running on it. Runner has it.</>)
-              ) : sgStatus.key === 'done' ? (
-                agentTurn('g-done', <>Settled — {sgStatus.label} ✓. Nothing left here.</>)
-              ) : (
-                agentTurn('g-quiet', <>Just context — no action needed on this one.</>)
-              )}
+              {signalDecision}
             </>
           )}
 
@@ -2192,12 +2452,57 @@ export function RunPopup({
           )}
 
           <div className="fc-replies">
-            {subject.type === 'signal' &&
-              plays.map((pl) => (
-                <button key={pl.key} className="fc-chip" onClick={() => runPlay(pl)}>
-                  {pl.icon} {pl.label}
+            {subject.type === 'signal' && sg && sgStatus?.key === 'action' && sgReplyAction && (
+              <button
+                className="fc-chip fc-chip-primary"
+                onClick={() => onOpenAction?.(sgReplyAction.id)}
+              >
+                Open draft action
+              </button>
+            )}
+            {subject.type === 'signal' && sg &&
+              recommendations.map((recommendation) => (
+                <button
+                  key={recommendation.id}
+                  className={`fc-chip${recommendation.available ? ' fc-chip-primary' : ''}`}
+                  disabled={!recommendation.available || acceptingId !== null}
+                  aria-disabled={!recommendation.available}
+                  title={recommendation.available ? recommendation.reason : `${recommendation.reason} · Capability unavailable.`}
+                  onClick={() => {
+                    if (!recommendation.available) return;
+                    setAcceptingId(recommendation.id);
+                    void act.acceptRecommendation(sg.id, recommendation.id)
+                      .then(() => setNotes((current) => [...current,
+                        { who: 'you', text: recommendation.label },
+                        { who: 'agent', text: 'Action created. Hermes is drafting it now; review it in Actions.' },
+                      ]))
+                      .catch((cause) => setNotes((current) => [...current, {
+                        who: 'agent', text: cause instanceof Error ? cause.message : 'Could not create the Action',
+                      }]))
+                      .finally(() => setAcceptingId(null));
+                  }}
+                >
+                  {recommendation.available ? (acceptingId === recommendation.id ? 'Creating…' : recommendation.label) : `🔒 ${recommendation.label}`}
                 </button>
               ))}
+            {subject.type === 'signal' && sg && sgStatus?.key === 'open' && (
+              <button
+                className="fc-chip fc-chip-primary"
+                disabled={settling}
+                onClick={() => {
+                  setSettling(true);
+                  void act.settleSignal(sg.id)
+                    .then(() => setNotes((current) => [...current, { who: 'you', text: 'No action needed' }]))
+                    .catch((cause) => setNotes((current) => [...current, {
+                      who: 'agent',
+                      text: cause instanceof Error ? cause.message : 'Could not settle this Signal',
+                    }]))
+                    .finally(() => setSettling(false));
+                }}
+              >
+                {settling ? 'Settling…' : 'No action needed'}
+              </button>
+            )}
             {subject.type === 'reminder' && r && r.doneAt === null && (
               <>
                 {!remActionOpen && (
@@ -2262,6 +2567,7 @@ export function RunPopup({
               </>
             )}
           </div>
+
         </div>
 
         <footer className="fc-composer">

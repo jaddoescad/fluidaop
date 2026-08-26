@@ -50,7 +50,8 @@ REQUIRED_SCOPE = "fluid:history"
 MIN_SECRET_CHARS = 43
 
 AGENT_JOB_NAME_PARTS = {
-    "email-categorizer": ("fluid email categorizer",),
+    "signal-triage": ("fluid signal triage",),
+    "case-reconciler": ("fluid case reconciler",),
     "contractor-invoices": ("contractor invoice sync",),
     "dripjobs-operations": ("daily dripjobs",),
     "meta-ads-reporter": ("daily meta ads",),
