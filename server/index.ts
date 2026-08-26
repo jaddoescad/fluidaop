@@ -19,6 +19,7 @@ import {
   projectTopicToGmail,
 } from './gmailLabelSync.js';
 import { decorateEmailRecord } from './emailContent.js';
+import { isUuid } from './identifiers.js';
 import {
   parseQuoExport,
   QuoActivityInput,
@@ -319,11 +320,6 @@ function gmailCanModifyLabels(connection: StoredGmailConnection): boolean {
 
 function gmailCanReadEmails(connection: StoredGmailConnection): boolean {
   return connection.scopes.includes(GMAIL_READONLY_SCOPE) || gmailCanModifyLabels(connection);
-}
-
-function isUuid(value: unknown): value is string {
-  return typeof value === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function encryptionProblems(): string[] {
