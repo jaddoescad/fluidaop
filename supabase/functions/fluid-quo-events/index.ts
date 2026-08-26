@@ -167,26 +167,56 @@ function base64(value: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function quoWebhookSigningSecrets(): string[] {
+  const secrets = new Set<string>();
+  const legacy = Deno.env.get('QUO_WEBHOOK_SIGNING_SECRET')?.trim();
+  if (legacy) secrets.add(legacy);
+
+  const configured = Deno.env.get('QUO_WEBHOOK_SIGNING_SECRETS')?.trim();
+  if (!configured) return [...secrets];
+  try {
+    const parsed: unknown = JSON.parse(configured);
+    if (Array.isArray(parsed)) {
+      for (const value of parsed) {
+        if (typeof value === 'string' && value.trim()) secrets.add(value.trim());
+      }
+      return [...secrets];
+    }
+  } catch {
+    // Support a comma/newline-delimited value for operators that cannot set JSON.
+  }
+  for (const value of configured.split(/[,\n]/)) {
+    if (value.trim()) secrets.add(value.trim());
+  }
+  return [...secrets];
+}
+
 async function verifyQuoSignature(rawBody: string, header: string | null): Promise<boolean> {
-  const secret = Deno.env.get('QUO_WEBHOOK_SIGNING_SECRET')?.trim();
-  if (!secret || !header) return false;
+  const secrets = quoWebhookSigningSecrets();
+  if (secrets.length === 0 || !header) return false;
   const compactBody = JSON.stringify(JSON.parse(rawBody) as unknown);
   const signatures = header.split(',').map((item) => item.trim()).filter(Boolean);
-  for (const signature of signatures) {
-    const [scheme, version, rawTimestamp, provided] = signature.split(';');
-    if (scheme !== 'hmac' || version !== '1' || !rawTimestamp || !provided) continue;
-    const timestamp = Number(rawTimestamp);
-    const timestampMs = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
-    if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60_000) continue;
-    const key = await crypto.subtle.importKey(
-      'raw',
-      base64Bytes(secret),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign'],
-    );
-    const digest = await crypto.subtle.sign('HMAC', key, encoder.encode(`${rawTimestamp}.${compactBody}`));
-    if (safeEqual(base64(digest), provided.replace(/\s/g, ''))) return true;
+  for (const secret of secrets) {
+    try {
+      const key = await crypto.subtle.importKey(
+        'raw',
+        base64Bytes(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign'],
+      );
+      for (const signature of signatures) {
+        const [scheme, version, rawTimestamp, provided] = signature.split(';');
+        if (scheme !== 'hmac' || version !== '1' || !rawTimestamp || !provided) continue;
+        const timestamp = Number(rawTimestamp);
+        const timestampMs = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
+        if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60_000) continue;
+        const digest = await crypto.subtle.sign('HMAC', key, encoder.encode(`${rawTimestamp}.${compactBody}`));
+        if (safeEqual(base64(digest), provided.replace(/\s/g, ''))) return true;
+      }
+    } catch {
+      // A malformed operator-supplied key must not disable otherwise valid keys.
+    }
   }
   return false;
 }
@@ -565,7 +595,7 @@ async function handleInternal(req: Request, supabase: SupabaseClient, action: st
     if (importResult.error) throw importResult.error;
     if (scopeResult.error) throw scopeResult.error;
     return response({
-      signingSecretConfigured: Boolean(Deno.env.get('QUO_WEBHOOK_SIGNING_SECRET')?.trim()),
+      signingSecretConfigured: quoWebhookSigningSecrets().length > 0,
       lastEvent: eventResult.data,
       lastImport: importResult.data,
       selectedPhoneNumbers: scopeResult.data ?? [],
