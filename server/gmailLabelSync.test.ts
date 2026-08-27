@@ -37,8 +37,9 @@ class FakeClient implements GmailLabelClient {
   }
 }
 
-test('uses one canonical managed namespace', () => {
-  assert.equal(canonicalGmailTopicLabel('  New   Lead  '), 'Fluid/New Lead');
+test('uses the existing Gmail label namespace', () => {
+  assert.equal(canonicalGmailTopicLabel('  New   Lead  '), 'New Lead');
+  assert.equal(canonicalGmailTopicLabel(' Finance/Contractor   invoices '), 'Finance/Contractor invoices');
   assert.equal(canonicalGmailSupplementalLabel('  Employee  '), 'Employee');
 });
 
@@ -123,7 +124,7 @@ test('adopts a concurrently created Gmail label instead of duplicating it', asyn
     override async listLabels(refresh = false) {
       if (refresh) {
         this.refreshes += 1;
-        this.labels.push({ id: 'concurrent', name: 'Fluid/New lead', type: 'user' });
+        this.labels.push({ id: 'concurrent', name: 'New lead', type: 'user' });
       }
       return this.labels;
     }
@@ -139,4 +140,22 @@ test('adopts a concurrently created Gmail label instead of duplicating it', asyn
   assert.equal(client.refreshes, 1);
   assert.equal(result.gmailLabelId, 'concurrent');
   assert.deepEqual(client.mutations, [{ add: ['concurrent'], remove: [] }]);
+});
+
+test('reuses an exact existing Gmail label instead of creating a prefixed duplicate', async () => {
+  const client = new FakeClient();
+  client.labels.push({ id: 'existing', name: 'Finance/Contractor invoices', type: 'user' });
+  const topics = [{ id: 6, key: 'finance-contractor-invoices', name: 'Finance/Contractor invoices' }];
+  const mappings = [{
+    fluidLabelId: 6,
+    gmailLabelId: 'topic-old',
+    gmailLabelName: 'Fluid/Finance/Contractor invoices',
+  }];
+
+  const result = await projectTopicToGmail(client, 'message-1', topics[0]!, topics, mappings);
+
+  assert.equal(result.gmailLabelId, 'existing');
+  assert.equal(result.gmailLabelName, 'Finance/Contractor invoices');
+  assert.deepEqual(client.mutations, [{ add: ['existing'], remove: ['topic-old'] }]);
+  assert.equal(client.labels.filter((label) => label.name.includes('Contractor invoices')).length, 1);
 });

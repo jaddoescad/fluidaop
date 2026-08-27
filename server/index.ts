@@ -1680,14 +1680,14 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
       runtimeName: 'fluid-gmail-label-sync',
       name: 'Gmail label sync',
       icon: '⚙️',
-      description: 'Applies canonical Fluid labels to newly classified Gmail messages without historical backfill.',
+      description: 'Applies your existing Gmail category labels to newly classified messages without historical backfill.',
       schedule: scheduleIntervalLabel(gmailLabelSyncIntervalMs),
       profile: 'Fluid server',
       mode: 'Script-only automation',
       runtimeMode: 'script',
       steps: [
         'Claim newly classified Gmail messages from the label queue.',
-        'Apply Fluid topic and role labels without changing personal Gmail labels.',
+        'Reuse existing Gmail topic labels and apply managed role labels without creating a parallel namespace.',
       ],
       enabled: labelEnabled,
       state: labelEnabled

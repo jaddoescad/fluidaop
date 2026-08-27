@@ -56,7 +56,7 @@ export class GmailLabelApiError extends Error {
 export function canonicalGmailTopicLabel(name: string): string {
   const cleaned = name.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (!cleaned) throw new Error('Fluid topic label name is empty');
-  return `Fluid/${cleaned}`.slice(0, 225);
+  return cleaned.slice(0, 225);
 }
 
 export function canonicalGmailSupplementalLabel(name: string): string {
