@@ -11,13 +11,6 @@ import {
   GmailActivityRow,
   GmailApiError,
 } from './gmailActivities.js';
-import {
-  FluidTopicLabel,
-  GmailLabelApiError,
-  GmailLabelMapping,
-  GmailRestLabelClient,
-  projectTopicToGmail,
-} from './gmailLabelSync.js';
 import { decorateEmailRecord } from './emailContent.js';
 import { isUuid } from './identifiers.js';
 import {
@@ -113,22 +106,6 @@ interface PublicFluidSchedule {
   definition: null;
 }
 
-interface DripJobsPipelineStatus {
-  cadence: 'daily';
-  schedule: string;
-  needsSync: boolean;
-  unhealthy: boolean;
-  latest: {
-    status?: string;
-    captured_at?: string | null;
-    finished_at?: string | null;
-    last_error?: string | null;
-  } | null;
-  latestSuccess: {
-    captured_at?: string | null;
-    finished_at?: string | null;
-  } | null;
-}
 
 interface QuoWebhookStatus {
   state: 'receiving' | 'ready' | 'pending';
@@ -209,14 +186,6 @@ const gmailActivitySyncIntervalMs = readPositiveInt(
   process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
   5 * 60_000,
 );
-const gmailLabelSyncIntervalMs = readPositiveInt(
-  process.env.GMAIL_LABEL_SYNC_INTERVAL_MS,
-  30_000,
-);
-const gmailLabelSyncMaximumJobs = Math.min(
-  25,
-  readPositiveInt(process.env.GMAIL_LABEL_SYNC_MAX_JOBS, 10),
-);
 const slackSyncIntervalMs = readPositiveInt(process.env.SLACK_SYNC_INTERVAL_MS, 60_000);
 const slackBackfillChannelsPerRun = readPositiveInt(process.env.SLACK_BACKFILL_CHANNELS_PER_RUN, 1);
 const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
@@ -238,11 +207,9 @@ const pendingAuthorizations = new Map<string, PendingAuthorization>();
 const pendingSlackAuthorizations = new Map<string, PendingSlackAuthorization>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
 const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
-const activeGmailLabelSyncs = new Map<string, Promise<GmailLabelSyncBatchResult>>();
 const activeSlackSyncs = new Map<string, Promise<SlackSyncResult>>();
 const lastActivitySyncAttemptAt = new Map<string, number>();
 const lastSlackSyncAttemptAt = new Map<string, number>();
-let lastGmailLabelSyncAttemptAt = 0;
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -282,43 +249,8 @@ interface StoredActivitySyncState {
   updated_at: string;
 }
 
-interface GmailLabelSyncStatus {
-  pending: number;
-  leased: number;
-  succeeded: number;
-  failed: number;
-  lastSyncedAt: string | null;
-  lastError: string | null;
-}
 
-interface GmailLabelSyncClaim {
-  job: {
-    id: number;
-    leaseToken: string;
-    generation: number;
-    attempts: number;
-    claimedAt: string;
-  } | null;
-  message?: {
-    activityId: number;
-    accountEmail: string;
-    externalId: string;
-  };
-  desiredLabel?: FluidTopicLabel;
-  topicLabels?: FluidTopicLabel[];
-  mappings?: GmailLabelMapping[];
-  roleLabels?: string[];
-  managedRoleLabels?: string[];
-}
 
-interface GmailLabelSyncBatchResult {
-  accountEmail: string;
-  processed: number;
-  applied: number;
-  alreadyApplied: number;
-  missing: number;
-  failed: number;
-}
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -802,32 +734,6 @@ async function activityFunctionJson<T>(
   return payload as T;
 }
 
-async function gmailLabelSyncFunctionJson<T>(
-  action: 'status' | 'claim' | 'complete' | 'fail',
-  accountEmail?: string,
-  body?: Record<string, unknown>,
-): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-gmail-label-sync`);
-  url.searchParams.set('action', action);
-  if (accountEmail) url.searchParams.set('accountEmail', accountEmail.trim().toLowerCase());
-  const response = await fetch(url, {
-    method: body ? 'POST' : 'GET',
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-gmail-label-sync-secret': activityFunctionSecret(),
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Supabase Gmail label service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
-}
 
 function quoWebhookUrl(): string {
   return supabaseProjectUrl
@@ -971,24 +877,6 @@ async function realBoardFunctionJson<T>(
   return payload as T;
 }
 
-async function dripJobsPipelineFunctionJson<T>(action: 'status'): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-dripjobs-pipeline`);
-  url.searchParams.set('action', action);
-  const response = await fetch(url, {
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-agent-secret': activityFunctionSecret(),
-    },
-    signal: AbortSignal.timeout(30_000),
-  });
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `DripJobs pipeline service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
-}
 
 async function syncQuoScope(connection: StoredQuoConnection, phoneNumbers: QuoPhoneNumber[]): Promise<void> {
   await quoFunctionJson('scope', {
@@ -1583,176 +1471,10 @@ async function syncDueActivities(): Promise<void> {
   }
 }
 
-function safeGmailLabelSyncError(error: unknown): string {
-  if (error instanceof GmailLabelApiError) {
-    if (error.status === 401 || error.status === 403) {
-      return 'Google authorization does not allow Gmail label updates.';
-    }
-    if (error.status === 429) return 'Gmail temporarily rate-limited label updates.';
-    if (error.status >= 500) return 'Gmail label service is temporarily unavailable.';
-    return `Gmail label update returned HTTP ${error.status}.`;
-  }
-  const message = errorMessage(error);
-  if (/fetch failed|network|timed?\s*out|abort/i.test(message)) {
-    return 'Gmail label sync could not reach Google.';
-  }
-  return 'Gmail label sync failed safely.';
-}
 
-function validGmailLabelClaim(claim: GmailLabelSyncClaim): claim is GmailLabelSyncClaim & {
-  job: NonNullable<GmailLabelSyncClaim['job']>;
-  message: NonNullable<GmailLabelSyncClaim['message']>;
-  desiredLabel: FluidTopicLabel;
-  topicLabels: FluidTopicLabel[];
-  mappings: GmailLabelMapping[];
-  roleLabels: string[];
-  managedRoleLabels: string[];
-} {
-  return claim.job !== null && claim.job !== undefined &&
-    Number.isSafeInteger(claim.job.id) && claim.job.id > 0 &&
-    isUuid(claim.job.leaseToken) &&
-    Number.isSafeInteger(claim.job.generation) && claim.job.generation > 0 &&
-    claim.message !== undefined && Number.isSafeInteger(claim.message.activityId) &&
-    claim.message.activityId > 0 && claim.message.accountEmail === claim.message.accountEmail.toLowerCase() &&
-    Boolean(claim.message.externalId) &&
-    claim.desiredLabel !== undefined && Number.isSafeInteger(claim.desiredLabel.id) &&
-    Boolean(claim.desiredLabel.key && claim.desiredLabel.name) &&
-    Array.isArray(claim.topicLabels) && Array.isArray(claim.mappings) &&
-    Array.isArray(claim.roleLabels) && claim.roleLabels.every((name) => typeof name === 'string' && name.length <= 225) &&
-    Array.isArray(claim.managedRoleLabels) &&
-    claim.managedRoleLabels.every((name) => typeof name === 'string' && name.length <= 225);
-}
 
-async function performGmailLabelSync(
-  connection: StoredGmailConnection,
-): Promise<GmailLabelSyncBatchResult> {
-  requireActivityConfigured();
-  if (!gmailCanModifyLabels(connection)) {
-    throw new HttpError(409, 'Reconnect Gmail to enable Fluid label updates.');
-  }
 
-  const refreshToken = decryptToken(connection.encryptedRefreshToken);
-  const accessToken = await refreshAccessToken(refreshToken);
-  const profile = await getGmailProfile(accessToken);
-  const accountEmail = profile.emailAddress?.trim().toLowerCase();
-  if (!accountEmail || accountEmail !== connection.email.toLowerCase()) {
-    throw new Error(`Google returned a different mailbox (${accountEmail ?? 'unknown'})`);
-  }
 
-  const client = new GmailRestLabelClient(accessToken);
-  const result: GmailLabelSyncBatchResult = {
-    accountEmail,
-    processed: 0,
-    applied: 0,
-    alreadyApplied: 0,
-    missing: 0,
-    failed: 0,
-  };
-  const worker = `fluid-gmail-label-sync-${process.pid}`;
-
-  for (let index = 0; index < gmailLabelSyncMaximumJobs; index += 1) {
-    const claim: GmailLabelSyncClaim = await gmailLabelSyncFunctionJson<GmailLabelSyncClaim>('claim', undefined, {
-      worker,
-      accountEmail,
-      leaseSeconds: 300,
-    });
-    if (!claim || typeof claim !== 'object') {
-      throw new Error('Gmail label sync returned an invalid claim response');
-    }
-    if (claim.job === null) break;
-    result.processed += 1;
-
-    if (!validGmailLabelClaim(claim) || claim.message.accountEmail !== accountEmail) {
-      if (claim.job && isUuid(claim.job.leaseToken) && Number.isSafeInteger(claim.job.id) &&
-        Number.isSafeInteger(claim.job.generation)) {
-        await gmailLabelSyncFunctionJson('fail', undefined, {
-          jobId: claim.job.id,
-          leaseToken: claim.job.leaseToken,
-          generation: claim.job.generation,
-          error: 'Gmail label sync received an invalid claimed job.',
-          retryable: false,
-          retryAfterSeconds: null,
-        }).catch(() => undefined);
-      }
-      result.failed += 1;
-      continue;
-    }
-
-    try {
-      const projected = await projectTopicToGmail(
-        client,
-        claim.message.externalId,
-        claim.desiredLabel,
-        claim.topicLabels,
-        claim.mappings,
-        { desiredNames: claim.roleLabels, managedNames: claim.managedRoleLabels },
-      );
-      await gmailLabelSyncFunctionJson('complete', undefined, {
-        jobId: claim.job.id,
-        leaseToken: claim.job.leaseToken,
-        generation: claim.job.generation,
-        outcome: projected.outcome,
-        gmailLabelId: projected.gmailLabelId,
-        gmailLabelName: projected.gmailLabelName,
-      });
-      if (projected.outcome === 'applied') result.applied += 1;
-      else if (projected.outcome === 'already-applied') result.alreadyApplied += 1;
-      else result.missing += 1;
-    } catch (error) {
-      const retryable = error instanceof GmailLabelApiError
-        ? error.retryable
-        : /fetch failed|network|timed?\s*out|abort/i.test(errorMessage(error));
-      const retryAfterSeconds = error instanceof GmailLabelApiError
-        ? error.retryAfterSeconds
-        : null;
-      await gmailLabelSyncFunctionJson('fail', undefined, {
-        jobId: claim.job.id,
-        leaseToken: claim.job.leaseToken,
-        generation: claim.job.generation,
-        error: safeGmailLabelSyncError(error),
-        retryable,
-        retryAfterSeconds,
-      }).catch((failure) => {
-        console.warn(`Could not record Gmail label failure: ${errorMessage(failure)}`);
-      });
-      result.failed += 1;
-      if (error instanceof GmailLabelApiError && (error.status === 401 || error.status === 403)) {
-        connection.status = 'error';
-        connection.error = publicGoogleError(error);
-        connection.updatedAt = new Date().toISOString();
-        await saveStore();
-        break;
-      }
-    }
-  }
-
-  return result;
-}
-
-function syncGmailLabels(connection: StoredGmailConnection): Promise<GmailLabelSyncBatchResult> {
-  const running = activeGmailLabelSyncs.get(connection.id);
-  if (running) return running;
-  const sync = performGmailLabelSync(connection).finally(() => activeGmailLabelSyncs.delete(connection.id));
-  activeGmailLabelSyncs.set(connection.id, sync);
-  return sync;
-}
-
-async function syncDueGmailLabels(): Promise<void> {
-  if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
-  const now = Date.now();
-  if (now - lastGmailLabelSyncAttemptAt < gmailLabelSyncIntervalMs) return;
-  lastGmailLabelSyncAttemptAt = now;
-  const connected = store.connections.filter((connection): connection is StoredGmailConnection =>
-    connection.provider === 'gmail' && connection.status !== 'error' && gmailCanModifyLabels(connection));
-  const results = await Promise.allSettled(connected.map((connection) => syncGmailLabels(connection)));
-  for (const outcome of results) {
-    if (outcome.status === 'rejected') {
-      console.warn(`Gmail label sync failed: ${safeGmailLabelSyncError(outcome.reason)}`);
-    } else if (outcome.value.applied > 0) {
-      console.log(`Gmail label sync applied ${outcome.value.applied} Fluid label(s).`);
-    }
-  }
-}
 
 function scheduleIntervalLabel(intervalMs: number): string {
   if (intervalMs % 3_600_000 === 0) {
@@ -1779,29 +1501,9 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
     ?? store.connections.find((connection): connection is StoredGmailConnection => connection.provider === 'gmail');
   const configured = gmailConfigurationProblems().length === 0 && Boolean(supabaseProjectUrl);
   const inboxEnabled = configured && gmail !== undefined && gmail.status !== 'error' && gmailCanReadEmails(gmail);
-  const labelEnabled = inboxEnabled && gmail !== undefined && gmailCanModifyLabels(gmail);
 
   let activityState: StoredActivitySyncState | null = null;
   let activityStatusError: string | null = null;
-  let labelStatus: GmailLabelSyncStatus = {
-    pending: 0,
-    leased: 0,
-    succeeded: 0,
-    failed: 0,
-    lastSyncedAt: null,
-    lastError: null,
-  };
-  let labelStatusError: string | null = null;
-  let pipelineStatus: DripJobsPipelineStatus | null = null;
-  let pipelineStatusError: string | null = null;
-
-  if (supabaseProjectUrl) {
-    try {
-      pipelineStatus = await dripJobsPipelineFunctionJson<DripJobsPipelineStatus>('status');
-    } catch (error) {
-      pipelineStatusError = errorMessage(error);
-    }
-  }
 
   if (gmail !== undefined && configured) {
     try {
@@ -1812,32 +1514,12 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
     } catch (error) {
       activityStatusError = errorMessage(error);
     }
-    if (gmailCanModifyLabels(gmail)) {
-      try {
-        const payload = await gmailLabelSyncFunctionJson<{ status?: Partial<GmailLabelSyncStatus> }>(
-          'status',
-          gmail.email,
-        );
-        labelStatus = {
-          pending: Number(payload.status?.pending ?? 0),
-          leased: Number(payload.status?.leased ?? 0),
-          succeeded: Number(payload.status?.succeeded ?? 0),
-          failed: Number(payload.status?.failed ?? 0),
-          lastSyncedAt: typeof payload.status?.lastSyncedAt === 'string' ? payload.status.lastSyncedAt : null,
-          lastError: typeof payload.status?.lastError === 'string' ? payload.status.lastError : null,
-        };
-      } catch (error) {
-        labelStatusError = errorMessage(error);
-      }
-    }
   }
 
   const inboxAttempt = gmail === undefined ? 0 : lastActivitySyncAttemptAt.get(gmail.id) ?? 0;
-  const labelQueued = labelStatus.pending + labelStatus.leased;
   const inboxLastError = activityState?.last_error
     ?? (gmail?.status === 'error' ? gmail.error : null)
     ?? activityStatusError;
-  const labelLastError = labelStatus.lastError ?? labelStatusError;
 
   return [
     {
@@ -1862,84 +1544,6 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
       lastRunAt: activityState?.last_sync_completed_at ?? (inboxAttempt > 0 ? new Date(inboxAttempt).toISOString() : null),
       lastRunStatus: activeActivitySyncs.size > 0 ? 'running' : activityState?.last_sync_status ?? null,
       lastError: inboxLastError,
-      historyAgentId: null,
-      contractStatus: 'built-in',
-      source: 'fluid',
-      historyAvailable: false,
-      definition: null,
-    },
-    {
-      id: 'fluid-gmail-label-sync',
-      runtimeName: 'fluid-gmail-label-sync',
-      name: 'Gmail label sync',
-      icon: '⚙️',
-      description: 'Applies your existing Gmail category labels to newly classified messages without historical backfill.',
-      schedule: scheduleIntervalLabel(gmailLabelSyncIntervalMs),
-      profile: 'Fluid server',
-      mode: 'Script-only automation',
-      runtimeMode: 'script',
-      steps: [
-        'Claim newly classified Gmail messages from the label queue.',
-        'Reuse existing Gmail topic labels and apply managed role labels without creating a parallel namespace.',
-      ],
-      enabled: labelEnabled,
-      state: labelEnabled
-        ? activeGmailLabelSyncs.size > 0
-          ? 'Running'
-          : labelQueued > 0
-            ? `Active · ${labelQueued} queued`
-            : 'Active'
-        : gmail === undefined
-          ? 'Needs Gmail connection'
-          : 'Needs Gmail label permission',
-      nextRunAt: nextScheduledAt(lastGmailLabelSyncAttemptAt, gmailLabelSyncIntervalMs, labelEnabled),
-      lastRunAt: labelStatus.lastSyncedAt
-        ?? (lastGmailLabelSyncAttemptAt > 0 ? new Date(lastGmailLabelSyncAttemptAt).toISOString() : null),
-      lastRunStatus: activeGmailLabelSyncs.size > 0
-        ? 'running'
-        : labelStatus.failed > 0
-          ? 'failed'
-          : lastGmailLabelSyncAttemptAt > 0
-            ? 'completed'
-            : null,
-      lastError: labelLastError,
-      historyAgentId: null,
-      contractStatus: 'built-in',
-      source: 'fluid',
-      historyAvailable: false,
-      definition: null,
-    },
-    {
-      id: 'fluid-dripjobs-pipeline',
-      runtimeName: 'fluid-dripjobs-pipeline',
-      name: 'DripJobs pipeline audit',
-      icon: '🔄',
-      description: 'Reconciles the active and archived DripJobs Sales List into Fluid and repairs missed Zapier stage events.',
-      schedule: 'Daily at 10:05 AM · America/Toronto',
-      profile: 'Hermes capture',
-      mode: 'Script-only automation',
-      runtimeMode: 'script',
-      steps: [
-        'Capture authenticated active and archived DripJobs Sales List views.',
-        'Apply one atomic reconciliation and retain every actual stage transition.',
-      ],
-      enabled: pipelineStatusError === null && pipelineStatus !== null,
-      state: pipelineStatusError || pipelineStatus === null
-        ? 'Needs attention'
-        : pipelineStatus?.unhealthy
-          ? 'Unhealthy'
-          : pipelineStatus?.needsSync
-            ? 'Stale'
-            : 'Active',
-      nextRunAt: null,
-      lastRunAt: pipelineStatus?.latest?.finished_at
-        ?? pipelineStatus?.latest?.captured_at
-        ?? pipelineStatus?.latestSuccess?.finished_at
-        ?? null,
-      lastRunStatus: pipelineStatus?.latest?.status ?? null,
-      lastError: pipelineStatus?.latest?.last_error
-        ?? pipelineStatusError
-        ?? (pipelineStatus === null ? 'Pipeline status is unavailable' : null),
       historyAgentId: null,
       contractStatus: 'built-in',
       source: 'fluid',
@@ -2268,9 +1872,6 @@ app.get('/api/oauth/google/callback', async (req, res) => {
     if (existing) Object.assign(existing, connection);
     else store.connections.push(connection);
     await saveStore();
-    void syncGmailLabels(connection).catch((error) => {
-      console.warn(`Initial Gmail label sync failed: ${safeGmailLabelSyncError(error)}`);
-    });
     res.redirect(callbackRedirect(
       req,
       'connected',
@@ -3656,11 +3257,6 @@ const startupActivitySync = setTimeout(() => {
 }, 10_000);
 startupActivitySync.unref();
 
-const startupGmailLabelSync = setTimeout(() => {
-  void syncDueGmailLabels();
-}, 12_000);
-startupGmailLabelSync.unref();
-
 const startupSlackSync = setTimeout(() => {
   void syncDueSlack();
 }, 15_000);
@@ -3681,14 +3277,6 @@ const activitySyncTimer = setInterval(
   Math.min(gmailActivitySyncIntervalMs, 30_000),
 );
 activitySyncTimer.unref();
-
-const gmailLabelSyncTimer = setInterval(
-  () => {
-    void syncDueGmailLabels();
-  },
-  Math.min(gmailLabelSyncIntervalMs, 30_000),
-);
-gmailLabelSyncTimer.unref();
 
 const slackSyncTimer = setInterval(
   () => {
