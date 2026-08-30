@@ -7,11 +7,6 @@
 .pp-counts { display: flex; gap: 18px; color: var(--faint); font-size: 11px; }
 .pp-counts span { display: flex; flex-direction: column; text-align: right; }
 .pp-counts strong { color: var(--ink); font-size: 17px; font-weight: 650; }
-.pp-mode-tabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); }
-.pp-mode-tabs button { position: relative; padding: 9px 1px 12px; border: 0; background: transparent; color: var(--faint); font-size: 13px; font-weight: 600; cursor: pointer; }
-.pp-mode-tabs button.is-active { color: var(--ink); }
-.pp-mode-tabs button.is-active::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; border-radius: 2px; background: var(--accent); content: ''; }
-.pp-mode-tabs button > span { display: inline-grid; min-width: 18px; height: 18px; margin-left: 5px; place-items: center; border-radius: 9px; background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); font-size: 10px; }
 .pp-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 0 10px; }
 .pp-role-filters { display: flex; min-width: 0; gap: 5px; overflow-x: auto; }
 .pp-toolbar button { flex: none; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--faint); font-size: 11px; cursor: pointer; }
@@ -32,30 +27,8 @@
 .pp-person strong { font-weight: 600; }
 .pp-person small, .pp-contact small, .pp-signals small { overflow: hidden; min-height: 13px; color: var(--faint); font-size: 11px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
 .pp-pills { display: flex; flex-wrap: wrap; gap: 4px; }
-.pp-pills > span, .pp-suggestion-meta > span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--dim); font-size: 10px; text-transform: capitalize; }
+.pp-pills > span { padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--dim); font-size: 10px; text-transform: capitalize; }
 .pp-pills small { color: var(--faint); font-size: 11px; }
-.pp-suggestions { display: grid; gap: 10px; padding-top: 16px; }
-.pp-suggestion { padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
-.pp-suggestion.is-conflict { border-color: color-mix(in srgb, var(--warn) 38%, var(--line)); }
-.pp-suggestion > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; }
-.pp-suggestion h2 { margin: 1px 0 2px; color: var(--ink); font-size: 14px; }
-.pp-suggestion header p { color: var(--faint); font-size: 11px; }
-.pp-kicker { color: var(--faint); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-.pp-confidence { color: var(--accent); font-size: 11px; font-weight: 650; }
-.pp-reason { margin: 12px 0 10px; color: var(--dim); font-size: 12px; line-height: 1.5; }
-.pp-suggestion-meta { display: flex; flex-wrap: wrap; gap: 5px; }
-.pp-suggestion footer { display: flex; gap: 7px; margin-top: 14px; }
-.pp-suggestion footer button, .pp-linker button, .pp-candidates button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--dim); font-size: 11px; cursor: pointer; }
-.pp-suggestion footer button:hover:not(:disabled), .pp-linker button:hover:not(:disabled), .pp-candidates button:hover:not(:disabled) { border-color: var(--faint); color: var(--ink); }
-.pp-suggestion footer button.pp-primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
-.pp-suggestion button:disabled { cursor: wait; opacity: .5; }
-.pp-candidates { display: grid; gap: 6px; margin-top: 12px; padding: 10px; border-radius: 8px; background: color-mix(in srgb, var(--warn) 6%, transparent); }
-.pp-candidates > small { color: var(--faint); font-size: 10px; }
-.pp-candidates button { display: flex; justify-content: space-between; text-align: left; }
-.pp-candidates button strong { font-size: 11px; }
-.pp-candidates button span { color: var(--faint); font-size: 10px; }
-.pp-linker { display: flex; gap: 7px; margin-top: 14px; }
-.pp-linker input, .pp-linker select { min-width: 0; flex: 1; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 11px; }
 .pp-detail { position: absolute; z-index: 30; top: 0; right: 0; bottom: 0; width: min(480px, 92vw); padding: 25px; overflow-y: auto; border-left: 1px solid var(--line); background: var(--bg); box-shadow: -24px 0 60px rgba(0,0,0,.12); }
 .pp-detail-close { position: sticky; z-index: 2; top: 0; float: right; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--dim); font-size: 18px; cursor: pointer; }
 .pp-detail-head { display: flex; align-items: center; gap: 12px; padding: 34px 0 18px; }
@@ -94,4 +67,4 @@
 .pp-state button { padding: 6px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--dim); cursor: pointer; }
 .pp-state-error strong { color: var(--red, #d85c6a); }
 @media (max-width: 820px) { .pp-head { flex-direction: column; } .pp-counts span { text-align: left; } .pp-toolbar { align-items: stretch; flex-direction: column; } .pp-search { width: 100%; } .pp-columns { display: none; } .pp-row { grid-template-columns: minmax(180px,1fr) minmax(160px,1fr); } .pp-pills, .pp-signals { padding-left: 42px; } }
-@media (max-width: 560px) { .pp-row { grid-template-columns: 1fr; gap: 8px; } .pp-contact, .pp-pills, .pp-signals { padding-left: 42px; } .pp-suggestion footer, .pp-linker { align-items: stretch; flex-direction: column; } }
+@media (max-width: 560px) { .pp-row { grid-template-columns: 1fr; gap: 8px; } .pp-contact, .pp-pills, .pp-signals { padding-left: 42px; } }

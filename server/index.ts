@@ -707,8 +707,6 @@ async function activityFunctionJson<T>(
     | 'contacts'
     | 'contact'
     | 'contact-activities'
-    | 'contact-suggestions'
-    | 'resolve-contact-suggestion'
     | 'contact-roles'
     | 'contact-search',
   search: Record<string, string>,
@@ -2333,51 +2331,7 @@ app.get('/api/contacts/:id', async (req, res, next) => {
   }
 });
 
-app.get('/api/contact-suggestions', async (req, res, next) => {
-  try {
-    const limit = Math.max(1, Math.min(100, readPositiveInt(
-      typeof req.query.limit === 'string' ? req.query.limit : undefined,
-      30,
-    )));
-    const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
-    const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
-    if ((cursorAt === undefined) !== (cursorId === undefined)) {
-      throw new HttpError(400, 'Suggestion cursor is incomplete');
-    }
-    if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !isUuid(cursorId))) {
-      throw new HttpError(400, 'Suggestion cursor is invalid');
-    }
-    res.json(await activityFunctionJson<unknown>('contact-suggestions', {
-      limit: String(limit),
-      ...(cursorAt !== undefined && cursorId !== undefined ? { cursorAt, cursorId } : {}),
-    }));
-  } catch (error) {
-    next(error);
-  }
-});
 
-app.post('/api/contact-suggestions/:id/resolve', async (req, res, next) => {
-  try {
-    if (!isUuid(req.params.id)) throw new HttpError(400, 'Invalid suggestion id');
-    const action = req.body?.action;
-    const contactId = req.body?.contactId;
-    if (!['create', 'link', 'ignore'].includes(action) ||
-      (action === 'link' && !isUuid(contactId)) ||
-      (action !== 'link' && contactId !== undefined)) {
-      throw new HttpError(400, 'Invalid suggestion resolution');
-    }
-    res.json(await activityFunctionJson<unknown>('resolve-contact-suggestion', {}, {
-      method: 'POST',
-      body: JSON.stringify({
-        suggestionId: req.params.id,
-        action,
-        ...(action === 'link' ? { contactId } : {}),
-      }),
-    }));
-  } catch (error) {
-    next(error);
-  }
-});
 
 app.get('/api/people/sync-status', async (_req, res, next) => {
   try {
