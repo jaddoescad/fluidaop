@@ -1,6 +1,6 @@
 name: fluid-history
-version: 1.4.0
-description: Scoped Hermes automation metadata and pause, resume, or delete controls for Fluid.
+version: 2.0.0
+description: Hermes automation metadata, full job records, run history, session transcripts, and bounded pause/resume/delete controls for Fluid.
 author: Ottawa Painters
 kind: standalone
 requires_env:

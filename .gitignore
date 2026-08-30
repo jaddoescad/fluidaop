@@ -7,3 +7,7 @@ dist/
 .data/
 test-results/
 playwright-report/
+
+# Python bytecode from the Hermes plugin
+__pycache__/
+*.pyc

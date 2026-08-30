@@ -1,9 +1,13 @@
-"""Scoped Hermes automation management API for Fluid.
+"""Hermes automation API for Fluid.
 
-Mounted by Hermes at ``/api/plugins/fluid-history``. Responses intentionally
-contain roster and run metadata only, while the write endpoint permits only
-pause, resume, and delete for an exact cron job. No prompts, scripts, skill
-bodies, email content, invoice content, or session messages leave Hermes.
+Mounted by Hermes at ``/api/plugins/fluid-history``. Fluid is a wrapper over
+this Hermes deployment, so reads return the *complete* cron job and run records
+rather than a hand-picked subset: whatever Hermes knows about a job, Fluid can
+render. Values whose key looks like a credential are masked on the way out (see
+``_SECRET_KEY_PARTS``), because prompts and job env can carry API keys.
+
+Writes stay narrow on purpose: only pause, resume, and delete, only for an
+exact cron job id whose profile the caller already named correctly.
 """
 from __future__ import annotations
 
@@ -48,6 +52,10 @@ ROUTE_PATHS = (
     "/api/plugins/fluid-history/runs",
     "/api/plugins/fluid-history/skills",
     "/api/plugins/fluid-history/actions",
+    "/api/plugins/fluid-history/jobs",
+    "/api/plugins/fluid-history/profiles",
+    "/api/plugins/fluid-history/sessions",
+    "/api/plugins/fluid-history/introspect",
 )
 REQUIRED_SCOPE = "fluid:history"
 MANAGE_SCOPE = "fluid:manage"
@@ -160,12 +168,88 @@ def _safe_error(value: Any) -> Optional[str]:
     return " ".join(str(value).split())[:300]
 
 
+MAX_PROMPT_CHARS = 20_000
+MAX_JSON_DEPTH = 8
+REDACTED = "«redacted»"
+
+# Substring match against the *key*, so FLUID_SIGNAL_TRIAGE_SECRET and
+# openai_api_key are both caught without needing an exhaustive list.
+_SECRET_KEY_PARTS = (
+    "secret", "token", "password", "passwd", "credential",
+    "api_key", "apikey", "private_key", "authorization", "auth_header",
+)
+
+
+def _is_secret_key(key: Any) -> bool:
+    text = str(key).casefold()
+    return any(part in text for part in _SECRET_KEY_PARTS)
+
+
+def _jsonable(value: Any, depth: int = 0) -> Any:
+    """Coerce an arbitrary Hermes record into something FastAPI can encode.
+
+    Hermes job dicts are plain data today, but they are not part of a contract
+    we control, so anything exotic degrades to its string form rather than
+    500-ing the whole roster.
+    """
+    if depth >= MAX_JSON_DEPTH:
+        return REDACTED if isinstance(value, (dict, list, tuple, set)) else _jsonable(value, MAX_JSON_DEPTH - 1)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): (REDACTED if _is_secret_key(key) else _jsonable(item, depth + 1))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item, depth + 1) for item in value]
+    if isinstance(value, datetime):
+        return _iso(value)
+    return str(value)
+
+
+def _full_job_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Every field Hermes reports for a cron job, secrets masked."""
+    record = _jsonable(job)
+    if isinstance(record, dict):
+        prompt = record.get("prompt")
+        if isinstance(prompt, str) and len(prompt) > MAX_PROMPT_CHARS:
+            record["prompt"] = prompt[:MAX_PROMPT_CHARS]
+            record["promptTruncated"] = True
+    return record
+
+
+def _definition_payload(job: Dict[str, Any], contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The operator-authored definition Fluid renders on the agent detail page.
+
+    Everything here is already hashed into the presentation contract, so it is
+    the same material Fluid claims the agent runs on — just readable.
+    """
+    prompt = str(job.get("prompt") or "")
+    return {
+        "prompt": prompt[:MAX_PROMPT_CHARS] or None,
+        "promptTruncated": len(prompt) > MAX_PROMPT_CHARS,
+        "skills": sorted({
+            text for value in (job.get("skills") or [])
+            if (text := " ".join(str(value or "").split()))
+        }),
+        "script": " ".join(str(job.get("script") or "").split()) or None,
+        "workdir": " ".join(str(job.get("workdir") or "").split()) or None,
+        "model": " ".join(str(job.get("model") or "").split()) or None,
+        "timeoutSeconds": _int_or_none(job.get("timeout") or job.get("timeout_seconds")),
+        "definitionHash": str(contract.get("definitionHash") or "") or None if contract else None,
+    }
+
+
 def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     latest = job.get("latest_execution")
     if not isinstance(latest, dict):
         latest = {}
     contract, contract_status = verified_contract(job)
     return {
+        "definition": _definition_payload(job, contract),
+        # The complete record, for anything the curated fields below omit.
+        "raw": _full_job_payload(job),
         "id": str(job.get("id") or ""),
         "name": str(job.get("name") or job.get("id") or "Unnamed automation"),
         "profile": str(job.get("profile") or job.get("profile_name") or "default"),
@@ -434,6 +518,134 @@ def _history_payload(agent_id: Optional[str], job_id: Optional[str], limit: int)
     }
 
 
+def _jobs_payload(job_id: Optional[str]) -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+
+    jobs = [
+        _full_job_payload(job)
+        for job in ws._list_cron_jobs_sync("all")
+        if job_id is None or str(job.get("id") or "") == job_id
+    ]
+    if job_id is not None and not jobs:
+        raise HTTPException(status_code=404, detail="Hermes job not found")
+    return {"jobs": jobs, "fetchedAt": datetime.now(timezone.utc).isoformat()}
+
+
+def _profiles_payload() -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+
+    return {
+        "profiles": [_jsonable(record) for record in ws._cron_profile_dicts()],
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# Hermes does not promise a stable session-transcript helper, so try the known
+# spellings in order and report what was attempted when none exist. /introspect
+# lists what this particular deployment actually has.
+_TRANSCRIPT_ACCESSORS = (
+    "_get_session_messages_sync",
+    "_list_session_messages_sync",
+    "_session_messages_sync",
+    "_get_session_sync",
+)
+
+
+def _transcript_payload(session_id: str, profile: str, limit: int) -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+
+    for name in _TRANSCRIPT_ACCESSORS:
+        accessor = getattr(ws, name, None)
+        if accessor is None:
+            continue
+        with ws._profile_scope(profile):
+            result = accessor(session_id)
+        messages = result.get("messages") if isinstance(result, dict) else result
+        return {
+            "sessionId": session_id,
+            "profile": profile,
+            "source": f"web_server.{name}",
+            "messages": _jsonable(messages)[:limit] if isinstance(messages, list) else _jsonable(messages),
+            "fetchedAt": datetime.now(timezone.utc).isoformat(),
+        }
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "No session transcript helper on this Hermes build. Tried: "
+            + ", ".join(_TRANSCRIPT_ACCESSORS)
+            + ". Call /introspect to see what is available."
+        ),
+    )
+
+
+def _introspect_payload() -> Dict[str, Any]:
+    """What this Hermes build exposes, so the wrapper can be written to fit it."""
+    from hermes_cli import web_server as ws
+
+    jobs = ws._list_cron_jobs_sync("all")
+    sample_keys = sorted({key for job in jobs for key in job})
+    return {
+        "webServerHelpers": sorted(
+            name for name in dir(ws)
+            if any(part in name for part in ("cron", "session", "profile", "job", "run"))
+        ),
+        "jobKeys": sample_keys,
+        "jobCount": len(jobs),
+        "transcriptAccessorsTried": list(_TRANSCRIPT_ACCESSORS),
+        "transcriptAccessorsPresent": [
+            name for name in _TRANSCRIPT_ACCESSORS if getattr(ws, name, None) is not None
+        ],
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _require_scope(request: Request, scope: str) -> None:
+    principal = getattr(request.state, "token_principal", None)
+    scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
+    if scope not in scopes:
+        raise HTTPException(status_code=403, detail=f"Missing {scope} scope")
+
+
+@router.get("/jobs")
+async def jobs(
+    request: Request,
+    job: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    _require_scope(request, REQUIRED_SCOPE)
+    if job is not None and (
+        not job or len(job) > 128 or not all(char.isalnum() or char in "-_" for char in job)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Hermes job id")
+    return await run_in_threadpool(_jobs_payload, job)
+
+
+@router.get("/profiles")
+async def profiles(request: Request) -> Dict[str, Any]:
+    _require_scope(request, REQUIRED_SCOPE)
+    return await run_in_threadpool(_profiles_payload)
+
+
+@router.get("/sessions")
+async def sessions(
+    request: Request,
+    session: str = Query(..., min_length=1, max_length=128),
+    profile: str = Query("default", min_length=1, max_length=64),
+    limit: int = Query(200, ge=1, le=1000),
+) -> Dict[str, Any]:
+    _require_scope(request, REQUIRED_SCOPE)
+    if not all(char.isalnum() or char in "-_" for char in session):
+        raise HTTPException(status_code=400, detail="Invalid Hermes session id")
+    if not all(char.isalnum() or char in "-_" for char in profile):
+        raise HTTPException(status_code=400, detail="Invalid Hermes profile")
+    return await run_in_threadpool(_transcript_payload, session, profile, limit)
+
+
+@router.get("/introspect")
+async def introspect(request: Request) -> Dict[str, Any]:
+    _require_scope(request, REQUIRED_SCOPE)
+    return await run_in_threadpool(_introspect_payload)
+
+
 @router.get("/agents")
 async def agents(request: Request) -> Dict[str, Any]:
     principal = getattr(request.state, "token_principal", None)
@@ -457,7 +669,7 @@ async def runs(
     request: Request,
     agent: Optional[str] = Query(None),
     job: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=200),
 ) -> Dict[str, Any]:
     principal = getattr(request.state, "token_principal", None)
     scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
