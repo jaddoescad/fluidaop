@@ -789,10 +789,76 @@
   max-width: 100%;
 }
 
-/* The headline already names the direction ("Text sent" / "Text received"), so
-   the icon only has to tint with it — no second label to read. */
-.lw-signal-card.is-outbound .fd-sel-src svg {
-  color: var(--lw-accent);
+/* Consecutive messages from the same side lose their header: the name and time
+   only need saying when the speaker or the day changes. */
+.lw-signal-card.is-grouped {
+  margin-top: -6px;
+}
+
+.lw-signal-card.is-outbound.is-grouped { border-top-right-radius: 3px; }
+.lw-signal-card.is-inbound.is-grouped { border-top-left-radius: 3px; }
+
+.lw-sender {
+  color: var(--lw-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+/* One divider per day, so a seven-day silence looks different from a reply
+   two minutes later. */
+.lw-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+  color: var(--lw-faint);
+  font-size: 11px;
+}
+
+.lw-day::before,
+.lw-day::after {
+  height: 1px;
+  flex: 1;
+  background: var(--lw-line);
+  content: '';
+}
+
+/* A call happened; it was not said. Slim, centred, unmistakably an event. */
+.lw-call-event {
+  align-self: center;
+  width: 100%;
+  max-width: 86%;
+  padding: 8px 12px;
+  border: 1px dashed var(--lw-line);
+  border-radius: 999px;
+  background: transparent;
+}
+
+.lw-call-event:has(.lw-call-evidence),
+.lw-call-event:has(.fd-sel-evidence) {
+  border-radius: 12px;
+  border-style: solid;
+  background: color-mix(in srgb, var(--lw-raised) 70%, transparent);
+}
+
+.lw-call-event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--lw-ink-2);
+  font-size: 12px;
+}
+
+.lw-call-event-head strong { color: var(--lw-ink); font-weight: 600; }
+.lw-call-event-head svg { width: 14px; height: 14px; color: var(--lw-faint); }
+.lw-call-event.is-outbound .lw-call-event-head svg { color: var(--lw-accent); }
+.lw-call-event-dur { color: var(--lw-faint); }
+.lw-call-event-when { margin-left: auto; color: var(--lw-faint); font-variant-numeric: tabular-nums; }
+
+.lw-flag-auto {
+  color: var(--lw-faint);
+  font-size: 10px;
+  text-transform: lowercase;
 }
 
 .lw-signal-card .fd-sel-head {

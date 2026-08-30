@@ -1,5 +1,6 @@
 import {
   FormEvent,
+  Fragment,
   useEffect,
   useMemo,
   useState,
@@ -29,6 +30,7 @@ import {
   PipelineStageHistory,
   PipelineTouchpoint,
   State,
+  SignalDetail,
 } from '../types';
 import { statusOf } from '../variants/kit';
 import { RoleTag, firstNameOf } from '../variants/shared';
@@ -52,6 +54,29 @@ function fullDate(at: number): string {
   return new Date(at).toLocaleString([], {
     month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
   });
+}
+
+/** "4:55 PM" — the only part of a timestamp that changes between messages in a day. */
+function clockTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/** "Today", "Yesterday", or "Friday, Aug 21" — one divider per day, not per message. */
+function dayLabel(at: number): string {
+  const day = new Date(at); day.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  return new Date(at).toLocaleDateString([], {
+    weekday: 'long', month: 'short', day: 'numeric',
+    ...(new Date(at).getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }),
+  });
+}
+
+function dayKey(at: number): string {
+  const day = new Date(at);
+  return `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
 }
 
 function shortDate(at: number): string {
@@ -93,12 +118,6 @@ function touchpointTitle(touchpoint: PipelineTouchpoint): string {
   return touchpoint.subject || 'Customer touchpoint';
 }
 
-function sourceLabel(source: string): string {
-  if (source === 'quo') return 'Quo';
-  if (source === 'gmail') return 'Gmail';
-  if (source === 'dripjobs') return 'DripJobs';
-  return source || 'Fluid';
-}
 
 function channelIcon(touchpoint: PipelineTouchpoint) {
   if (touchpoint.channel === 'call') return Phone;
@@ -322,51 +341,9 @@ export function LeadWorkspace({
     }
   };
 
-  const renderTouchpoint = (touchpoint: PipelineTouchpoint) => {
-    const signal = touchpoint.activityId === null ? null : signalById.get(String(touchpoint.activityId));
-    const signalId = touchpoint.activityId === null ? null : String(touchpoint.activityId);
-    const detail = signalId ? s.signalDetails?.[signalId] : null;
-    const review = signal ? statusOf(s, signal) : null;
-    const preview = touchpoint.preview.trim();
-    const Icon = channelIcon(touchpoint);
-    const title = touchpointTitle(touchpoint);
-    const duration = touchpoint.channel === 'call' && (touchpoint.durationSeconds ?? 0) > 0
-      ? callDuration(touchpoint.durationSeconds as number)
-      : null;
-
-    if (touchpoint.kind === 'milestone') {
-      return (
-        <div className="lw-chat-system-event" key={touchpoint.id}>
-          <Milestone aria-hidden="true" />
-          <strong>{touchpoint.subject}</strong>
-          <span>{fullDate(touchpoint.occurredAt)}</span>
-        </div>
-      );
-    }
-
-    // Ours right, theirs left — the thread is unreadable when both sides stack
-    // in one column wearing the same colour.
-    // A touchpoint with no recorded direction stays full width rather than
-    // claiming a side it cannot prove.
-    const side = touchpoint.direction === null ? 'is-undirected' : `is-${touchpoint.direction}`;
-
-    return (
-      <article
-        className={`fd-sel lw-signal-card ${side}`}
-        key={touchpoint.id}
-      >
-        <div className="fd-sel-head">
-          <span className="fd-sel-src"><Icon aria-hidden="true" /> {title}{duration ? ` · ${duration}` : ''}</span>
-          {review?.key === 'action' && <span className="lw-flag lw-flag-action">draft in Actions</span>}
-          <span className="lw-signal-when">{sourceLabel(touchpoint.source)} · {fullDate(touchpoint.occurredAt)}</span>
-        </div>
-        {touchpoint.channel === 'email' && touchpoint.subject.trim() && (
-          <h3 className="fd-sel-subject">{touchpoint.subject}</h3>
-        )}
-        {touchpoint.channel !== 'call' && (
-          <p className="fd-sel-text lw-signal-main">{preview || title}</p>
-        )}
-        {touchpoint.channel === 'call' && (() => {
+  /** Recording, summary and transcript for a call — the same evidence as before,
+      now attached to a timeline event instead of a speech bubble. */
+  const renderCallEvidence = (touchpoint: PipelineTouchpoint, detail: SignalDetail | null | undefined) => {
           if (detail === null || detail === undefined) {
             return (
               <div className="fd-sel-evidence lw-call-evidence">
@@ -425,7 +402,97 @@ export function LeadWorkspace({
               )}
             </div>
           );
-        })()}
+  };
+
+  /** Day dividers belong between messages, not stamped on every one of them. */
+  const renderStream = (touchpoints: PipelineTouchpoint[]) => {
+    let lastDay: string | null = null;
+    let lastSender: string | null = null;
+    return touchpoints.map((touchpoint) => {
+      const day = dayKey(touchpoint.occurredAt);
+      const newDay = day !== lastDay;
+      lastDay = day;
+      const sender = touchpoint.kind === 'milestone' || touchpoint.channel === 'call'
+        ? null
+        : `${touchpoint.direction}`;
+      const grouped = !newDay && sender !== null && sender === lastSender;
+      lastSender = sender;
+      return (
+        <Fragment key={touchpoint.id}>
+          {newDay && (
+            <div className="lw-day" role="separator">
+              <span>{dayLabel(touchpoint.occurredAt)}</span>
+            </div>
+          )}
+          {renderTouchpoint(touchpoint, grouped)}
+        </Fragment>
+      );
+    });
+  };
+
+  const renderTouchpoint = (touchpoint: PipelineTouchpoint, grouped = false) => {
+    const signal = touchpoint.activityId === null ? null : signalById.get(String(touchpoint.activityId));
+    const signalId = touchpoint.activityId === null ? null : String(touchpoint.activityId);
+    const detail = signalId ? s.signalDetails?.[signalId] : null;
+    const review = signal ? statusOf(s, signal) : null;
+    const preview = touchpoint.preview.trim();
+    const Icon = channelIcon(touchpoint);
+    const title = touchpointTitle(touchpoint);
+    const duration = touchpoint.channel === 'call' && (touchpoint.durationSeconds ?? 0) > 0
+      ? callDuration(touchpoint.durationSeconds as number)
+      : null;
+
+    if (touchpoint.kind === 'milestone') {
+      return (
+        <div className="lw-chat-system-event" key={touchpoint.id}>
+          <Milestone aria-hidden="true" />
+          <strong>{touchpoint.subject}</strong>
+          <span>{fullDate(touchpoint.occurredAt)}</span>
+        </div>
+      );
+    }
+
+    // Ours right, theirs left — the thread is unreadable when both sides stack
+    // in one column wearing the same colour.
+    // A touchpoint with no recorded direction stays full width rather than
+    // claiming a side it cannot prove.
+    const side = touchpoint.direction === null ? 'is-undirected' : `is-${touchpoint.direction}`;
+
+    // A call is something that happened, not something that was said, so it
+    // reads as a timeline event rather than another speech bubble.
+    if (touchpoint.channel === 'call') {
+      return (
+        <div className={`lw-call-event ${side}`} key={touchpoint.id}>
+          <div className="lw-call-event-head">
+            <Icon aria-hidden="true" />
+            <strong>{title}</strong>
+            {duration && <span className="lw-call-event-dur">{duration}</span>}
+            <span className="lw-call-event-when">{clockTime(touchpoint.occurredAt)}</span>
+          </div>
+          {renderCallEvidence(touchpoint, detail)}
+        </div>
+      );
+    }
+
+    const who = touchpoint.direction === 'outbound' ? 'Ottawa Painters' : displayName;
+
+    return (
+      <article
+        className={`fd-sel lw-signal-card ${side}${grouped ? ' is-grouped' : ''}`}
+        key={touchpoint.id}
+      >
+        {!grouped && (
+          <div className="fd-sel-head">
+            <span className="lw-sender">{who}</span>
+            {touchpoint.isAutomated && <span className="lw-flag lw-flag-auto">automated</span>}
+            {review?.key === 'action' && <span className="lw-flag lw-flag-action">draft in Actions</span>}
+            <span className="lw-signal-when">{clockTime(touchpoint.occurredAt)}</span>
+          </div>
+        )}
+        {touchpoint.channel === 'email' && touchpoint.subject.trim() && (
+          <h3 className="fd-sel-subject">{touchpoint.subject}</h3>
+        )}
+          <p className="fd-sel-text lw-signal-main">{preview || title}</p>
         {(touchpoint.isAutomated || touchpoint.evidenceKind === 'inferred') && (
           <div className="lw-chat-badges">
             {touchpoint.isAutomated && <span>Automated</span>}
@@ -454,7 +521,7 @@ export function LeadWorkspace({
           </span>
         </div>
         {section.touchpoints.length > 0 && (
-          <div className="lw-chat-stage-stream">{section.touchpoints.map(renderTouchpoint)}</div>
+          <div className="lw-chat-stage-stream">{renderStream(section.touchpoints)}</div>
         )}
       </section>
     );
@@ -477,7 +544,7 @@ export function LeadWorkspace({
             {` · ${priorTotal} earlier ${priorTotal === 1 ? 'communication' : 'communications'} · ${dateSpan}`}
           </span>
         </div>
-        <div className="lw-chat-stage-stream">{priorTouchpoints.map(renderTouchpoint)}</div>
+        <div className="lw-chat-stage-stream">{renderStream(priorTouchpoints)}</div>
       </section>
     );
   };
