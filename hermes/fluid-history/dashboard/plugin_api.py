@@ -44,6 +44,10 @@ except (ImportError, ValueError):  # Hermes loads plugin APIs outside a package 
     contract_module = importlib.util.module_from_spec(contract_spec)
     contract_spec.loader.exec_module(contract_module)
     verified_contract = contract_module.verified_contract
+    _default_skill_roots = contract_module._default_skill_roots
+    _find_skill_file = contract_module._find_skill_file
+else:  # pragma: no cover - only taken when the package import above succeeds.
+    from .agent_contracts import _default_skill_roots, _find_skill_file
 
 
 router = APIRouter()
@@ -324,6 +328,26 @@ def _apply_agent_action(body: AgentAction) -> Dict[str, Any]:
     }
 
 
+MAX_SKILL_CHARS = 40_000
+
+
+def _skill_instructions(name: str, skill: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """The SKILL.md body, so Fluid can show what a skill actually tells an agent."""
+    raw_path = skill.get("path") or skill.get("file") or skill.get("source_path")
+    candidate = Path(str(raw_path)) if raw_path else None
+    if candidate is not None and candidate.is_dir():
+        candidate = candidate / "SKILL.md"
+    if candidate is None or not candidate.is_file():
+        candidate = _find_skill_file(name, _default_skill_roots())
+    if candidate is None:
+        return None, None
+    try:
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, str(candidate)
+    return text[:MAX_SKILL_CHARS], str(candidate)
+
+
 def _skills_payload() -> Dict[str, Any]:
     from hermes_cli import web_server as ws
     from hermes_cli.skills_config import get_disabled_skills
@@ -355,6 +379,7 @@ def _skills_payload() -> Dict[str, Any]:
                     else "bundled" if name in bundled_names
                     else "custom"
                 )
+                instructions, instructions_path = _skill_instructions(name, skill)
                 entry = combined.setdefault(name, {
                     "id": name,
                     "name": name,
@@ -365,6 +390,8 @@ def _skills_payload() -> Dict[str, Any]:
                     "profiles": [],
                     "usage": 0,
                     "usedBy": [],
+                    "instructions": instructions,
+                    "instructionsPath": instructions_path,
                 })
                 entry["enabled"] = entry["enabled"] or name not in disabled
                 entry["profiles"].append(profile)
