@@ -1,3 +1,8 @@
+// Everything here is served by the fluid-history plugin running inside Hermes.
+// Fluid cannot call Hermes' native API (it needs an interactive Nous login), so
+// a field missing from the UI usually means the plugin does not return it yet.
+// See hermes/fluid-history/DEPLOY.md before changing this contract.
+
 export interface HermesStatus {
   connected: boolean;
   version: string | null;
@@ -5,6 +10,17 @@ export interface HermesStatus {
   activeAgents: number;
   profiles: string[];
   checkedAt: string;
+}
+
+export interface HermesAgentSource {
+  prompt: string | null;
+  promptTruncated: boolean;
+  skills: string[];
+  script: string | null;
+  workdir: string | null;
+  model: string | null;
+  timeoutSeconds: number | null;
+  definitionHash: string | null;
 }
 
 export interface HermesAgentDefinition {
@@ -28,6 +44,8 @@ export interface HermesAgentDefinition {
   contractStatus: string;
   source: 'hermes' | 'fluid';
   historyAvailable: boolean;
+  /** Null when the deployed Hermes plugin predates definition passthrough. */
+  definition: HermesAgentSource | null;
 }
 
 interface HermesAgentContract {
@@ -54,6 +72,24 @@ interface HermesAgentRecord {
   mode: 'agent' | 'script';
   contract: HermesAgentContract | null;
   contractStatus: string;
+  definition: unknown;
+}
+
+function presentAgentSource(value: unknown): HermesAgentSource | null {
+  if (value === null || typeof value !== 'object') return null;
+  const source = value as Record<string, unknown>;
+  return {
+    prompt: typeof source.prompt === 'string' && source.prompt.trim() !== '' ? source.prompt : null,
+    promptTruncated: source.promptTruncated === true,
+    skills: Array.isArray(source.skills)
+      ? source.skills.filter((skill): skill is string => typeof skill === 'string')
+      : [],
+    script: typeof source.script === 'string' ? source.script : null,
+    workdir: typeof source.workdir === 'string' ? source.workdir : null,
+    model: typeof source.model === 'string' ? source.model : null,
+    timeoutSeconds: typeof source.timeoutSeconds === 'number' ? source.timeoutSeconds : null,
+    definitionHash: typeof source.definitionHash === 'string' ? source.definitionHash : null,
+  };
 }
 
 interface HermesAgentsPayload {
@@ -78,6 +114,7 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     historyAgentId: null,
     source: 'hermes',
     historyAvailable: true,
+    definition: presentAgentSource(agent.definition),
   };
 }
 
@@ -91,6 +128,9 @@ export interface HermesSkill {
   profiles: string[];
   usage: number;
   usedBy: string[];
+  /** SKILL.md body. Null when the deployed plugin predates instruction passthrough. */
+  instructions: string | null;
+  instructionsPath: string | null;
 }
 
 interface HermesSkillsPayload {
@@ -196,7 +236,13 @@ export async function loadHermesSkills(): Promise<HermesSkill[]> {
   if (payload === null || !('skills' in payload) || !Array.isArray(payload.skills)) {
     throw new Error('Hermes returned an invalid skill roster');
   }
-  return payload.skills;
+  return payload.skills.map((skill) => ({
+    ...skill,
+    instructions: typeof skill.instructions === 'string' && skill.instructions.trim() !== ''
+      ? skill.instructions
+      : null,
+    instructionsPath: typeof skill.instructionsPath === 'string' ? skill.instructionsPath : null,
+  }));
 }
 
 export async function loadHermesHistory(

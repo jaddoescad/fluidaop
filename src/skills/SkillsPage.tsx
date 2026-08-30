@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { HermesSkill, HermesStatus, loadHermesSkills, loadHermesStatus } from '../agents/hermes';
 import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
@@ -45,6 +45,7 @@ export function SkillsPage({
 
   const online = status?.connected === true;
   const selectedSkill = skills?.find((skill) => skill.id === selectedId) ?? null;
+  const groups = useMemo(() => groupSkills(skills), [skills]);
 
   return (
     <div className="v v-flow v-zen sk-root">
@@ -85,30 +86,45 @@ export function SkillsPage({
               ) : skills.length === 0 ? (
                 <SkillState title="No skills installed" detail="Hermes is online but is not reporting any registered skills." />
               ) : (
-                <div className="sk-list" aria-label="Hermes skills">
-                  {skills.map((skill) => (
-                    <button
-                      type="button"
-                      className="sk-row"
-                      key={skill.id}
-                      onClick={() => setSelectedId(skill.id)}
-                      aria-haspopup="dialog"
-                    >
-                      <span className="sk-icon" aria-hidden="true">{skillIcon(skill)}</span>
-                      <span className="sk-row-copy">
-                        <strong>{skillName(skill)}</strong>
-                        <span>{skill.description}</span>
-                      </span>
-                      <span className="sk-row-meta">
-                        <span>{sourceLabel(skill.source)}{skill.version === null ? '' : ` · v${skill.version}`}</span>
-                        <span className={`sk-state${skill.enabled ? ' sk-state-active' : ''}`}>
-                          {skill.enabled ? 'Available' : 'Disabled'}
-                        </span>
-                      </span>
-                      <span className="sk-chevron" aria-hidden="true">›</span>
-                    </button>
-                  ))}
-                </div>
+                groups.map((group) => (
+                  <section className="sk-group" key={group.key}>
+                    <header className="sk-group-head">
+                      <h2>{group.title}</h2>
+                      <span>{group.skills.length}</span>
+                      <p>{group.blurb}</p>
+                    </header>
+                    <div className="sk-list" aria-label={group.title}>
+                      {group.skills.map((skill) => (
+                        <button
+                          type="button"
+                          className="sk-row"
+                          key={skill.id}
+                          onClick={() => setSelectedId(skill.id)}
+                          aria-haspopup="dialog"
+                        >
+                          <span className="sk-icon" aria-hidden="true">{skillIcon(skill)}</span>
+                          <span className="sk-row-copy">
+                            <strong>{skillName(skill)}</strong>
+                            <span>{skill.description}</span>
+                            {skill.usedBy.length > 0 ? (
+                              <span className="sk-used">
+                                In use by {skill.usedBy.join(', ')}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="sk-row-meta">
+                            <span className={usageClass(skill)}>{usageLabel(skill)}</span>
+                            <span>{sourceLabel(skill.source)}{skill.version === null ? '' : ` · v${skill.version}`}</span>
+                            <span className={`sk-state${skill.enabled ? ' sk-state-active' : ''}`}>
+                              {skill.enabled ? 'Available' : 'Disabled'}
+                            </span>
+                          </span>
+                          <span className="sk-chevron" aria-hidden="true">›</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ))
               )}
 
               <p className="sk-note">
@@ -151,19 +167,28 @@ export function SkillsPage({
               <div><dt>Source</dt><dd>{sourceLabel(selectedSkill.source)}</dd></div>
               <div><dt>Version</dt><dd>{selectedSkill.version === null ? 'Not declared' : `v${selectedSkill.version}`}</dd></div>
               <div><dt>State</dt><dd>{selectedSkill.enabled ? 'Available' : 'Disabled'}</dd></div>
+              <div><dt>Lifetime uses</dt><dd>{usageLabel(selectedSkill)}</dd></div>
             </dl>
 
+            <div className={`sk-verdict sk-verdict-${retirementVerdict(selectedSkill).tone}`}>
+              <strong>{retirementVerdict(selectedSkill).title}</strong>
+              <p>{retirementVerdict(selectedSkill).detail}</p>
+            </div>
+
             <section className="sk-detail-section">
-              <h3>What it does</h3>
-              {selectedSkill.id === 'agent-creator' ? (
-                <ol className="sk-sequence">
-                  <li><span>1</span><p>Turns a business workflow into an explicit agent contract.</p></li>
-                  <li><span>2</span><p>Creates the skill, profile choice, schedule, and least-privilege tool access.</p></li>
-                  <li><span>3</span><p>Adds idempotency, bounded retries, and visible failure handling.</p></li>
-                  <li><span>4</span><p>Verifies the real Hermes job before Fluid displays it.</p></li>
-                </ol>
+              <h3>Instructions</h3>
+              {selectedSkill.instructions === null ? (
+                <p className="sk-detail-copy">
+                  This Hermes deployment does not send skill instructions yet. Update the
+                  fluid-history plugin on the Hermes host to read them here.
+                </p>
               ) : (
-                <p className="sk-detail-copy">The detailed instructions remain inside Hermes. Fluid reads metadata only.</p>
+                <>
+                  <pre className="sk-instructions">{selectedSkill.instructions}</pre>
+                  {selectedSkill.instructionsPath !== null ? (
+                    <p className="sk-detail-copy sk-path">{selectedSkill.instructionsPath}</p>
+                  ) : null}
+                </>
               )}
             </section>
 
@@ -222,6 +247,112 @@ function skillName(skill: HermesSkill): string {
 
 function skillIcon(skill: HermesSkill): string {
   return skill.id === 'agent-creator' ? '🛠️' : '🧩';
+}
+
+interface SkillGroup {
+  key: string;
+  title: string;
+  blurb: string;
+  skills: HermesSkill[];
+}
+
+// Yours first — the built-ins outnumber them roughly three to one, so a flat
+// alphabetical list buries the skills this workspace actually wrote.
+const GROUP_ORDER: { key: string; title: string; blurb: string; match: (source: string) => boolean }[] = [
+  {
+    key: 'custom',
+    title: 'Your skills',
+    blurb: 'Written for this workspace. Agents that name a skill are almost always naming one of these.',
+    match: (source) => source === 'custom',
+  },
+  {
+    key: 'hub',
+    title: 'Skill Hub',
+    blurb: 'Installed from the community Skill Hub.',
+    match: (source) => source === 'hub',
+  },
+  {
+    key: 'bundled',
+    title: 'Hermes built-in',
+    blurb: 'Ship with Hermes. Available to every agent, nothing to maintain.',
+    match: (source) => source === 'bundled',
+  },
+];
+
+function groupSkills(skills: HermesSkill[] | null): SkillGroup[] {
+  if (skills === null) return [];
+  const remaining = new Set(skills);
+  const groups: SkillGroup[] = [];
+
+  for (const definition of GROUP_ORDER) {
+    const matched = skills.filter((skill) => definition.match(skill.source));
+    matched.forEach((skill) => remaining.delete(skill));
+    if (matched.length > 0) groups.push({ ...definition, skills: sortSkills(matched) });
+  }
+
+  if (remaining.size > 0) {
+    groups.push({
+      key: 'other',
+      title: 'Other',
+      blurb: 'Hermes did not report a recognised source for these.',
+      skills: sortSkills([...remaining]),
+    });
+  }
+  return groups;
+}
+
+// Attached to an agent first, then by how much the skill has actually been
+// invoked, so never-used skills sink to the bottom of their section.
+function sortSkills(skills: HermesSkill[]): HermesSkill[] {
+  return [...skills].sort((left, right) => {
+    if ((left.usedBy.length > 0) !== (right.usedBy.length > 0)) {
+      return left.usedBy.length > 0 ? -1 : 1;
+    }
+    if (left.usage !== right.usage) return right.usage - left.usage;
+    return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+  });
+}
+
+/** Lifetime invocation count Hermes records per skill, agent runs and chats alike. */
+function usageLabel(skill: HermesSkill): string {
+  if (skill.usage === 0) return 'Never used';
+  return `${skill.usage.toLocaleString()} ${skill.usage === 1 ? 'use' : 'uses'}`;
+}
+
+function usageClass(skill: HermesSkill): string {
+  return skill.usage === 0 ? 'sk-usage sk-usage-none' : 'sk-usage';
+}
+
+/** Is this skill safe to delete? The two signals disagree often enough to be worth stating. */
+function retirementVerdict(skill: HermesSkill): { tone: string; title: string; detail: string } {
+  const attached = skill.usedBy.length > 0;
+  if (attached) {
+    return {
+      tone: 'live',
+      title: 'In active use — do not delete',
+      detail: `Attached to ${skill.usedBy.join(', ')}. Deleting it breaks that agent on its next run.`,
+    };
+  }
+  // A disabled skill cannot be invoked, so a zero count proves nothing about it.
+  if (skill.usage === 0 && !skill.enabled) {
+    return {
+      tone: 'check',
+      title: 'Never used, but it has been switched off',
+      detail: 'Disabled skills cannot be invoked, so a zero count says nothing about whether this is useful. Read the instructions before deciding — a switched-off skill can still hold knowledge worth keeping.',
+    };
+  }
+  if (skill.usage === 0) {
+    return {
+      tone: 'dead',
+      title: 'Never used — safe to delete',
+      detail: 'Enabled, referenced by no agent, and Hermes has never recorded an invocation from a schedule or a chat.',
+    };
+  }
+  return {
+    tone: 'check',
+    title: 'Used before, but nothing references it now',
+    detail: `Invoked ${skill.usage.toLocaleString()} times historically, but no agent is attached today. This count is lifetime, not recent — it cannot tell a skill you retired last month from one you used yesterday in a chat.`,
+  };
 }
 
 function sourceLabel(source: string): string {
