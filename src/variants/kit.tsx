@@ -1,6 +1,6 @@
 import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CHANNEL_LABEL } from '../channels';
-import { ConversationTurn } from '../components/Conversation';
+import { ConversationSkeleton, ConversationTurn } from '../components/Conversation';
 import { agentFor } from '../engine';
 import { HermesStatus } from '../agents/hermes';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, MIN } from '../time';
@@ -2264,6 +2264,7 @@ export function RunPopup({
                 {signalDetail.loading ? 'Loading history…' : 'Load earlier history'}
               </button>
             ))}
+          {subject.type === 'signal' && signalDetail?.loading && ctx.length === 0 && <ConversationSkeleton />}
           {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
           {subject.type === 'signal' && selectedSignal && (
             <>
@@ -2419,7 +2420,6 @@ export function RunPopup({
           {/* ================= signal: Hermes recommends; the user decides ================= */}
           {subject.type === 'signal' && sg && selectedSignal && sgStatus && (
             <>
-              {signalDetail?.loading && agentTurn('g-loading', <>Loading the bounded conversation and operational context…</>)}
               {signalDetail?.error && agentTurn('g-error', <>I could not load trustworthy context: {signalDetail.error}</>)}
               {sgStatus.key === 'open' && sgReplyRun && (
                 agentTurn(

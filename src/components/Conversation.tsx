@@ -124,3 +124,27 @@ export function ConversationTurn({
     </article>
   );
 }
+
+/** Placeholders shaped like the messages that are coming.
+ *
+ * A thread loads into a thread — not into a status line wearing an agent's
+ * avatar, which reads as a message, then disappears. */
+export function ConversationSkeleton({ turns = 3 }: { turns?: number }) {
+  return (
+    <div className="cv-skeleton" aria-live="polite" aria-busy="true">
+      <span className="cv-sr">Loading this conversation</span>
+      {Array.from({ length: turns }, (_, index) => (
+        <div className={`cv-turn cv-${index % 2 === 0 ? 'them' : 'you'}`} key={index}>
+          <span className="cv-avatar"><span className="cv-shim cv-shim-avatar" /></span>
+          <div className="cv-main">
+            <div className="cv-head"><span className="cv-shim cv-shim-name" /></div>
+            <div className="cv-bubble">
+              <span className="cv-shim cv-shim-line" />
+              <span className="cv-shim cv-shim-line cv-shim-short" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

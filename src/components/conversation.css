@@ -209,3 +209,50 @@
 @media (max-width: 620px) {
   .cv-thread { --cv-max: 96%; }
 }
+
+/* ---------- loading ---------- */
+
+.cv-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cv-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.cv-shim {
+  display: block;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--cv-line) 60%, transparent) 25%,
+    color-mix(in srgb, var(--cv-line) 110%, transparent) 37%,
+    color-mix(in srgb, var(--cv-line) 60%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: cv-shimmer 1.4s ease-in-out infinite;
+}
+
+.cv-shim-avatar { width: 30px; height: 30px; border-radius: 50%; }
+.cv-shim-name { width: 96px; height: 9px; }
+.cv-shim-line { width: 210px; height: 10px; }
+.cv-shim-line + .cv-shim-line { margin-top: 7px; }
+.cv-shim-short { width: 140px; }
+
+.cv-skeleton .cv-bubble { background: transparent; }
+
+@keyframes cv-shimmer {
+  from { background-position: 100% 50%; }
+  to { background-position: 0 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cv-shim { animation: none; }
+}
