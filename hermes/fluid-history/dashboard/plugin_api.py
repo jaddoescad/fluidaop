@@ -344,7 +344,7 @@ def _skill_instructions(name: str, skill: Dict[str, Any]) -> tuple[Optional[str]
     if candidate is not None and candidate.is_dir():
         candidate = candidate / "SKILL.md"
     if candidate is None or not candidate.is_file():
-        candidate = _find_skill_file(name, _default_skill_roots())
+        candidate = _find_skill_file(name, _all_skill_roots())
     if candidate is None:
         return None, None
     try:
@@ -357,6 +357,34 @@ def _skill_instructions(name: str, skill: Dict[str, Any]) -> tuple[Optional[str]
 SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
+def _all_skill_roots() -> List[Path]:
+    """Default roots plus each cron profile's own skills directory.
+
+    Skills are discovered per profile, so a skill can live under a profile home
+    that the contract module's default roots never look at. Deleting from the
+    defaults alone leaves those copies behind, still listed and unusable.
+    """
+    roots = list(_default_skill_roots())
+    try:
+        from hermes_cli import web_server as ws
+
+        for record in ws._cron_profile_dicts():
+            profile = str(record.get("name") or "")
+            if not profile:
+                continue
+            try:
+                _name, home = ws._cron_profile_home(profile)
+            except Exception:  # noqa: BLE001 - a bad profile must not break the roster
+                continue
+            roots.append(Path(str(home)) / "skills")
+    except Exception:  # noqa: BLE001 - fall back to the defaults
+        pass
+    seen: Dict[str, Path] = {}
+    for root in roots:
+        seen.setdefault(str(root), root)
+    return list(seen.values())
+
+
 def _resolve_skill_dir(name: str) -> Path:
     """Locate a skill's own directory, refusing anything outside a skill root.
 
@@ -367,13 +395,14 @@ def _resolve_skill_dir(name: str) -> Path:
     if SKILL_NAME.fullmatch(name) is None:
         raise HTTPException(status_code=400, detail="Invalid skill name")
 
-    skill_file = _find_skill_file(name, _default_skill_roots())
+    search_roots = _all_skill_roots()
+    skill_file = _find_skill_file(name, search_roots)
     if skill_file is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
     try:
         target = skill_file.resolve(strict=True).parent
-        roots = [root.resolve() for root in _default_skill_roots() if root.is_dir()]
+        roots = [root.resolve() for root in search_roots if root.is_dir()]
     except OSError as error:
         raise HTTPException(status_code=500, detail="Could not resolve skill path") from error
 
