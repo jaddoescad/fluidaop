@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
 import '../variants/flow.css';
 import '../variants/zen.css';
@@ -12,20 +12,31 @@ interface RoleDefinition { key: string; name: string; description: string }
 interface ContactRow {
   id: string; displayName: string; primaryEmail: string | null; primaryPhone: string | null;
   status: 'active' | 'archived'; entityType: 'person' | 'business'; roles: string[];
-  linkedSignalCount: number; lastSignalAt: string | null; createdAt: string; updatedAt: string;
+  linkedSignalCount: number; lastSignalAt: string | null; dealCount: number; activeDealCount: number;
+  createdAt: string; updatedAt: string;
 }
 interface ContactsPayload { contacts: ContactRow[]; count: number; nextCursor: ContactCursor | null }
 interface ContactLookup { id: string; displayName: string; primaryEmail: string | null; primaryPhone: string | null }
 interface ContactDetailPayload {
   contact: ContactRow;
-  roles: Array<{ role_key: string; source_system: string; last_seen_at: string }>;
+  roles: Array<{ role_key: string; source_system: string; last_seen_at: string; sourceCount: number }>;
   identifiers: Array<{
     id: string; kind: 'email' | 'phone' | 'provider'; value: string; displayName: string | null;
     classification: string; confidence: number; primary: boolean;
+    sourceCount: number;
     source: { system: string; recordType: string; recordId: string };
     firstSeenAt: string; lastSeenAt: string;
   }>;
   sources: Array<{ source_system: string; source_record_type: string; source_record_id: string; last_synced_at: string }>;
+  deals: {
+    count: number;
+    activeCount: number;
+    items: Array<{
+      id: string; name: string; stage: string; status: string; amountCents: number;
+      source: string | null; salesperson: string | null; active: boolean;
+      stageEnteredAt: string | null; firstSeenAt: string; lastSeenAt: string;
+    }>;
+  };
 }
 interface ContactActivity {
   id: number; source: 'gmail' | 'quo'; event_type: string; direction: 'inbound' | 'outbound';
@@ -89,6 +100,11 @@ function cursorQuery(cursor: ContactCursor | ActivityCursor | null): string {
 }
 
 const sourceLabel = (source: 'gmail' | 'quo') => source === 'gmail' ? 'Gmail' : 'Quo';
+const money = new Intl.NumberFormat('en-CA', {
+  style: 'currency',
+  currency: 'CAD',
+  maximumFractionDigits: 2,
+});
 
 function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () => void }) {
   const [detail, setDetail] = useState<ContactDetailPayload | null>(null);
@@ -132,11 +148,18 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
           <div><span className="pp-kicker">{detail.contact.entityType}</span><h2>{detail.contact.displayName}</h2><p>{detail.contact.primaryEmail ?? detail.contact.primaryPhone ?? 'No primary identifier'}</p></div>
         </header>
         <section className="pp-detail-section"><h3>Roles</h3><div className="pp-pills">
-          {detail.roles.length > 0 ? detail.roles.map((role) => <span key={`${role.role_key}:${role.source_system}`}>{role.role_key}</span>) : <small>No role assigned</small>}
+          {detail.roles.length > 0 ? [...new Set(detail.roles.map((role) => role.role_key))].map((role) => <span key={role}>{role}</span>) : <small>No role assigned</small>}
         </div></section>
         <section className="pp-detail-section"><h3>Identifiers</h3><div className="pp-identifiers">
-          {detail.identifiers.map((identifier) => <div key={identifier.id}><span>{identifier.kind}</span><strong>{identifier.value}</strong><small>{identifier.source.system} · exact match</small></div>)}
+          {detail.identifiers.map((identifier) => <div key={identifier.id}><span>{identifier.kind}</span><strong>{identifier.value}</strong><small>{identifier.sourceCount} evidence source{identifier.sourceCount === 1 ? '' : 's'} · exact match</small></div>)}
         </div></section>
+        <section className="pp-detail-section pp-deals"><h3>Deals <span>{detail.deals.count}</span></h3>
+          {detail.deals.items.length === 0 ? <p className="pp-muted">No DripJobs deals linked to this Contact.</p> : detail.deals.items.map((deal) => <article key={deal.id}>
+            <span className={`pp-deal-state${deal.active ? ' is-active' : ''}`}>{deal.active ? 'Active' : 'Archived'}</span>
+            <div><strong>{deal.name}</strong><p>{deal.stage} · {deal.source ?? 'Unknown source'}</p><small>{deal.salesperson ?? 'Unassigned'} · last seen {relativeTime(deal.lastSeenAt)}</small></div>
+            {deal.amountCents > 0 ? <b>{money.format(deal.amountCents / 100)}</b> : null}
+          </article>)}
+        </section>
         <section className="pp-detail-section pp-history"><h3>Activity <span>{activities.length}</span></h3>
           {activities.length === 0 ? <p className="pp-muted">No linked Gmail or Quo activity.</p> : activities.map((signal) => {
             const topic = signal.classifications?.find((classification) => classification.label_kind === 'topic')?.label;
@@ -157,6 +180,7 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
   const [tab, setTab] = useState<'contacts' | 'suggestions'>('contacts');
   const [roles, setRoles] = useState<RoleDefinition[]>([]);
   const [role, setRole] = useState('');
+  const [search, setSearch] = useState('');
   const [contacts, setContacts] = useState<ContactRow[]>([]);
   const [contactCount, setContactCount] = useState(0);
   const [contactCursor, setContactCursor] = useState<ContactCursor | null>(null);
@@ -172,6 +196,7 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const deferredSearch = useDeferredValue(search.trim());
   const roleName = useMemo(() => new Map(roles.map((item) => [item.key, item.name])), [roles]);
 
   const loadContacts = useCallback(async (cursor: ContactCursor | null, append: boolean, selectedRole = role) => {
@@ -180,13 +205,14 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
     try {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
       if (selectedRole) params.set('role', selectedRole);
+      if (deferredSearch) params.set('q', deferredSearch);
       if (cursor) { params.set('cursorAt', cursor.createdAt); params.set('cursorId', cursor.id); }
       const payload = await api<ContactsPayload>(`/api/contacts?${params.toString()}`);
       setContacts((current) => append ? [...current, ...payload.contacts] : payload.contacts);
       setContactCount(payload.count); setContactCursor(payload.nextCursor);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (append) setLoadingMore(false); else setLoading(false); }
-  }, [role]);
+  }, [deferredSearch, role]);
 
   const loadSuggestions = useCallback(async (cursor: ContactCursor | null, append: boolean) => {
     if (append) setLoadingMore(true); else setLoading(true);
@@ -241,15 +267,16 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
         <button type="button" className={tab === 'contacts' ? 'is-active' : ''} onClick={() => setTab('contacts')}>Contacts</button>
         <button type="button" className={tab === 'suggestions' ? 'is-active' : ''} onClick={() => setTab('suggestions')}>Suggestions {suggestionCount > 0 ? <span>{suggestionCount}</span> : null}</button>
       </nav>
-      {tab === 'contacts' ? <div className="pp-toolbar"><button type="button" className={!role ? 'is-active' : ''} onClick={() => setRole('')}>All</button>{roles.map((item) => <button type="button" key={item.key} className={role === item.key ? 'is-active' : ''} onClick={() => setRole(item.key)}>{item.name}</button>)}</div> : null}
+      {tab === 'contacts' ? <div className="pp-toolbar"><label className="pp-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Contacts" aria-label="Search Contacts" /></label><div className="pp-role-filters"><button type="button" className={!role ? 'is-active' : ''} onClick={() => setRole('')}>All</button>{roles.map((item) => <button type="button" key={item.key} className={role === item.key ? 'is-active' : ''} onClick={() => setRole(item.key)}>{item.name}</button>)}</div></div> : null}
       {error ? <div className="pp-state pp-state-error" role="alert"><strong>Couldn’t complete that request</strong><p>{error}</p><button type="button" onClick={() => tab === 'contacts' ? void loadContacts(null, false) : void loadSuggestions(null, false)}>Try again</button></div>
         : loading ? <div className="pp-state" role="status">Loading {tab}…</div>
         : tab === 'contacts' ? contacts.length === 0 ? <div className="pp-state"><strong>No Contacts in this view</strong><p>Unmatched identities stay hidden until they are safely resolved.</p></div> : <section className="pp-directory" aria-label="Contact directory">
-          <div className="pp-columns" aria-hidden="true"><span>Contact</span><span>Identifiers</span><span>Role</span><span>Activity</span></div>
+          <div className="pp-columns" aria-hidden="true"><span>Contact</span><span>Identifiers</span><span>Role</span><span>Deals</span><span>Signals</span></div>
           {contacts.map((contact) => <button type="button" className="pp-row" key={contact.id} onClick={() => setSelectedContactId(contact.id)}>
             <span className="pp-person"><span className="pp-avatar">{initials(contact.displayName)}</span><span><strong>{contact.displayName}</strong><small>{contact.entityType}</small></span></span>
             <span className="pp-contact"><span>{contact.primaryEmail ?? contact.primaryPhone ?? 'No primary identifier'}</span><small>{contact.primaryEmail && contact.primaryPhone ? contact.primaryPhone : ''}</small></span>
             <span className="pp-pills">{contact.roles.length > 0 ? contact.roles.map((item) => <span key={item}>{roleName.get(item) ?? item}</span>) : <small>No role</small>}</span>
+            <span className="pp-signals"><span>{contact.dealCount.toLocaleString()}</span><small>{contact.activeDealCount} active</small></span>
             <span className="pp-signals"><span>{contact.linkedSignalCount.toLocaleString()}</span><small>{relativeTime(contact.lastSignalAt)}</small></span>
           </button>)}
           {contactCursor ? <button type="button" className="pp-more" disabled={loadingMore} onClick={() => void loadContacts(contactCursor, true)}>{loadingMore ? 'Loading…' : 'Load more Contacts'}</button> : <p className="pp-end">Showing all {contactCount.toLocaleString()} Contacts</p>}

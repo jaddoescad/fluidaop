@@ -6,10 +6,19 @@ import {
   AgentRun,
   Person,
   PersonRole,
+  PipelineDeal,
+  PipelineEvidenceKind,
+  PipelineStageHistory,
+  PipelineSyncHealth,
+  PipelineTouchDay,
+  PipelineTouchpointMetrics,
   Reminder,
+  TOUCH_DAY_STRIP_MAX,
   Signal,
   SignalAttachment,
+  SignalCallSummary,
   SignalDetail,
+  SignalRecordings,
   SignalRecommendation,
   SignalTranscript,
   State,
@@ -31,8 +40,150 @@ interface ApiPerson {
   needsAttention: boolean;
   pendingRecommendationCount: number;
   recentSignalCount: number;
-  latestActivityAt: string;
+  latestActivityAt: string | null;
   urgency: string | null;
+}
+
+interface ApiPipelineDeal {
+  id: string;
+  personId: string;
+  personMatchCount: number;
+  customerName: string;
+  email: string | null;
+  phone: string | null;
+  dealName: string;
+  stage: string;
+  status: string;
+  label: string | null;
+  source: string | null;
+  amountCents: number;
+  lastChange: string | null;
+  dealAge: string | null;
+  salesperson: string | null;
+  capturedAt: string;
+  receivedAt?: string | null;
+  stageEnteredAt: string | null;
+  stageObservedAt: string | null;
+  latestSignalAt: string | null;
+  stageTouches?: {
+    outbound?: number;
+    inbound?: number;
+    automated?: number;
+    reactions?: number;
+    lastAt?: string | null;
+    lastDirection?: 'inbound' | 'outbound' | null;
+    phase?: string;
+    phaseLabel?: string;
+    phaseStartedAt?: string | null;
+    evidenceKind?: PipelineEvidenceKind;
+    days?: unknown;
+    daysBefore?: unknown;
+  } | null;
+  archived?: boolean;
+  archivedAt?: string | null;
+  archiveBucket?: 'cold_lead' | 'estimate_scheduled' | 'proposal_sent' | 'closed_with_appointment' | 'closed_without_appointment' | null;
+}
+
+interface ApiArchivedPipelineResponse {
+  count: number;
+  monthCounts: Record<string, number>;
+  bucketCounts: Record<'cold_lead' | 'estimate_scheduled' | 'proposal_sent' | 'closed_with_appointment' | 'closed_without_appointment', number>;
+  items: ApiPipelineDeal[];
+  nextCursor: string | null;
+}
+
+interface ApiPipelineResponse {
+  count: number;
+  capturedAt: string | null;
+  sync: {
+    cadence: 'daily';
+    lastSucceededAt: string | null;
+    status: PipelineSyncHealth['status'];
+    stale: boolean;
+    unhealthy: boolean;
+  };
+  items: ApiPipelineDeal[];
+}
+
+interface ApiPipelineStageHistory {
+  dealId: string;
+  dealCreatedAt?: string | null;
+  dealCreatedEvidenceKind?: PipelineEvidenceKind;
+  dealCreatedLabel?: string;
+  dealCreatedMethod?: string | null;
+  dealCreatedConfidence?: number | null;
+  currentStage: string | null;
+  stageEnteredAt: string | null;
+  items: Array<{
+    id: number;
+    eventKind: 'baseline' | 'stage_changed' | 'archived' | 'reactivated';
+    fromStage: string | null;
+    toStage: string | null;
+    effectiveAt: string;
+    observedAt: string;
+    source: 'baseline' | 'zapier' | 'snapshot' | 'api' | 'webhook' | 'report_import';
+    evidenceKind?: PipelineEvidenceKind;
+    durationSeconds: number | null;
+    baseline: boolean;
+  }>;
+  stages?: Array<{
+    stageEventId: number;
+    stage: string;
+    enteredAt: string;
+    exitedAt: string | null;
+    durationSeconds: number;
+    evidenceKind: PipelineEvidenceKind;
+    outcome: {
+      kind: 'current' | 'stage_changed' | 'archived';
+      toStage: string | null;
+      at: string | null;
+    };
+    metrics: PipelineTouchpointMetrics;
+    touchpoints: ApiPipelineTouchpoint[];
+  }>;
+  unknownStage?: {
+    label: string;
+    metrics: PipelineTouchpointMetrics;
+    touchpoints: ApiPipelineTouchpoint[];
+  };
+  priorHistory?: {
+    label: string;
+    total: number;
+    returnedCount: number;
+    truncated: boolean;
+    earliestAt: string | null;
+    latestAt: string | null;
+    metrics: PipelineTouchpointMetrics;
+    touchpoints: ApiPipelineTouchpoint[];
+  };
+  attribution?: {
+    attributedActivityCount: number;
+    manualActivityCount: number;
+    unassignedActivityCount: number;
+  };
+  touchpointsTruncated?: boolean;
+  returnedTouchpointCount?: number;
+}
+
+interface ApiPipelineTouchpoint {
+  id: string;
+  kind: 'activity' | 'milestone';
+  activityId: number | null;
+  milestoneId: number | null;
+  source: string;
+  eventType: string;
+  channel: 'call' | 'sms' | 'email' | 'milestone' | 'other';
+  direction: 'inbound' | 'outbound' | null;
+  occurredAt: string;
+  subject: string;
+  preview: string;
+  callStatus: string | null;
+  durationSeconds: number | null;
+  isAutomated: boolean;
+  transcriptStatus: 'pending' | 'available' | 'unavailable' | 'failed' | null;
+  transcriptExcerpt: string | null;
+  attributionMethod: 'provider_deal_id' | 'unique_stage_window' | 'single_deal_contact' | 'deal_date_window' | 'contact_history' | 'manual';
+  evidenceKind: PipelineEvidenceKind;
 }
 
 interface ApiContact {
@@ -110,6 +261,8 @@ interface ApiSignalDetail {
   historyNextCursor: string | null;
   attachments?: SignalAttachment[];
   transcript?: Omit<SignalTranscript, 'updatedAt'> & { updatedAt?: string | null } | null;
+  recordings?: Omit<SignalRecordings, 'updatedAt'> & { updatedAt?: string | null } | null;
+  callSummary?: Omit<SignalCallSummary, 'updatedAt'> & { updatedAt?: string | null } | null;
 }
 
 interface ApiWorkItem {
@@ -204,6 +357,7 @@ function apiPersonToPerson(
   const urgency = person.urgency
     ? urgencyLabelByName.get(person.urgency.trim().toLowerCase()) ?? null
     : null;
+  const latestSignalAt = person.latestActivityAt ? Date.parse(person.latestActivityAt) : Number.NaN;
   return {
     id: person.id,
     name: person.displayName,
@@ -220,6 +374,148 @@ function apiPersonToPerson(
     urgency: urgency?.name ?? null,
     urgencyColor: urgency?.color ?? null,
     recentSignalCount: person.recentSignalCount,
+    latestSignalAt: Number.isFinite(latestSignalAt) ? latestSignalAt : null,
+  };
+}
+
+/**
+ * The strip is as long as the deal has sat in this stage, so a short array is
+ * a young deal, not missing data — nothing is padded. Over-long strips keep
+ * their tail: today has to stay the last cell.
+ */
+function touchDayStrip(days: unknown): PipelineTouchDay[] {
+  if (!Array.isArray(days)) return [];
+  return days.slice(-TOUCH_DAY_STRIP_MAX).map((value): PipelineTouchDay => {
+    const level = Number(value);
+    return level === 1 || level === 2 || level === 3 ? level : 0;
+  });
+}
+
+function apiPipelineDealToDeal(deal: ApiPipelineDeal): PipelineDeal {
+  if (!deal.personId) {
+    throw new Error(`Pipeline deal ${deal.id} is missing its canonical Contact`);
+  }
+  const latestSignalAt = deal.latestSignalAt ? Date.parse(deal.latestSignalAt) : Number.NaN;
+  const archivedAt = deal.archivedAt ? Date.parse(deal.archivedAt) : Number.NaN;
+  const receivedAt = deal.receivedAt ? Date.parse(deal.receivedAt) : Number.NaN;
+  const touchLastAt = deal.stageTouches?.lastAt ? Date.parse(deal.stageTouches.lastAt) : Number.NaN;
+  const phaseStartedAt = deal.stageTouches?.phaseStartedAt
+    ? Date.parse(deal.stageTouches.phaseStartedAt)
+    : Number.NaN;
+  return {
+    ...deal,
+    amountCents: Number.isSafeInteger(deal.amountCents) ? deal.amountCents : 0,
+    capturedAt: Date.parse(deal.capturedAt),
+    receivedAt: Number.isFinite(receivedAt) ? receivedAt : null,
+    stageEnteredAt: deal.stageEnteredAt ? Date.parse(deal.stageEnteredAt) : null,
+    stageObservedAt: deal.stageObservedAt ? Date.parse(deal.stageObservedAt) : null,
+    latestSignalAt: Number.isFinite(latestSignalAt) ? latestSignalAt : null,
+    stageTouches: {
+      outbound: Number(deal.stageTouches?.outbound ?? 0),
+      // Provider tapbacks are ordinary customer replies in the CRM UI, not a
+      // separate category the salesperson has to interpret.
+      inbound: Number(deal.stageTouches?.inbound ?? 0) + Number(deal.stageTouches?.reactions ?? 0),
+      automated: Number(deal.stageTouches?.automated ?? 0),
+      lastAt: Number.isFinite(touchLastAt) ? touchLastAt : null,
+      lastDirection: deal.stageTouches?.lastDirection ?? null,
+      phase: deal.stageTouches?.phase ?? 'lead_received',
+      phaseLabel: deal.stageTouches?.phaseLabel?.trim() || 'Lead received',
+      phaseStartedAt: Number.isFinite(phaseStartedAt)
+        ? phaseStartedAt
+        : Number.isFinite(receivedAt) ? receivedAt : null,
+      evidenceKind: deal.stageTouches?.evidenceKind ?? 'inferred',
+      days: touchDayStrip(deal.stageTouches?.days),
+      daysBefore: Math.max(0, Math.trunc(Number(deal.stageTouches?.daysBefore ?? 0)) || 0),
+    },
+    archived: deal.archived === true,
+    archivedAt: Number.isFinite(archivedAt) ? archivedAt : null,
+    archiveBucket: deal.archiveBucket ?? null,
+  };
+}
+
+function apiPipelineHistoryToHistory(history: ApiPipelineStageHistory): PipelineStageHistory {
+  const zeroMetrics: PipelineTouchpointMetrics = {
+    total: 0,
+    outboundCallAttempts: 0,
+    connectedCalls: 0,
+    missedInboundCalls: 0,
+    inboundSms: 0,
+    outboundSms: 0,
+    inboundEmails: 0,
+    outboundEmails: 0,
+    milestones: 0,
+  };
+  const metrics = (value: PipelineTouchpointMetrics | undefined): PipelineTouchpointMetrics => ({
+    total: Number(value?.total ?? 0),
+    outboundCallAttempts: Number(value?.outboundCallAttempts ?? 0),
+    connectedCalls: Number(value?.connectedCalls ?? 0),
+    missedInboundCalls: Number(value?.missedInboundCalls ?? 0),
+    inboundSms: Number(value?.inboundSms ?? 0),
+    outboundSms: Number(value?.outboundSms ?? 0),
+    inboundEmails: Number(value?.inboundEmails ?? 0),
+    outboundEmails: Number(value?.outboundEmails ?? 0),
+    milestones: Number(value?.milestones ?? 0),
+  });
+  const touchpoints = (items: ApiPipelineTouchpoint[] | undefined) => (items ?? []).map((item) => ({
+    ...item,
+    activityId: item.activityId === null ? null : Number(item.activityId),
+    milestoneId: item.milestoneId === null ? null : Number(item.milestoneId),
+    occurredAt: Date.parse(item.occurredAt),
+    durationSeconds: item.durationSeconds === null ? null : Number(item.durationSeconds),
+  }));
+  return {
+    dealId: history.dealId,
+    dealCreatedAt: history.dealCreatedAt ? Date.parse(history.dealCreatedAt) : null,
+    dealCreatedEvidenceKind: history.dealCreatedEvidenceKind ?? 'unknown',
+    dealCreatedLabel: history.dealCreatedLabel ?? 'Creation date unavailable',
+    dealCreatedMethod: history.dealCreatedMethod ?? null,
+    dealCreatedConfidence: history.dealCreatedConfidence === null || history.dealCreatedConfidence === undefined
+      ? null
+      : Number(history.dealCreatedConfidence),
+    currentStage: history.currentStage,
+    stageEnteredAt: history.stageEnteredAt ? Date.parse(history.stageEnteredAt) : null,
+    items: (history.items ?? []).map((event) => ({
+      ...event,
+      effectiveAt: Date.parse(event.effectiveAt),
+      observedAt: Date.parse(event.observedAt),
+      evidenceKind: event.evidenceKind ?? (event.source === 'zapier' || event.source === 'api' || event.source === 'webhook'
+        ? 'exact'
+        : event.source === 'report_import' ? 'inferred' : 'observed'),
+    })),
+    stages: (history.stages ?? []).map((stage) => ({
+      ...stage,
+      enteredAt: Date.parse(stage.enteredAt),
+      exitedAt: stage.exitedAt ? Date.parse(stage.exitedAt) : null,
+      durationSeconds: Number(stage.durationSeconds),
+      outcome: {
+        ...stage.outcome,
+        at: stage.outcome.at ? Date.parse(stage.outcome.at) : null,
+      },
+      metrics: metrics(stage.metrics),
+      touchpoints: touchpoints(stage.touchpoints),
+    })),
+    unknownStage: {
+      label: history.unknownStage?.label ?? 'Before tracking / stage unknown',
+      metrics: history.unknownStage ? metrics(history.unknownStage.metrics) : zeroMetrics,
+      touchpoints: touchpoints(history.unknownStage?.touchpoints),
+    },
+    priorHistory: {
+      label: history.priorHistory?.label ?? 'Before this deal',
+      total: Number(history.priorHistory?.total ?? 0),
+      returnedCount: Number(history.priorHistory?.returnedCount ?? 0),
+      truncated: history.priorHistory?.truncated ?? false,
+      earliestAt: history.priorHistory?.earliestAt ? Date.parse(history.priorHistory.earliestAt) : null,
+      latestAt: history.priorHistory?.latestAt ? Date.parse(history.priorHistory.latestAt) : null,
+      metrics: history.priorHistory ? metrics(history.priorHistory.metrics) : zeroMetrics,
+      touchpoints: touchpoints(history.priorHistory?.touchpoints),
+    },
+    attribution: {
+      attributedActivityCount: Number(history.attribution?.attributedActivityCount ?? 0),
+      manualActivityCount: Number(history.attribution?.manualActivityCount ?? 0),
+      unassignedActivityCount: Number(history.attribution?.unassignedActivityCount ?? 0),
+    },
+    touchpointsTruncated: history.touchpointsTruncated ?? false,
+    returnedTouchpointCount: Number(history.returnedTouchpointCount ?? 0),
   };
 }
 
@@ -373,10 +669,24 @@ export interface LiveBoardController {
   signalsHasMore: boolean;
   peopleLoading: boolean;
   signalsLoading: boolean;
+  pipelineDeals: PipelineDeal[];
+  pipelineCapturedAt: number | null;
+  pipelineSync: PipelineSyncHealth | null;
+  pipelineLoading: boolean;
+  archivedPipelineCount: number;
+  archivedPipelineMonthCounts: Record<string, number>;
+  archivedPipelineBucketCounts: Record<'cold_lead' | 'estimate_scheduled' | 'proposal_sent' | 'closed_with_appointment' | 'closed_without_appointment', number>;
+  archivedPipelineHasMore: boolean;
+  archivedPipelineLoading: boolean;
+  pipelineHistories: Record<string, PipelineStageHistory>;
+  pipelineHistoryLoadingId: string | null;
   loadMorePeople: () => Promise<void>;
   loadMoreSignals: () => Promise<void>;
-  openSignal: (id: string) => Promise<void>;
+  loadMoreArchivedPipeline: () => Promise<void>;
+  filterArchivedPipeline: (receivedMonth: string | null) => Promise<void>;
+  openSignal: (id: string, personIdHint?: string) => Promise<void>;
   openAction: (id: string) => Promise<void>;
+  openPipelineHistory: (dealId: string) => Promise<void>;
   loadMoreHistory: (id: string) => Promise<void>;
 }
 
@@ -389,6 +699,28 @@ export function useLiveBoard(): LiveBoardController {
   const [apiPeople, setApiPeople] = useState<ApiPerson[]>([]);
   const [peopleCount, setPeopleCount] = useState(0);
   const [apiSignals, setApiSignals] = useState<ApiSignal[]>([]);
+  const [apiPipelineDeals, setApiPipelineDeals] = useState<ApiPipelineDeal[]>([]);
+  const [apiArchivedPipelineDeals, setApiArchivedPipelineDeals] = useState<ApiPipelineDeal[]>([]);
+  const [archivedPipelineCount, setArchivedPipelineCount] = useState(0);
+  const [archivedPipelineMonthCounts, setArchivedPipelineMonthCounts] = useState<Record<string, number>>({});
+  const [archivedPipelineBucketCounts, setArchivedPipelineBucketCounts] = useState({
+    cold_lead: 0,
+    estimate_scheduled: 0,
+    proposal_sent: 0,
+    closed_with_appointment: 0,
+    closed_without_appointment: 0,
+  });
+  const [archivedPipelineCursor, setArchivedPipelineCursor] = useState<string | null>(null);
+  const [archivedPipelineLoading, setArchivedPipelineLoading] = useState(false);
+  const archivedPipelineCursorRef = useRef<string | null>(null);
+  const archivedPipelineMonthRef = useRef<string | null>(null);
+  const archivedPipelineRequestRef = useRef<string | null>(null);
+  const archivedPipelineRevisionRef = useRef(0);
+  const [pipelineCapturedAt, setPipelineCapturedAt] = useState<number | null>(null);
+  const [pipelineSync, setPipelineSync] = useState<PipelineSyncHealth | null>(null);
+  const [pipelineLoading, setPipelineLoading] = useState(false);
+  const [pipelineHistories, setPipelineHistories] = useState<Record<string, PipelineStageHistory>>({});
+  const [pipelineHistoryLoadingId, setPipelineHistoryLoadingId] = useState<string | null>(null);
   const [apiLabels, setApiLabels] = useState<ApiCatalogLabel[]>([]);
   const [apiActions, setApiActions] = useState<ApiAction[]>([]);
   const [apiReminders, setApiReminders] = useState<ApiWorkItem[]>([]);
@@ -417,6 +749,76 @@ export function useLiveBoard(): LiveBoardController {
     ]);
     setApiActions(actions.items);
     setApiReminders(reminders.items);
+  }, []);
+
+  const loadPipeline = useCallback(async () => {
+    setPipelineLoading(true);
+    try {
+      const payload = await json<ApiPipelineResponse>('/api/board/pipeline');
+      setApiPipelineDeals(payload.items);
+      setPipelineCapturedAt(payload.capturedAt ? Date.parse(payload.capturedAt) : null);
+      setPipelineSync({
+        ...payload.sync,
+        lastSucceededAt: payload.sync.lastSucceededAt ? Date.parse(payload.sync.lastSucceededAt) : null,
+      });
+    } finally {
+      setPipelineLoading(false);
+    }
+  }, []);
+
+  const loadArchivedPipeline = useCallback(async (append: boolean) => {
+    const cursor = append ? archivedPipelineCursorRef.current : null;
+    if (append && !cursor) return;
+    const month = archivedPipelineMonthRef.current;
+    const revision = archivedPipelineRevisionRef.current;
+    const requestKey = `${revision}:${cursor ?? 'first'}`;
+    if (archivedPipelineRequestRef.current === requestKey) return;
+    archivedPipelineRequestRef.current = requestKey;
+    setArchivedPipelineLoading(true);
+    try {
+      const payload = await json<ApiArchivedPipelineResponse>(
+        `/api/board/pipeline?archived=true&limit=60${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${month ? `&receivedMonth=${encodeURIComponent(month)}` : ''}`,
+      );
+      if (revision !== archivedPipelineRevisionRef.current) return;
+      setApiArchivedPipelineDeals((current) => append
+        ? [...current, ...payload.items.filter((item) => !current.some((existing) => existing.id === item.id))]
+        : payload.items);
+      setArchivedPipelineCount(payload.count);
+      setArchivedPipelineMonthCounts(payload.monthCounts ?? {});
+      setArchivedPipelineBucketCounts(payload.bucketCounts);
+      setArchivedPipelineCursor(payload.nextCursor);
+      archivedPipelineCursorRef.current = payload.nextCursor;
+    } finally {
+      if (archivedPipelineRequestRef.current === requestKey) {
+        archivedPipelineRequestRef.current = null;
+        setArchivedPipelineLoading(false);
+      }
+    }
+  }, []);
+
+  const filterArchivedPipeline = useCallback(async (receivedMonth: string | null) => {
+    if (receivedMonth === archivedPipelineMonthRef.current) return;
+    archivedPipelineMonthRef.current = receivedMonth;
+    archivedPipelineRevisionRef.current += 1;
+    archivedPipelineCursorRef.current = null;
+    setArchivedPipelineCursor(null);
+    setApiArchivedPipelineDeals([]);
+    await loadArchivedPipeline(false);
+  }, [loadArchivedPipeline]);
+
+  const openPipelineHistory = useCallback(async (dealId: string) => {
+    setPipelineHistoryLoadingId(dealId);
+    try {
+      const payload = await json<ApiPipelineStageHistory>(
+        `/api/board/pipeline/${encodeURIComponent(dealId)}/history?limit=100`,
+      );
+      const history = apiPipelineHistoryToHistory(payload);
+      setPipelineHistories((current) => ({ ...current, [dealId]: history }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not load DripJobs stage history');
+    } finally {
+      setPipelineHistoryLoadingId((current) => current === dealId ? null : current);
+    }
   }, []);
 
   const loadPeople = useCallback(async (append: boolean) => {
@@ -458,9 +860,15 @@ export function useLiveBoard(): LiveBoardController {
 
   useEffect(() => {
     let active = true;
-    Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels()])
+    Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
       .catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Could not load the Board'))
-      .finally(() => active && setBooted(true));
+      .finally(() => {
+        if (!active) return;
+        setBooted(true);
+        void loadArchivedPipeline(false).catch((cause) => {
+          if (active) setError(cause instanceof Error ? cause.message : 'Could not load archived leads');
+        });
+      });
     return () => { active = false; };
     // Initial request only; focus and view have their own bounded effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -479,13 +887,13 @@ export function useLiveBoard(): LiveBoardController {
   useEffect(() => {
     if (!booted || paused) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels()])
+      void Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
         .catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not refresh the Board'));
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [booted, paused, loadCreatedWork, loadLabels, loadPeople, loadSignals, loadSummary]);
+  }, [booted, paused, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals, loadSummary]);
 
-  const openSignal = useCallback(async (id: string) => {
+  const openSignal = useCallback(async (id: string, personIdHint?: string) => {
     setDetails((current) => ({
       ...current,
       [id]: current[id] ?? {
@@ -495,6 +903,8 @@ export function useLiveBoard(): LiveBoardController {
         historyNextCursor: null,
         attachments: [],
         transcript: null,
+        recordings: null,
+        callSummary: null,
         loading: true,
         error: null,
       },
@@ -502,7 +912,7 @@ export function useLiveBoard(): LiveBoardController {
     try {
       const payload = await json<ApiSignalDetail>(`/api/board/signals/${id}?historyLimit=30`);
       const selected = apiSignals.find((signal) => String(signal.id) === id);
-      const personId = selected?.contact?.id ?? `signal:${id}`;
+      const personId = selected?.contact?.id ?? personIdHint ?? `signal:${id}`;
       setDetails((current) => ({
         ...current,
         [id]: {
@@ -514,6 +924,14 @@ export function useLiveBoard(): LiveBoardController {
           transcript: payload.transcript ? {
             ...payload.transcript,
             updatedAt: payload.transcript.updatedAt ? Date.parse(payload.transcript.updatedAt) : null,
+          } : null,
+          recordings: payload.recordings ? {
+            ...payload.recordings,
+            updatedAt: payload.recordings.updatedAt ? Date.parse(payload.recordings.updatedAt) : null,
+          } : null,
+          callSummary: payload.callSummary ? {
+            ...payload.callSummary,
+            updatedAt: payload.callSummary.updatedAt ? Date.parse(payload.callSummary.updatedAt) : null,
           } : null,
           loading: false,
           error: null,
@@ -529,6 +947,8 @@ export function useLiveBoard(): LiveBoardController {
           historyNextCursor: null,
           attachments: [],
           transcript: null,
+          recordings: null,
+          callSummary: null,
           loading: false,
           error: cause instanceof Error ? cause.message : 'Could not load Signal context',
         },
@@ -725,6 +1145,10 @@ export function useLiveBoard(): LiveBoardController {
   const actions = useMemo(() => apiActions.map(apiActionToAction), [apiActions]);
   const runs = useMemo(() => Object.fromEntries(apiActions.map((action) => [action.id, actionRun(action)])), [apiActions]);
   const reminders = useMemo(() => apiReminders.map(apiWorkToReminder), [apiReminders]);
+  const pipelineDeals = useMemo(
+    () => [...apiPipelineDeals, ...apiArchivedPipelineDeals].map(apiPipelineDealToDeal),
+    [apiArchivedPipelineDeals, apiPipelineDeals],
+  );
 
   const s = useMemo<State>(() => ({
     booted,
@@ -794,10 +1218,24 @@ export function useLiveBoard(): LiveBoardController {
     signalsHasMore: signalsCursor !== null,
     peopleLoading,
     signalsLoading,
+    pipelineDeals,
+    pipelineCapturedAt,
+    pipelineSync,
+    pipelineLoading,
+    archivedPipelineCount,
+    archivedPipelineMonthCounts,
+    archivedPipelineBucketCounts,
+    archivedPipelineHasMore: archivedPipelineCursor !== null,
+    archivedPipelineLoading,
+    pipelineHistories,
+    pipelineHistoryLoadingId,
     loadMorePeople: () => loadPeople(true),
     loadMoreSignals: () => loadSignals(true),
+    loadMoreArchivedPipeline: () => loadArchivedPipeline(true),
+    filterArchivedPipeline,
     openSignal,
     openAction,
+    openPipelineHistory,
     loadMoreHistory,
   };
 }

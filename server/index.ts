@@ -20,16 +20,6 @@ import {
   QuoImportKind,
   QuoPhoneNumber,
 } from './quoCsv.js';
-import {
-  exchangeSlackCode,
-  listSlackChannels,
-  listSlackUsers,
-  readSlackChannel,
-  readSlackThread,
-  revokeSlackToken,
-  SlackApiError,
-  slackAuthTest,
-} from './slack.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -57,17 +47,8 @@ interface StoredQuoConnection extends StoredConnectionBase {
   encryptedApiKey: string;
 }
 
-interface StoredSlackConnection extends StoredConnectionBase {
-  provider: 'slack';
-  teamId: string;
-  teamName: string;
-  teamDomain: string | null;
-  authedUserId: string;
-  scopes: string[];
-  encryptedAccessToken: string;
-}
 
-type StoredConnection = StoredGmailConnection | StoredQuoConnection | StoredSlackConnection;
+type StoredConnection = StoredGmailConnection | StoredQuoConnection;
 
 interface ConnectionStore {
   version: 1;
@@ -119,20 +100,8 @@ interface PublicQuoConnection extends Omit<StoredQuoConnection, 'encryptedApiKey
   webhook: QuoWebhookStatus;
 }
 
-interface PublicSlackConnection extends Omit<StoredSlackConnection, 'encryptedAccessToken'> {
-  nextCheckAt: string | null;
-  selectedChannelCount: number;
-  selectedJobChannelCount: number;
-  webhook: {
-    state: 'receiving' | 'ready' | 'pending';
-    url: string;
-    lastEventAt: string | null;
-    signingSecretConfigured: boolean;
-  };
-  lastSyncedAt: string | null;
-}
 
-type PublicConnection = PublicGmailConnection | PublicQuoConnection | PublicSlackConnection;
+type PublicConnection = PublicGmailConnection | PublicQuoConnection;
 
 interface GoogleTokenResponse {
   access_token?: string;
@@ -164,10 +133,6 @@ interface PendingAuthorization {
   expiresAt: number;
 }
 
-interface PendingSlackAuthorization {
-  redirectUri: string;
-  expiresAt: number;
-}
 
 const app = express();
 const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
@@ -186,8 +151,6 @@ const gmailActivitySyncIntervalMs = readPositiveInt(
   process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
   5 * 60_000,
 );
-const slackSyncIntervalMs = readPositiveInt(process.env.SLACK_SYNC_INTERVAL_MS, 60_000);
-const slackBackfillChannelsPerRun = readPositiveInt(process.env.SLACK_BACKFILL_CHANNELS_PER_RUN, 1);
 const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
 const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
@@ -204,12 +167,9 @@ const hermesAgentIds = new Set([
 ]);
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
 const pendingAuthorizations = new Map<string, PendingAuthorization>();
-const pendingSlackAuthorizations = new Map<string, PendingSlackAuthorization>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
 const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
-const activeSlackSyncs = new Map<string, Promise<SlackSyncResult>>();
 const lastActivitySyncAttemptAt = new Map<string, number>();
-const lastSlackSyncAttemptAt = new Map<string, number>();
 let store: ConnectionStore = { version: 1, connections: [] };
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -223,17 +183,6 @@ interface ActivitySyncResult {
   completedAt: string;
 }
 
-interface SlackSyncResult {
-  teamId: string;
-  channelsSeen: number;
-  channelsSelected: number;
-  channelsBackfilled: number;
-  messagesSeen: number;
-  messagesUpserted: number;
-  rateLimited: boolean;
-  retryAfterSeconds: number | null;
-  completedAt: string;
-}
 
 interface StoredActivitySyncState {
   connection_id: string;
@@ -292,12 +241,6 @@ function quoConfigurationProblems(): string[] {
   return encryptionProblems();
 }
 
-function slackConfigurationProblems(): string[] {
-  const problems = encryptionProblems();
-  if (!process.env.SLACK_CLIENT_ID?.trim()) problems.push('SLACK_CLIENT_ID');
-  if (!process.env.SLACK_CLIENT_SECRET?.trim()) problems.push('SLACK_CLIENT_SECRET');
-  return problems;
-}
 
 function requireGmailConfigured(): void {
   const problems = gmailConfigurationProblems();
@@ -478,9 +421,7 @@ async function saveStore(): Promise<void> {
 async function toPublicConnection(connection: StoredConnection): Promise<PublicConnection> {
   const problems = connection.provider === 'gmail'
     ? gmailConfigurationProblems()
-    : connection.provider === 'quo'
-      ? quoConfigurationProblems()
-      : slackConfigurationProblems();
+    : quoConfigurationProblems();
   const lastChecked = connection.lastCheckedAt ? Date.parse(connection.lastCheckedAt) : Number.NaN;
   const nextAt = Number.isFinite(lastChecked) ? lastChecked + healthCheckIntervalMs : Date.now();
   const common = {
@@ -505,47 +446,6 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
       permissions: {
         readEmails: gmailCanReadEmails(connection),
         applyLabels: gmailCanModifyLabels(connection),
-      },
-    };
-  }
-  if (connection.provider === 'slack') {
-    let selectedChannelCount = 0;
-    let selectedJobChannelCount = 0;
-    let lastEventAt: string | null = null;
-    let lastSyncedAt: string | null = null;
-    let signingSecretConfigured = false;
-    try {
-      const status = await slackFunctionJson<{
-        signingSecretConfigured?: boolean;
-        workspaces?: Array<{ team_id?: string; last_event_at?: string | null; last_synced_at?: string | null }>;
-        selectedChannels?: Array<{ team_id?: string; channel_kind?: string }>;
-      }>('status');
-      const workspace = (status.workspaces ?? []).find((item) => item.team_id === connection.teamId);
-      const selected = (status.selectedChannels ?? []).filter((item) => item.team_id === connection.teamId);
-      selectedChannelCount = selected.length;
-      selectedJobChannelCount = selected.filter((item) => item.channel_kind === 'job').length;
-      lastEventAt = workspace?.last_event_at ?? null;
-      lastSyncedAt = workspace?.last_synced_at ?? null;
-      signingSecretConfigured = Boolean(status.signingSecretConfigured);
-    } catch {
-      // OAuth health remains independently checkable if the event endpoint is unavailable.
-    }
-    return {
-      ...common,
-      provider: 'slack',
-      teamId: connection.teamId,
-      teamName: connection.teamName,
-      teamDomain: connection.teamDomain,
-      authedUserId: connection.authedUserId,
-      scopes: connection.scopes,
-      selectedChannelCount,
-      selectedJobChannelCount,
-      lastSyncedAt,
-      webhook: {
-        state: signingSecretConfigured ? (lastEventAt ? 'receiving' : 'ready') : 'pending',
-        url: slackWebhookUrl(),
-        lastEventAt,
-        signingSecretConfigured,
       },
     };
   }
@@ -589,9 +489,6 @@ function callbackUri(req: Request): string {
   return `${originFor(req)}/api/oauth/google/callback`;
 }
 
-function slackCallbackUri(req: Request): string {
-  return `${originFor(req)}/api/oauth/slack/callback`;
-}
 
 function callbackRedirect(req: Request, gmail: 'connected' | 'error', message: string): string {
   const url = new URL('/connections', originFor(req));
@@ -600,12 +497,6 @@ function callbackRedirect(req: Request, gmail: 'connected' | 'error', message: s
   return url.toString();
 }
 
-function slackCallbackRedirect(req: Request, slack: 'connected' | 'error', message: string): string {
-  const url = new URL('/connections', originFor(req));
-  url.searchParams.set('slack', slack);
-  url.searchParams.set('message', message);
-  return url.toString();
-}
 
 function base64UrlSha256(value: string): string {
   return createHash('sha256').update(value).digest('base64url');
@@ -777,40 +668,7 @@ async function quoFunctionJson<T>(
   return payload as T;
 }
 
-function slackWebhookUrl(): string {
-  return supabaseProjectUrl
-    ? `${supabaseProjectUrl}/functions/v1/fluid-slack-events`
-    : '';
-}
 
-async function slackFunctionJson<T>(
-  action: 'status' | 'workspace' | 'channels' | 'users' | 'messages' | 'sync-state' | 'channel-sync-state',
-  init?: RequestInit,
-): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(slackWebhookUrl());
-  url.searchParams.set('action', action);
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-    signal: init?.signal ?? AbortSignal.timeout(45_000),
-  });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Supabase Slack service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
-}
 
 async function operationalFunctionJson<T>(
   action: 'board' | 'job-context' | 'shadow-status' | 'resolve-work-item' | 'reconcile',
@@ -1158,22 +1016,6 @@ function publicQuoError(error: unknown): string {
   return message.replace(/\s+/g, ' ').slice(0, 300);
 }
 
-function publicSlackError(error: unknown): string {
-  const message = errorMessage(error);
-  if (/invalid_auth|not_authed|token_revoked|account_inactive|401|403/i.test(message)) {
-    return 'Slack authorization expired or was revoked. Disconnect and reconnect Slack.';
-  }
-  if (/missing_scope|not_allowed_token_type/i.test(message)) {
-    return 'Slack no longer grants the required read-only channel access. Reconnect Slack.';
-  }
-  if (/fetch failed|network|timed?\s*out/i.test(message)) {
-    return 'Slack could not be reached. The next health check will retry automatically.';
-  }
-  if (/ratelimited|rate.?limit/i.test(message)) {
-    return 'Slack temporarily rate-limited history sync. Fluid will resume automatically.';
-  }
-  return message.replace(/\s+/g, ' ').slice(0, 300);
-}
 
 async function exchangeAuthorizationCode(
   code: string,
@@ -1232,8 +1074,6 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
   if (connection.provider === 'gmail') requireGmailConfigured();
   else if (connection.provider === 'quo' && quoConfigurationProblems().length > 0) {
     throw new HttpError(503, `Missing server configuration: ${quoConfigurationProblems().join(', ')}`);
-  } else if (connection.provider === 'slack' && slackConfigurationProblems().length > 0) {
-    throw new HttpError(503, `Missing server configuration: ${slackConfigurationProblems().join(', ')}`);
   }
 
   connection.status = 'checking';
@@ -1249,17 +1089,12 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
       if (actualEmail !== connection.email.toLowerCase()) {
         throw new Error(`Google returned a different mailbox (${actualEmail ?? 'unknown'})`);
       }
-    } else if (connection.provider === 'quo') {
+    } else {
       const phoneNumbers = await getQuoPhoneNumbers(decryptToken(connection.encryptedApiKey));
       const availableIds = new Set(phoneNumbers.map((number) => number.id));
-      connection.selectedPhoneNumberIds = connection.selectedPhoneNumberIds.filter((id) => availableIds.has(id));
+      connection.selectedPhoneNumberIds = connection.selectedPhoneNumberIds.filter((id: string) => availableIds.has(id));
       connection.phoneNumbers = phoneNumbers;
       await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
-    } else {
-      const profile = await slackAuthTest(decryptToken(connection.encryptedAccessToken));
-      if (profile.team_id !== connection.teamId || profile.user_id !== connection.authedUserId) {
-        throw new Error('Slack returned a different workspace or installing user');
-      }
     }
     const checkedAt = new Date().toISOString();
     connection.status = 'connected';
@@ -1274,9 +1109,7 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
     connection.updatedAt = checkedAt;
     connection.error = connection.provider === 'gmail'
       ? publicGoogleError(error)
-      : connection.provider === 'quo'
-        ? publicQuoError(error)
-        : publicSlackError(error);
+      : publicQuoError(error);
   }
   await saveStore();
   return await toPublicConnection(connection);
@@ -1553,182 +1386,8 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
   ];
 }
 
-async function performSlackSync(connection: StoredSlackConnection): Promise<SlackSyncResult> {
-  requireDatabaseConfigured();
-  if (slackConfigurationProblems().length > 0) {
-    throw new HttpError(503, `Missing server configuration: ${slackConfigurationProblems().join(', ')}`);
-  }
-  const startedAt = new Date().toISOString();
-  const token = decryptToken(connection.encryptedAccessToken);
-  let channelsSeen = 0;
-  let channelsSelected = 0;
-  let channelsBackfilled = 0;
-  let messagesSeen = 0;
-  let messagesUpserted = 0;
-  let rateLimited = false;
-  let retryAfterSeconds: number | null = null;
-  await slackFunctionJson('sync-state', {
-    method: 'POST',
-    body: JSON.stringify({ connectionId: connection.id, teamId: connection.teamId, status: 'running', startedAt }),
-  });
-  try {
-    const channels = await listSlackChannels(token, 500);
-    channelsSeen = channels.length;
-    const channelPayload = await slackFunctionJson<{
-      channels?: Array<{
-        provider_channel_id?: string;
-        channel_kind?: string;
-        selected?: boolean;
-        is_archived?: boolean;
-        sync_status?: string;
-        case_status?: string | null;
-      }>;
-    }>('channels', {
-      method: 'POST',
-      body: JSON.stringify({ teamId: connection.teamId, channels }),
-    });
-    const selected = (channelPayload.channels ?? []).filter((channel) =>
-      channel.selected === true && channel.is_archived !== true &&
-      (channel.channel_kind === 'sales' || channel.case_status === 'open')
-    );
-    channelsSelected = selected.length;
 
-    const users = await listSlackUsers(token, 500);
-    await slackFunctionJson('users', {
-      method: 'POST',
-      body: JSON.stringify({ teamId: connection.teamId, users }),
-    });
 
-    const candidates = selected
-      .filter((channel) => channel.sync_status !== 'succeeded' && typeof channel.provider_channel_id === 'string')
-      .slice(0, Math.max(1, Math.min(slackBackfillChannelsPerRun, 10)));
-    for (const channel of candidates) {
-      const channelId = channel.provider_channel_id as string;
-      await slackFunctionJson('channel-sync-state', {
-        method: 'POST',
-        body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'running' }),
-      });
-      try {
-        const history = await readSlackChannel(token, channelId, 15);
-        messagesSeen += history.messages.length;
-        const historyImport = await slackFunctionJson<{ imported?: number }>('messages', {
-          method: 'POST',
-          body: JSON.stringify({ teamId: connection.teamId, messages: history.messages }),
-        });
-        messagesUpserted += historyImport.imported ?? 0;
-
-        // Thread history is a separate Slack method and can be rate-limited
-        // independently. Persist the sampled parent messages before attempting
-        // replies so a Retry-After response never discards useful progress.
-        for (const parent of history.messages.filter((message) => message.reply_count > 0).slice(0, 3)) {
-          const replies = await readSlackThread(token, channelId, parent.ts);
-          const unseenReplies = replies.filter((reply) => reply.ts !== parent.ts);
-          messagesSeen += unseenReplies.length;
-          if (unseenReplies.length > 0) {
-            const replyImport = await slackFunctionJson<{ imported?: number }>('messages', {
-              method: 'POST',
-              body: JSON.stringify({ teamId: connection.teamId, messages: unseenReplies }),
-            });
-            messagesUpserted += replyImport.imported ?? 0;
-          }
-        }
-        channelsBackfilled += 1;
-        await slackFunctionJson('channel-sync-state', {
-          method: 'POST',
-          body: JSON.stringify({
-            teamId: connection.teamId,
-            channelId,
-            status: 'succeeded',
-            cursor: history.nextCursor,
-          }),
-        });
-      } catch (error) {
-        if (error instanceof SlackApiError && error.retryAfterSeconds !== null) {
-          rateLimited = true;
-          retryAfterSeconds = error.retryAfterSeconds;
-          await slackFunctionJson('channel-sync-state', {
-            method: 'POST',
-            body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'rate_limited', error: publicSlackError(error) }),
-          });
-          break;
-        }
-        await slackFunctionJson('channel-sync-state', {
-          method: 'POST',
-          body: JSON.stringify({ teamId: connection.teamId, channelId, status: 'failed', error: publicSlackError(error) }),
-        });
-      }
-    }
-
-    await slackFunctionJson('sync-state', {
-      method: 'POST',
-      body: JSON.stringify({
-        connectionId: connection.id,
-        teamId: connection.teamId,
-        status: rateLimited ? 'rate_limited' : 'succeeded',
-        channelsSeen,
-        channelsSelected,
-        messagesSeen,
-        messagesUpserted,
-        retryAfterSeconds,
-        startedAt,
-      }),
-    });
-  } catch (error) {
-    const slackError = error instanceof SlackApiError ? error : null;
-    rateLimited = slackError?.retryAfterSeconds !== null && slackError?.retryAfterSeconds !== undefined;
-    retryAfterSeconds = slackError?.retryAfterSeconds ?? null;
-    await slackFunctionJson('sync-state', {
-      method: 'POST',
-      body: JSON.stringify({
-        connectionId: connection.id,
-        teamId: connection.teamId,
-        status: rateLimited ? 'rate_limited' : 'failed',
-        channelsSeen,
-        channelsSelected,
-        messagesSeen,
-        messagesUpserted,
-        retryAfterSeconds,
-        startedAt,
-        error: publicSlackError(error),
-      }),
-    }).catch(() => undefined);
-    if (!rateLimited) throw error;
-  }
-  return {
-    teamId: connection.teamId,
-    channelsSeen,
-    channelsSelected,
-    channelsBackfilled,
-    messagesSeen,
-    messagesUpserted,
-    rateLimited,
-    retryAfterSeconds,
-    completedAt: new Date().toISOString(),
-  };
-}
-
-function syncSlack(connection: StoredSlackConnection): Promise<SlackSyncResult> {
-  const running = activeSlackSyncs.get(connection.id);
-  if (running) return running;
-  lastSlackSyncAttemptAt.set(connection.id, Date.now());
-  const sync = performSlackSync(connection).finally(() => activeSlackSyncs.delete(connection.id));
-  activeSlackSyncs.set(connection.id, sync);
-  return sync;
-}
-
-async function syncDueSlack(): Promise<void> {
-  if (slackConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
-  const now = Date.now();
-  const due = store.connections.filter((connection): connection is StoredSlackConnection => {
-    if (connection.provider !== 'slack' || connection.status === 'error') return false;
-    const lastAttempt = lastSlackSyncAttemptAt.get(connection.id) ?? 0;
-    return now - lastAttempt >= slackSyncIntervalMs;
-  });
-  const results = await Promise.allSettled(due.map((connection) => syncSlack(connection)));
-  for (const result of results) {
-    if (result.status === 'rejected') console.warn(`Slack context sync failed: ${publicSlackError(result.reason)}`);
-  }
-}
 
 async function checkAllConnections(): Promise<void> {
   await Promise.allSettled(store.connections.map((connection) => checkConnection(connection.id)));
@@ -1748,7 +1407,6 @@ app.get('/api/connections', async (_req, res, next) => {
   try {
     const gmailProblems = gmailConfigurationProblems();
     const quoProblems = quoConfigurationProblems();
-    const slackProblems = slackConfigurationProblems();
     res.json({
       connections: await Promise.all(store.connections.map(toPublicConnection)),
       healthCheckIntervalMs,
@@ -1763,12 +1421,6 @@ app.get('/api/connections', async (_req, res, next) => {
         configured: quoProblems.length === 0,
         ...(quoProblems.length > 0
           ? { configurationError: `Add ${quoProblems.join(', ')} to the server environment.` }
-          : {}),
-      },
-      slack: {
-        configured: slackProblems.length === 0,
-        ...(slackProblems.length > 0
-          ? { configurationError: `Add ${slackProblems.join(', ')} to the server environment.` }
           : {}),
       },
     });
@@ -1882,131 +1534,8 @@ app.get('/api/oauth/google/callback', async (req, res) => {
   }
 });
 
-app.post('/api/connections/slack/authorize', (req, res, next) => {
-  try {
-    const problems = slackConfigurationProblems();
-    if (problems.length > 0) throw new HttpError(503, `Missing server configuration: ${problems.join(', ')}`);
-    const state = randomBytes(32).toString('base64url');
-    const redirectUri = slackCallbackUri(req);
-    pendingSlackAuthorizations.set(state, { redirectUri, expiresAt: Date.now() + 10 * 60_000 });
-    const authorizationUrl = new URL('https://slack.com/oauth/v2/authorize');
-    authorizationUrl.search = new URLSearchParams({
-      client_id: process.env.SLACK_CLIENT_ID ?? '',
-      redirect_uri: redirectUri,
-      user_scope: 'channels:read,channels:history,users:read',
-      state,
-    }).toString();
-    res.json({ authorizationUrl: authorizationUrl.toString() });
-  } catch (error) {
-    next(error);
-  }
-});
 
-app.get('/api/oauth/slack/callback', async (req, res) => {
-  const state = typeof req.query.state === 'string' ? req.query.state : '';
-  const pending = state ? pendingSlackAuthorizations.get(state) : undefined;
-  if (state) pendingSlackAuthorizations.delete(state);
-  const oauthError = typeof req.query.error === 'string' ? req.query.error : null;
-  if (oauthError) {
-    res.redirect(slackCallbackRedirect(req, 'error', 'Slack authorization was cancelled or denied.'));
-    return;
-  }
-  if (!pending || pending.expiresAt < Date.now()) {
-    res.redirect(slackCallbackRedirect(req, 'error', 'The Slack authorization request expired. Try connecting again.'));
-    return;
-  }
-  const code = typeof req.query.code === 'string' ? req.query.code : '';
-  if (!code) {
-    res.redirect(slackCallbackRedirect(req, 'error', 'Slack did not return an authorization code.'));
-    return;
-  }
-  try {
-    const problems = slackConfigurationProblems();
-    if (problems.length > 0) throw new Error(`Missing server configuration: ${problems.join(', ')}`);
-    const oauth = await exchangeSlackCode(
-      code,
-      pending.redirectUri,
-      process.env.SLACK_CLIENT_ID ?? '',
-      process.env.SLACK_CLIENT_SECRET ?? '',
-    );
-    const accessToken = oauth.authed_user?.access_token?.trim();
-    const authedUserId = oauth.authed_user?.id?.trim();
-    const teamId = oauth.team?.id?.trim();
-    const grantedScopes = (oauth.authed_user?.scope ?? '')
-      .split(',').map((scope) => scope.trim()).filter(Boolean);
-    const requiredScopes = ['channels:read', 'channels:history', 'users:read'];
-    if (!accessToken || !authedUserId || !teamId || requiredScopes.some((scope) => !grantedScopes.includes(scope))) {
-      throw new Error('Slack did not grant all required read-only channel scopes');
-    }
-    const profile = await slackAuthTest(accessToken);
-    if (profile.team_id !== teamId || profile.user_id !== authedUserId) {
-      throw new Error('Slack returned inconsistent workspace authorization');
-    }
-    const teamName = profile.team?.trim() || oauth.team?.name?.trim() || 'Slack workspace';
-    let teamDomain: string | null = null;
-    try {
-      const hostname = profile.url ? new URL(profile.url).hostname : '';
-      teamDomain = hostname.endsWith('.slack.com') ? hostname.slice(0, -'.slack.com'.length) : null;
-    } catch {
-      teamDomain = null;
-    }
-    const existing = store.connections.find(
-      (item): item is StoredSlackConnection => item.provider === 'slack',
-    );
-    if (existing && existing.teamId !== teamId) {
-      await revokeSlackToken(decryptToken(existing.encryptedAccessToken)).catch(() => undefined);
-    }
-    const now = new Date().toISOString();
-    const connection: StoredSlackConnection = {
-      id: `slack:${teamId}`,
-      provider: 'slack',
-      teamId,
-      teamName,
-      teamDomain,
-      authedUserId,
-      scopes: grantedScopes,
-      encryptedAccessToken: encryptToken(accessToken),
-      status: 'connected',
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      lastCheckedAt: now,
-      lastHealthyAt: now,
-      error: null,
-    };
-    await slackFunctionJson('workspace', {
-      method: 'POST',
-      body: JSON.stringify({
-        connectionId: connection.id,
-        teamId,
-        teamName,
-        teamDomain,
-        authedUserId,
-        scopes: grantedScopes,
-      }),
-    });
-    if (existing) Object.assign(existing, connection);
-    else store.connections.push(connection);
-    await saveStore();
-    void syncSlack(existing ?? connection).catch((error) => {
-      console.warn(`Initial Slack sync failed: ${publicSlackError(error)}`);
-    });
-    res.redirect(slackCallbackRedirect(req, 'connected', `${teamName} granted read-only channel access.`));
-  } catch (error) {
-    res.redirect(slackCallbackRedirect(req, 'error', publicSlackError(error)));
-  }
-});
 
-app.post('/api/connections/slack/:id/sync', async (req, res, next) => {
-  try {
-    const connection = store.connections.find(
-      (item): item is StoredSlackConnection => item.provider === 'slack' && item.id === req.params.id,
-    );
-    if (!connection) throw new HttpError(404, 'Slack connection not found');
-    res.json({ sync: await syncSlack(connection), connection: await toPublicConnection(connection) });
-  } catch (error) {
-    next(error);
-  }
-});
 
 app.post('/api/connections/quo/connect', async (req, res, next) => {
   try {
@@ -2242,28 +1771,10 @@ app.delete('/api/connections/:id', async (req, res, next) => {
       } catch (error) {
         console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
       }
-    } else if (connection.provider === 'quo') {
+    } else {
       await syncQuoScope(connection, []).catch((error) => {
         console.warn(`Quo capture scope could not be cleared remotely: ${publicQuoError(error)}`);
       });
-    } else {
-      try {
-        await revokeSlackToken(decryptToken(connection.encryptedAccessToken));
-      } catch (error) {
-        console.warn(`Slack grant could not be revoked remotely: ${publicSlackError(error)}`);
-      }
-      await slackFunctionJson('workspace', {
-        method: 'POST',
-        body: JSON.stringify({
-          connectionId: connection.id,
-          teamId: connection.teamId,
-          teamName: connection.teamName,
-          teamDomain: connection.teamDomain,
-          authedUserId: connection.authedUserId,
-          scopes: connection.scopes,
-          disconnected: true,
-        }),
-      }).catch(() => undefined);
     }
     store.connections.splice(index, 1);
     await saveStore();
@@ -3257,11 +2768,6 @@ const startupActivitySync = setTimeout(() => {
 }, 10_000);
 startupActivitySync.unref();
 
-const startupSlackSync = setTimeout(() => {
-  void syncDueSlack();
-}, 15_000);
-startupSlackSync.unref();
-
 const healthTimer = setInterval(
   () => {
     void checkDueConnections();
@@ -3278,21 +2784,11 @@ const activitySyncTimer = setInterval(
 );
 activitySyncTimer.unref();
 
-const slackSyncTimer = setInterval(
-  () => {
-    void syncDueSlack();
-  },
-  Math.min(slackSyncIntervalMs, 30_000),
-);
-slackSyncTimer.unref();
 
 const pendingCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [state, pending] of pendingAuthorizations) {
     if (pending.expiresAt < now) pendingAuthorizations.delete(state);
-  }
-  for (const [state, pending] of pendingSlackAuthorizations) {
-    if (pending.expiresAt < now) pendingSlackAuthorizations.delete(state);
   }
 }, 60_000);
 pendingCleanupTimer.unref();
@@ -3304,8 +2800,5 @@ app.listen(port, () => {
   }
   if (quoConfigurationProblems().length > 0) {
     console.log('Quo connection is disabled until token encryption is configured.');
-  }
-  if (slackConfigurationProblems().length > 0) {
-    console.log('Slack connection is disabled until the Slack OAuth credentials are configured.');
   }
 });

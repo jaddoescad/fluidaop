@@ -55,33 +55,8 @@ interface QuoConnection {
   };
 }
 
-interface SlackConnection {
-  id: string;
-  provider: 'slack';
-  teamId: string;
-  teamName: string;
-  teamDomain: string | null;
-  authedUserId: string;
-  scopes: string[];
-  selectedChannelCount: number;
-  selectedJobChannelCount: number;
-  status: 'connected' | 'error' | 'checking';
-  createdAt: string;
-  updatedAt: string;
-  lastCheckedAt: string | null;
-  lastHealthyAt: string | null;
-  nextCheckAt: string | null;
-  lastSyncedAt: string | null;
-  error: string | null;
-  webhook: {
-    state: 'receiving' | 'ready' | 'pending';
-    url: string;
-    lastEventAt: string | null;
-    signingSecretConfigured: boolean;
-  };
-}
 
-type Connection = GmailConnection | QuoConnection | SlackConnection;
+type Connection = GmailConnection | QuoConnection;
 
 interface ConnectionsPayload {
   connections: Connection[];
@@ -89,7 +64,6 @@ interface ConnectionsPayload {
   configured?: boolean;
   gmail: { configured: boolean; configurationError?: string };
   quo: { configured: boolean; configurationError?: string };
-  slack: { configured: boolean; configurationError?: string };
 }
 
 interface ConnectionLoadFailure {
@@ -233,18 +207,6 @@ function QuoLogo({ dim = false }: { dim?: boolean }) {
   );
 }
 
-function SlackLogo({ dim = false }: { dim?: boolean }) {
-  return (
-    <span className={`cn-logo cn-logo-slack${dim ? ' cn-logo-dim' : ''}`} aria-hidden="true">
-      <svg viewBox="0 0 24 24" width="21" height="21" focusable="false">
-        <path fill="#36C5F0" d="M9.4 2.2a2.2 2.2 0 0 1 0 4.4H7.2V4.4c0-1.22.98-2.2 2.2-2.2Zm0 5.5v5.5H7.2a2.75 2.75 0 0 1 0-5.5h2.2Z" />
-        <path fill="#2EB67D" d="M21.8 9.4a2.2 2.2 0 0 1-4.4 0V7.2h2.2c1.22 0 2.2.98 2.2 2.2Zm-5.5 0h-5.5V7.2a2.75 2.75 0 0 1 5.5 0v2.2Z" />
-        <path fill="#ECB22E" d="M14.6 21.8a2.2 2.2 0 0 1 0-4.4h2.2v2.2c0 1.22-.98 2.2-2.2 2.2Zm0-5.5v-5.5h2.2a2.75 2.75 0 0 1 0 5.5h-2.2Z" />
-        <path fill="#E01E5A" d="M2.2 14.6a2.2 2.2 0 0 1 4.4 0v2.2H4.4a2.2 2.2 0 0 1-2.2-2.2Zm5.5 0h5.5v2.2a2.75 2.75 0 0 1-5.5 0v-2.2Z" />
-      </svg>
-    </span>
-  );
-}
 
 function StatusPill({
   status,
@@ -779,73 +741,6 @@ function ConnectedQuoCard({
   );
 }
 
-function ConnectedSlackCard({
-  c,
-  now,
-  busy,
-  confirming,
-  onCheck,
-  onSync,
-  onDisconnect,
-  onConfirmChange,
-}: {
-  c: SlackConnection;
-  now: number;
-  busy: boolean;
-  confirming: boolean;
-  onCheck: () => void;
-  onSync: () => void;
-  onDisconnect: () => void;
-  onConfirmChange: (open: boolean) => void;
-}) {
-  const cancelRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (confirming) cancelRef.current?.focus();
-  }, [confirming]);
-  const checking = busy || c.status === 'checking';
-  const eventLabel = c.webhook.state === 'receiving'
-    ? 'Receiving events'
-    : c.webhook.state === 'ready'
-      ? 'Webhook ready'
-      : 'Webhook needs signing secret';
-  return (
-    <section className="cn-card" aria-label={`Slack — ${c.teamName}`}>
-      <div className="cn-card-head">
-        <SlackLogo />
-        <div className="cn-who"><b>Slack</b><span>{c.teamName}</span></div>
-        <StatusPill status={c.status} />
-      </div>
-      <div className="cn-quo-summary">
-        <span>{c.selectedJobChannelCount} job channel{c.selectedJobChannelCount === 1 ? '' : 's'} · #sales</span>
-        <span className={c.webhook.state === 'pending' ? 'cn-cue' : 'cn-quo-live'}>
-          <i className="cn-dot" /> {eventLabel}
-        </span>
-      </div>
-      {c.status === 'error' && <p className="cn-problem">{c.error ?? 'Slack could not be reached.'}</p>}
-      {confirming ? (
-        <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
-          <p>Disconnect <b>{c.teamName}</b>? Fluid will stop reading selected public channels. Nothing in Slack is deleted.</p>
-          <div className="cn-actions">
-            <button type="button" className="cn-btn cn-btn-danger" onClick={onDisconnect} disabled={busy}>{busy ? 'Disconnecting…' : 'Disconnect'}</button>
-            <button ref={cancelRef} type="button" className="cn-btn" onClick={() => onConfirmChange(false)} disabled={busy}>Cancel</button>
-          </div>
-        </div>
-      ) : (
-        <div className="cn-card-foot">
-          <dl className="cn-meta">
-            <div className="cn-meta-item"><dt>Last synced</dt><dd title={fmtAbs(c.lastSyncedAt)}>{fmtPast(c.lastSyncedAt, now, 'starting')}</dd></div>
-            <div className="cn-meta-item"><dt>Last event</dt><dd title={fmtAbs(c.webhook.lastEventAt)}>{fmtPast(c.webhook.lastEventAt, now, 'none yet')}</dd></div>
-          </dl>
-          <div className="cn-actions">
-            <button type="button" className="cn-btn" onClick={onSync} disabled={checking}>{checking ? 'Syncing…' : 'Sync now'}</button>
-            <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>Check</button>
-            <button type="button" className="cn-btn" onClick={() => onConfirmChange(true)}>Disconnect…</button>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
 
 // ---------- the page ----------
 
@@ -863,7 +758,6 @@ export function ConnectionsPage({
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [slackConnecting, setSlackConnecting] = useState(false);
   const [quoConnecting, setQuoConnecting] = useState(false);
   const [quoApiKey, setQuoApiKey] = useState('');
   const [confirmId, setConfirmId] = useState<string | null>(null);
@@ -892,9 +786,8 @@ export function ConnectionsPage({
   useEffect(() => {
     const url = new URL(window.location.href);
     const gmail = url.searchParams.get('gmail');
-    const slack = url.searchParams.get('slack');
     const message = url.searchParams.get('message');
-    if (gmail !== null || slack !== null || message !== null) {
+    if (gmail !== null || message !== null) {
       if (gmail === 'connected') {
         setNotice({
           tone: 'ok',
@@ -907,23 +800,10 @@ export function ConnectionsPage({
           text: 'Google sign-in didn’t complete — nothing was connected.',
           detail: message ?? 'You can try again below.',
         });
-      } else if (slack === 'connected') {
-        setNotice({
-          tone: 'ok',
-          text: 'Slack connected with read-only channel access.',
-          detail: message ?? 'Fluid is discovering #job-* and #sales now.',
-        });
-      } else if (slack === 'error') {
-        setNotice({
-          tone: 'danger',
-          text: 'Slack authorization didn’t complete — nothing was connected.',
-          detail: message ?? 'You can try again below.',
-        });
       } else if (message !== null) {
         setNotice({ tone: 'info', text: message });
       }
       url.searchParams.delete('gmail');
-      url.searchParams.delete('slack');
       url.searchParams.delete('message');
       window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
     }
@@ -979,20 +859,6 @@ export function ConnectionsPage({
     }
   };
 
-  const connectSlack = async () => {
-    setSlackConnecting(true);
-    setActionError(null);
-    try {
-      const { authorizationUrl } = await api<{ authorizationUrl: string }>(
-        '/api/connections/slack/authorize',
-        { method: 'POST' },
-      );
-      window.location.assign(authorizationUrl);
-    } catch (error) {
-      setActionError(`Couldn’t start Slack authorization: ${errText(error)}.`);
-      setSlackConnecting(false);
-    }
-  };
 
   const saveQuoScope = async (c: QuoConnection, phoneNumberIds: string[]) => {
     setBusyId(c.id);
@@ -1045,31 +911,6 @@ export function ConnectionsPage({
     }
   };
 
-  const syncSlack = async (c: SlackConnection) => {
-    setBusyId(c.id);
-    setActionError(null);
-    try {
-      const { connection, sync } = await api<{ connection: SlackConnection; sync: { rateLimited?: boolean; messagesUpserted?: number } }>(
-        `/api/connections/slack/${encodeURIComponent(c.id)}/sync`,
-        { method: 'POST' },
-      );
-      setPayload((current) => current === null ? current : {
-        ...current,
-        connections: current.connections.map((item) => item.id === connection.id ? connection : item),
-      });
-      setNotice({
-        tone: sync.rateLimited ? 'info' : 'ok',
-        text: sync.rateLimited ? 'Slack history sync will resume automatically.' : 'Slack context synced.',
-        detail: sync.rateLimited
-          ? 'Slack applied its history rate limit; no retry or duplicate work is needed.'
-          : `${sync.messagesUpserted ?? 0} message${sync.messagesUpserted === 1 ? '' : 's'} checked and stored idempotently.`,
-      });
-    } catch (error) {
-      setActionError(`Slack sync failed: ${errText(error)}.`);
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const disconnect = async (c: Connection) => {
     setBusyId(c.id);
@@ -1081,12 +922,10 @@ export function ConnectionsPage({
       );
       setNotice({
         tone: 'info',
-        text: `${c.provider === 'gmail' ? c.email : c.provider === 'quo' ? 'Quo' : c.teamName} disconnected.`,
+        text: `${c.provider === 'gmail' ? c.email : 'Quo'} disconnected.`,
         detail: c.provider === 'gmail'
           ? 'Fluid no longer has access to this inbox. Nothing in Gmail itself was changed.'
-          : c.provider === 'quo'
-            ? 'Fluid no longer has access to this workspace’s calls and texts. Nothing in Quo itself was changed.'
-            : 'Fluid no longer has access to Slack channels. Nothing in Slack itself was changed.',
+          : 'Fluid no longer has access to this workspace’s calls and texts. Nothing in Quo itself was changed.',
       });
     } catch (e) {
       setActionError(`Couldn’t disconnect: ${errText(e)}.`);
@@ -1098,9 +937,8 @@ export function ConnectionsPage({
 
   const gmailConnections = payload?.connections.filter((c) => c.provider === 'gmail') ?? [];
   const quoConnections = payload?.connections.filter((c) => c.provider === 'quo') ?? [];
-  const slackConnections = payload?.connections.filter((c) => c.provider === 'slack') ?? [];
-  const anyAvailable = gmailConnections.length === 0 || quoConnections.length === 0 || slackConnections.length === 0;
-  const anyConnected = gmailConnections.length > 0 || quoConnections.length > 0 || slackConnections.length > 0;
+  const anyAvailable = gmailConnections.length === 0 || quoConnections.length === 0;
+  const anyConnected = gmailConnections.length > 0 || quoConnections.length > 0;
   const interval = everyPhrase(payload?.healthCheckIntervalMs ?? 300_000);
 
   return (
@@ -1163,7 +1001,7 @@ export function ConnectionsPage({
                     <QuoLogo dim />
                     <div className="cn-who">
                       <b>Connections</b>
-                      <span>Gmail, Quo &amp; Slack</span>
+                      <span>Gmail &amp; Quo</span>
                     </div>
                     <StatusPill status="unavailable" />
                   </div>
@@ -1182,11 +1020,10 @@ export function ConnectionsPage({
                 </section>
               ) : payload !== null ? (
                 <>
-                  {(!payload.gmail.configured || !payload.quo.configured || !payload.slack.configured) && (
+                  {(!payload.gmail.configured || !payload.quo.configured) && (
                     <div className="cn-panel cn-panel-warn" role="status">
                       {!payload.gmail.configured && <p className="cn-panel-text"><b>Gmail isn’t set up on the server yet.</b> {payload.gmail.configurationError ?? 'Add the Google credentials to the server.'}</p>}
                       {!payload.quo.configured && <p className="cn-panel-text"><b>Quo isn’t set up on the server yet.</b> {payload.quo.configurationError ?? 'Add connection encryption to the server.'}</p>}
-                      {!payload.slack.configured && <p className="cn-panel-text"><b>Slack isn’t set up on the server yet.</b> {payload.slack.configurationError ?? 'Add the Slack OAuth credentials to the server.'}</p>}
                     </div>
                   )}
 
@@ -1250,20 +1087,6 @@ export function ConnectionsPage({
                           Stored encrypted on the server
                         </p>
                       </section>}
-                      {slackConnections.length === 0 && <section className="cn-card" aria-label="Slack — not connected">
-                        <div className="cn-card-head">
-                          <SlackLogo dim />
-                          <div className="cn-who"><b>Slack</b><span>Internal job context</span></div>
-                          <StatusPill status="off" />
-                        </div>
-                        <p className="cn-card-text">Read #job-* and #sales for decisions, blockers, scope, and scheduling context. Fluid cannot post or react.</p>
-                        <div className="cn-actions">
-                          <button type="button" className="cn-btn cn-btn-primary" onClick={() => void connectSlack()} disabled={!payload.slack.configured || slackConnecting}>
-                            {slackConnecting ? 'Opening Slack…' : 'Connect Slack'}
-                          </button>
-                        </div>
-                        {!payload.slack.configured && <p className="cn-hint">Disabled until the server has the Slack app credentials.</p>}
-                      </section>}
                     </section>
                   )}
                   {anyConnected && (
@@ -1296,19 +1119,6 @@ export function ConnectionsPage({
                           onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
                           onManageChange={(open) => setManageOpenId(open ? c.id : null)}
                           onScopeSave={(phoneNumberIds) => saveQuoScope(c, phoneNumberIds)}
-                        />
-                      ))}
-                      {slackConnections.map((c) => (
-                        <ConnectedSlackCard
-                          key={c.id}
-                          c={c}
-                          now={now}
-                          busy={busyId === c.id}
-                          confirming={confirmId === c.id}
-                          onCheck={() => void checkNow(c.id)}
-                          onSync={() => void syncSlack(c)}
-                          onDisconnect={() => void disconnect(c)}
-                          onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
                         />
                       ))}
                       <p className="cn-quiet">Automatic health checks {interval}.</p>

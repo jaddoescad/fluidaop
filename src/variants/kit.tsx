@@ -144,11 +144,7 @@ export function statusOf(s: State, sig: Signal): SigStatus {
   if (sig.reviewStatus === 'pending') return { key: 'open', icon: '●', label: 'needs you' };
   if (sig.reviewStatus === 'action_open') return { key: 'action', icon: '✦', label: 'action open' };
   if (sig.reviewStatus === 'settled') {
-    if (sig.direction === 'outbound') return { key: 'quiet', icon: '→', label: 'sent' };
-    if (sig.reviewResolution === 'shadow_only') return { key: 'quiet', icon: '◌', label: 'calibrating' };
-    if (sig.reviewResolution === 'no_action') return { key: 'quiet', icon: '✓', label: 'dismissed' };
-    if (sig.isAutomated) return { key: 'quiet', icon: '·', label: 'system context' };
-    return { key: 'quiet', icon: '·', label: 'reviewed' };
+    return { key: 'quiet', icon: '✓', label: 'manually settled' };
   }
   if (s.actions.some((a) => a.sourceSignalId === sig.id)) {
     return { key: 'action', icon: '✦', label: 'action open' };
@@ -691,6 +687,13 @@ function SignalContactTag({ signal, person }: { signal: Signal; person?: Person 
     return (
       <span className="fl-role role-conflict" title={signal.identityResolution.reason}>
         ⚠ duplicate contacts
+      </span>
+    );
+  }
+  if (signal.identityResolution?.status === 'unresolved') {
+    return (
+      <span className="fl-role role-unresolved" title={signal.identityResolution.reason}>
+        unresolved contact
       </span>
     );
   }
@@ -1748,6 +1751,7 @@ export function RunPopup({
   onClose,
   onLoadMoreHistory,
   onOpenAction,
+  sideBySide = false,
 }: {
   s: State;
   act: Act;
@@ -1755,6 +1759,8 @@ export function RunPopup({
   onClose: () => void;
   onLoadMoreHistory?: (signalId: string) => void;
   onOpenAction?: (actionId: string) => void;
+  /** Keep a deal conversation visible while inspecting one of its communications. */
+  sideBySide?: boolean;
 }) {
   const [text, setText] = useState('');
   const [notes, setNotes] = useState<{ who: 'you' | 'agent' | 'sys'; text: string }[]>([]);
@@ -1808,40 +1814,90 @@ export function RunPopup({
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+    let stabilizeLayout: (() => void) | null = null;
 
     if (previousSubjectRef.current !== subjectKey) {
       previousSubjectRef.current = subjectKey;
       previousHistoryLengthRef.current = ctx.length;
       historyScrollAnchorRef.current = null;
       el.scrollTop = el.scrollHeight;
-      return;
-    }
-
-    const anchor = historyScrollAnchorRef.current;
-    if (anchor && ctx.length > anchor.historyLength) {
-      const anchoredMessage = anchor.historyId === null
-        ? null
-        : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
-          .find((item) => item.dataset.historyId === anchor.historyId);
-      if (anchoredMessage) {
+      if (subject.type === 'signal') {
+        stabilizeLayout = () => {
+          const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+          if (distanceFromBottom < 48) el.scrollTop = el.scrollHeight;
+        };
+      }
+    } else {
+      const anchor = historyScrollAnchorRef.current;
+      if (anchor && ctx.length > anchor.historyLength) {
+        const keepHistoryAnchor = () => {
+          const anchoredMessage = anchor.historyId === null
+            ? null
+            : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+              .find((item) => item.dataset.historyId === anchor.historyId);
+          if (!anchoredMessage) return;
+          const drift = anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
+          // A large delta after the initial correction means the user scrolled;
+          // never fight that input while waiting for a late font layout.
+          if (Math.abs(drift) < 48) el.scrollTop += drift;
+        };
         // Earlier messages are inserted above the existing conversation. Keep
         // the first previously loaded message at the same viewport position.
-        el.scrollTop += anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
+        const anchoredMessage = anchor.historyId === null
+          ? null
+          : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+            .find((item) => item.dataset.historyId === anchor.historyId);
+        if (anchoredMessage) {
+          el.scrollTop += anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
+          stabilizeLayout = keepHistoryAnchor;
+        }
+        historyScrollAnchorRef.current = null;
+      } else if (anchor && signalDetail?.loading === false) {
+        // The request completed without adding messages (for example, an error).
+        historyScrollAnchorRef.current = null;
+      } else if (
+        subject.type === 'signal' &&
+        previousHistoryLengthRef.current === 0 &&
+        ctx.length > 0
+      ) {
+        // History is inserted above the selected Signal. Pin the bottom during
+        // layout so the user never sees the primary ticket jump between frames.
+        el.scrollTop = el.scrollHeight;
+        stabilizeLayout = () => {
+          const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+          if (distanceFromBottom < 48) el.scrollTop = el.scrollHeight;
+        };
       }
-      historyScrollAnchorRef.current = null;
-    } else if (anchor && signalDetail?.loading === false) {
-      // The request completed without adding messages (for example, an error).
-      historyScrollAnchorRef.current = null;
-    } else if (
-      subject.type === 'signal' &&
-      previousHistoryLengthRef.current === 0 &&
-      ctx.length > 0
-    ) {
-      // History is inserted above the selected Signal. Pin the bottom during
-      // layout so the user never sees the primary ticket jump between frames.
-      el.scrollTop = el.scrollHeight;
+      previousHistoryLengthRef.current = ctx.length;
     }
-    previousHistoryLengthRef.current = ctx.length;
+
+    if (!stabilizeLayout) return;
+
+    // Font swaps and scrollbar resolution can change conversation geometry
+    // immediately after React's layout phase. Preserve the chosen bottom/anchor
+    // position across the next frames and the final web-font layout.
+    let cancelled = false;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      if (scrollRef.current !== el || previousSubjectRef.current !== subjectKey) return;
+      stabilizeLayout?.();
+      secondFrame = window.requestAnimationFrame(() => {
+        if (scrollRef.current === el && previousSubjectRef.current === subjectKey) {
+          stabilizeLayout?.();
+        }
+      });
+    });
+    void document.fonts?.ready.then(() => {
+      if (!cancelled && scrollRef.current === el && previousSubjectRef.current === subjectKey) {
+        stabilizeLayout?.();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
   }, [ctx.length, signalDetail?.loading, subject.type, subjectKey]);
 
   useEffect(() => {
@@ -2136,16 +2192,21 @@ export function RunPopup({
   };
 
   const selectedBody = selectedSignal ? splitSelectedEmailBody(selectedSignal) : null;
+  const selectedIsCall = selectedSignal?.channel === 'call';
   const selectedHasEvidence = Boolean(
-    signalDetail?.attachments.length || signalDetail?.transcript?.text,
+    signalDetail?.attachments.length || selectedIsCall,
   );
 
   let signalDecisionSummary: ReactNode = null;
   if (subject.type === 'signal' && sg && selectedSignal && sgStatus) {
     signalDecisionSummary = sgStatus.key === 'open'
-      ? recommendations[0]?.reason ?? (!signalDetail?.loading
-        ? 'Hermes has no suggested action. You still need to decide whether this Signal needs one.'
-        : null)
+      ? selectedSignal.direction === 'outbound'
+        ? <>This was sent by your team. Review it, then manually settle this Signal.</>
+        : laterOutbound
+          ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. Review this Signal, then settle it manually.</>
+          : recommendations[0]?.reason ?? (!signalDetail?.loading
+            ? 'Hermes has no suggested action. You still need to decide whether this Signal needs one.'
+            : null)
       : sgStatus.key === 'action'
         ? <>A reply draft is ready in Actions.</>
         : sgStatus.key === 'rem'
@@ -2154,28 +2215,38 @@ export function RunPopup({
             ? <>An automation is running for this Signal. Runner has it.</>
             : sgStatus.key === 'done'
               ? <>{sgStatus.label} ✓ Nothing is left here.</>
-              : selectedSignal.direction === 'outbound'
-                ? <>This was sent by your team. Wait for a new inbound reply; Fluid will review that reply as its own Signal.</>
-                : selectedSignal.reviewResolution === 'no_action'
-                  ? <>You marked this Signal “No action needed”{selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}. No follow-up will be created.</>
-                  : laterOutbound
-                    ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. Wait for the contact&apos;s next response.</>
-                    : selectedSignal.reviewResolution === 'performed_external'
-                      ? <>Your team handled this through a real provider message.</>
-                      : <>No handling evidence is available for this Signal.</>;
+              : selectedSignal.reviewResolution === 'no_action'
+                ? <>You manually settled this Signal{selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}.</>
+                : <>No manual settlement is recorded for this Signal.</>;
   }
   const signalDecision = signalDecisionSummary ? (
     <article className="fd-dec"><p className="fd-dec-summary">{signalDecisionSummary}</p></article>
   ) : null;
 
   return (
-    <div className="fl-scrim" onClick={onClose}>
-      <div className="fc" onClick={(e) => e.stopPropagation()}>
+    <div className={`fl-scrim${sideBySide ? ' fc-inspector-scrim' : ''}`} onClick={sideBySide ? undefined : onClose}>
+      <div
+        className={`fc${sideBySide ? ' fc-inspector' : ''}`}
+        role={sideBySide ? 'complementary' : 'dialog'}
+        aria-label={sideBySide ? `Inspect ${title}` : title}
+        aria-modal={sideBySide ? undefined : true}
+        onClick={(e) => e.stopPropagation()}
+      >
         <header className="fc-head">
           <div className="fc-head-main">
             <b>{title}</b>
             <span className="fc-head-sub">
-              for {p?.name ?? '—'} ({p?.role ?? '—'})
+              {sg?.identityResolution ? (
+                <>
+                  for {sg.identityResolution.displayName ?? sg.identityResolution.displayValue ?? p?.name ?? 'Unknown contact'}
+                  {' · '}
+                  <span className={`fc-status fc-status-${sg.identityResolution.status === 'conflict' ? 'fail' : 'queued'}`}>
+                    {sg.identityResolution.status === 'conflict' ? 'identity conflict' : 'unresolved contact'}
+                  </span>
+                </>
+              ) : (
+                <>for {p?.name ?? '—'} ({p?.role ?? '—'})</>
+              )}
               {status && (
                 <>
                   {' · '}
@@ -2250,8 +2321,100 @@ export function RunPopup({
                         {attachment.extractedText ? <span>{attachment.extractedText.slice(0, 800)}</span> : null}
                       </div>
                     ))}
-                    {signalDetail?.transcript?.text && (
-                      <div className="fd-sel-evidence-row"><span><b>Call transcript:</b> {signalDetail.transcript.text.slice(0, 1_500)}</span></div>
+                    {selectedIsCall && (
+                      <>
+                        <div className="fd-sel-evidence-row fd-sel-recordings">
+                          <span>
+                            <b>Call recording</b>
+                            {' · '}
+                            {signalDetail?.recordings?.status === 'available'
+                              ? 'Available'
+                              : signalDetail?.recordings?.status === 'unavailable'
+                                ? 'Unavailable'
+                                : signalDetail?.recordings?.status === 'failed'
+                                  ? 'Retry scheduled'
+                                  : 'Pending'}
+                          </span>
+                          {signalDetail?.recordings?.status === 'available' && signalDetail.recordings.items.length > 0 ? (
+                            <div className="fd-call-recording-list">
+                              {signalDetail.recordings.items.map((recording, index) => (
+                                <div className="fd-call-recording" key={recording.id ?? `${recording.url}:${index}`}>
+                                  <span>Recording {index + 1}{recording.duration === null ? '' : ` · ${Math.round(recording.duration)} seconds`}</span>
+                                  <audio controls preload="none" src={recording.url}>
+                                    Your browser cannot play this call recording.
+                                  </audio>
+                                </div>
+                              ))}
+                            </div>
+                          ) : signalDetail?.recordings?.status === 'unavailable' ? (
+                            <span>Quo did not retain a recording for this call.</span>
+                          ) : signalDetail?.recordings?.status === 'failed' ? (
+                            <span>Fluid will retry the recording automatically.</span>
+                          ) : (
+                            <span>Waiting for Quo to make the recording available.</span>
+                          )}
+                        </div>
+                        <div className="fd-sel-evidence-row fd-sel-call-summary">
+                          <span>
+                            <b>Call summary</b>
+                            {' · '}
+                            {signalDetail?.callSummary?.status === 'available'
+                              ? 'Available'
+                              : signalDetail?.callSummary?.status === 'unavailable'
+                                ? 'Unavailable'
+                                : signalDetail?.callSummary?.status === 'failed'
+                                  ? 'Retry scheduled'
+                                  : 'Pending'}
+                          </span>
+                          {signalDetail?.callSummary?.status === 'available' ? (
+                            <div className="fd-call-summary-content">
+                              {signalDetail.callSummary.summary.length > 0 && (
+                                <ul>{signalDetail.callSummary.summary.map((item, index) => <li key={`summary:${index}`}>{item}</li>)}</ul>
+                              )}
+                              {signalDetail.callSummary.nextSteps.length > 0 && (
+                                <div>
+                                  <strong>Next steps</strong>
+                                  <ul>{signalDetail.callSummary.nextSteps.map((item, index) => <li key={`next:${index}`}>{item}</li>)}</ul>
+                                </div>
+                              )}
+                              {signalDetail.callSummary.summary.length === 0 && signalDetail.callSummary.nextSteps.length === 0 && (
+                                <span>Quo completed the summary without any notes.</span>
+                              )}
+                            </div>
+                          ) : signalDetail?.callSummary?.status === 'unavailable' ? (
+                            <span>Quo did not create a summary for this call.</span>
+                          ) : signalDetail?.callSummary?.status === 'failed' ? (
+                            <span>Fluid will retry the summary automatically.</span>
+                          ) : (
+                            <span>Waiting for Quo to create the summary.</span>
+                          )}
+                        </div>
+                        <div className="fd-sel-evidence-row fd-sel-transcript">
+                          <span>
+                            <b>Call transcript</b>
+                            {' · '}
+                            {signalDetail?.transcript?.status === 'available'
+                              ? 'Available'
+                              : signalDetail?.transcript?.status === 'unavailable'
+                                ? 'Unavailable'
+                                : signalDetail?.transcript?.status === 'failed'
+                                  ? 'Retry scheduled'
+                                  : 'Pending'}
+                          </span>
+                          {signalDetail?.transcript?.status === 'available' && signalDetail.transcript.text ? (
+                            <details>
+                              <summary>Read full transcript</summary>
+                              <pre>{signalDetail.transcript.text}</pre>
+                            </details>
+                          ) : signalDetail?.transcript?.status === 'unavailable' ? (
+                            <span>Quo did not create a transcript for this call.</span>
+                          ) : signalDetail?.transcript?.status === 'failed' ? (
+                            <span>Fluid will retry the transcript automatically.</span>
+                          ) : (
+                            <span>Waiting for Quo to create the transcript.</span>
+                          )}
+                        </div>
+                      </>
                     )}
                   </div>
                 )}
@@ -2483,7 +2646,7 @@ export function RunPopup({
                 onClick={() => {
                   setSettling(true);
                   void act.settleSignal(sg.id)
-                    .then(() => setNotes((current) => [...current, { who: 'you', text: 'No action needed' }]))
+                    .then(() => setNotes((current) => [...current, { who: 'you', text: 'Signal settled' }]))
                     .catch((cause) => setNotes((current) => [...current, {
                       who: 'agent',
                       text: cause instanceof Error ? cause.message : 'Could not settle this Signal',
@@ -2491,7 +2654,7 @@ export function RunPopup({
                     .finally(() => setSettling(false));
                 }}
               >
-                {settling ? 'Settling…' : 'No action needed'}
+                {settling ? 'Settling…' : 'Mark settled'}
               </button>
             )}
             {subject.type === 'reminder' && r && r.doneAt === null && (

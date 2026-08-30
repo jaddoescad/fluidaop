@@ -213,6 +213,46 @@
   overflow: hidden;
 }
 
+/* A deal communication is inspected beside its conversation. The workspace
+   remains readable and interactive instead of disappearing under a second
+   full-screen modal. */
+.v-zen .fc-inspector-scrim {
+  align-items: stretch;
+  justify-content: flex-end;
+  padding: 24px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.fc-inspector {
+  width: min(500px, 40vw);
+  height: calc(100vh - 48px);
+  border-color: #393947;
+  border-radius: 14px;
+  box-shadow: -18px 0 60px rgba(0, 0, 0, 0.48);
+  pointer-events: auto;
+  animation: fcInspectorIn 180ms ease-out;
+}
+
+@keyframes fcInspectorIn {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@media (max-width: 960px) {
+  .v-zen .fc-inspector-scrim {
+    padding: 12px;
+    background: rgba(6, 6, 10, 0.48);
+    pointer-events: auto;
+  }
+
+  .fc-inspector {
+    width: min(620px, calc(100vw - 24px));
+    height: calc(100vh - 24px);
+    margin-left: auto;
+  }
+}
+
 .fc-head {
   flex: none;
   display: flex;
@@ -479,6 +519,75 @@
 }
 
 .fd-sel-evidence-row b { color: #e7e9ee; font-weight: 650; }
+
+.fd-call-recording-list,
+.fd-call-summary-content {
+  display: grid;
+  gap: 7px;
+  margin-top: 3px;
+}
+
+.fd-call-recording {
+  display: grid;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid #2d2e37;
+  border-radius: 8px;
+  background: #111117;
+}
+
+.fd-call-recording audio {
+  width: 100%;
+  height: 32px;
+}
+
+.fd-call-summary-content {
+  padding: 8px 10px;
+  border: 1px solid #2d2e37;
+  border-radius: 8px;
+  background: #111117;
+  color: #b8bac4;
+}
+
+.fd-call-summary-content ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.fd-call-summary-content strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #e7e9ee;
+}
+
+.fd-sel-transcript details {
+  overflow: hidden;
+  margin-top: 3px;
+  border: 1px solid #2d2e37;
+  border-radius: 8px;
+  background: #111117;
+}
+
+.fd-sel-transcript summary {
+  padding: 7px 9px;
+  color: #c6c8d0;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.fd-sel-transcript pre {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 9px;
+  border-top: 1px solid #282932;
+  color: #b8bac4;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
 
 /* one useful summary, followed directly by the existing decision buttons */
 .fd-dec {

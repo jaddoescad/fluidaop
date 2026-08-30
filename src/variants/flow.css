@@ -535,6 +535,7 @@
 .fl-role.role-client { color: var(--ok); }
 .fl-role.role-vendor { color: var(--c-form); }
 .fl-role.role-conflict { color: var(--danger); }
+.fl-role.role-unresolved { color: var(--warn); }
 
 .card-who .fl-role,
 .fl-act-person .fl-role {
