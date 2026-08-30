@@ -6,14 +6,20 @@ rather than a hand-picked subset: whatever Hermes knows about a job, Fluid can
 render. Values whose key looks like a credential are masked on the way out (see
 ``_SECRET_KEY_PARTS``), because prompts and job env can carry API keys.
 
-Writes stay narrow on purpose: only pause, resume, and delete, only for an
-exact cron job id whose profile the caller already named correctly.
+Writes stay narrow on purpose: pause, resume, and delete for an exact cron job
+id whose profile the caller already named correctly, plus removing a single
+skill directory. Both require the manage scope, and the skill delete resolves
+through symlinks and verifies containment before touching the filesystem — the
+Nous-session-only /api/files endpoint is unreachable from Fluid, so this is the
+only programmatic path.
 """
 from __future__ import annotations
 
 import hmac
 import importlib.util
 import os
+import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -346,6 +352,77 @@ def _skill_instructions(name: str, skill: Dict[str, Any]) -> tuple[Optional[str]
     except OSError:
         return None, str(candidate)
     return text[:MAX_SKILL_CHARS], str(candidate)
+
+
+SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _resolve_skill_dir(name: str) -> Path:
+    """Locate a skill's own directory, refusing anything outside a skill root.
+
+    Every check here exists because this function feeds an rmtree: the name is
+    pattern-matched, the path is resolved through symlinks, containment is
+    verified against the configured roots, and a root itself is never a target.
+    """
+    if SKILL_NAME.fullmatch(name) is None:
+        raise HTTPException(status_code=400, detail="Invalid skill name")
+
+    skill_file = _find_skill_file(name, _default_skill_roots())
+    if skill_file is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    try:
+        target = skill_file.resolve(strict=True).parent
+        roots = [root.resolve() for root in _default_skill_roots() if root.is_dir()]
+    except OSError as error:
+        raise HTTPException(status_code=500, detail="Could not resolve skill path") from error
+
+    if target.name != name:
+        raise HTTPException(status_code=409, detail="Skill directory name does not match the skill")
+    if not (target / "SKILL.md").is_file():
+        raise HTTPException(status_code=409, detail="Refusing to remove a directory with no SKILL.md")
+    if any(target == root for root in roots):
+        raise HTTPException(status_code=409, detail="Refusing to remove a skill root")
+    if not any(root in target.parents for root in roots):
+        raise HTTPException(status_code=403, detail="Skill lives outside the configured skill roots")
+    return target
+
+
+def _attached_jobs(name: str) -> List[str]:
+    from hermes_cli import web_server as ws
+
+    return [
+        str(job.get("name") or job.get("id") or "unnamed job")
+        for job in ws._list_cron_jobs_sync("all")
+        if any(_compact(value) == name for value in (job.get("skills") or []))
+    ]
+
+
+def _compact(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _delete_skill(name: str, force: bool) -> Dict[str, Any]:
+    target = _resolve_skill_dir(name)
+    attached = _attached_jobs(name)
+    if attached and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Skill is attached to {', '.join(attached)}. Pass force=true to remove it anyway.",
+        )
+    try:
+        removed = sorted(str(path.relative_to(target)) for path in target.rglob("*") if path.is_file())
+        shutil.rmtree(target)
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Could not remove skill: {error}") from error
+    return {
+        "ok": True,
+        "skill": name,
+        "path": str(target),
+        "filesRemoved": removed,
+        "wasAttachedTo": attached,
+        "removedAt": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _skills_payload() -> Dict[str, Any]:
@@ -689,6 +766,17 @@ async def skills(request: Request) -> Dict[str, Any]:
     if REQUIRED_SCOPE not in scopes:
         raise HTTPException(status_code=403, detail="Missing fluid:history scope")
     return await run_in_threadpool(_skills_payload)
+
+
+@router.delete("/skills")
+async def delete_skill(
+    request: Request,
+    name: str = Query(..., min_length=1, max_length=128),
+    force: bool = Query(False),
+) -> Dict[str, Any]:
+    """Remove one skill directory. Manage scope only; see _resolve_skill_dir."""
+    _require_scope(request, MANAGE_SCOPE)
+    return await run_in_threadpool(_delete_skill, name, force)
 
 
 @router.get("/runs")

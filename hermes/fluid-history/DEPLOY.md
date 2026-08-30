@@ -121,6 +121,27 @@ overwrite it in place rather than installing a second one.
    `agent_run_id` with confidence, reason, evidence, model, prompt_version.
    None of it is surfaced on the Agents page yet.
 
+## Host facts
+
+Recovered from the `hermes-cli-ops` skill before it was deleted on 2026-08-30
+(full text in `hermes/skills-archive/hermes-cli-ops.SKILL.md`):
+
+- Hermes CLI is at `/opt/hermes/bin/hermes` and is **not on PATH** in fresh
+  shells. Bare `hermes` exits 127 — that is a PATH problem, not a missing install.
+- `HERMES_HOME=/opt/data`; config at `/opt/data/config.yaml`.
+- The cron provider is **chronos**, a managed external scheduler. `cron status`
+  printing "No ticker heartbeat is expected for an external provider" is the
+  healthy state, not a degraded one.
+- `hermes cron run <jobid>` triggers a job on demand — this is the "run now"
+  the Fluid UI does not expose.
+- `hermes cron runs <jobid>` printing "No cron execution attempts recorded" means
+  the job has not run yet, not that the scheduler is broken.
+- Health check: `/opt/data/scripts/ops-health-monitor.mjs --self-test` exits 0
+  and backs cron job `0f2318f9f1bb` (the failure monitor).
+
+Skills live under `/opt/data/skills/`, one folder per skill containing `SKILL.md`.
+The dashboard Files page can delete them; the Skills page only enables/disables.
+
 ## Local development notes
 
 - `fluid-history` is **not** installed on the developer's local Hermes
