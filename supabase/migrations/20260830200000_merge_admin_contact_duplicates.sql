@@ -1,0 +1,9 @@
+-- The 2026-08-02 ottawa-painters-admin import matched on its own record ids, so
+-- people already known through dripjobs/contact were created a second time.
+-- Applied via the Supabase API on 2026-08-30; recorded here for reproducibility.
+-- Merged 123 unambiguous duplicates into their dripjobs/contact twin, moving
+-- activity, identifiers, roles, claims, sources, deals, actions, cases and
+-- triage decisions before deleting the empty copy.
+-- Employees (manual-employee-reconciliation) were excluded: DripJobs does not
+-- know them, so they have no twin to merge into.
+-- 6 ambiguous duplicates (matching more than one keeper) were left for review.
