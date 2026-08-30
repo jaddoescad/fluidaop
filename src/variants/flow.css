@@ -105,6 +105,16 @@
   cursor: pointer;
 }
 
+/* amber dot on a nav item whose page needs attention */
+.fl-nav-alert {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
+}
+
 .fl-nav-item:hover {
   background: color-mix(in srgb, var(--ink) 6%, transparent);
   color: var(--ink);

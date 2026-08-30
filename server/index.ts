@@ -88,6 +88,31 @@ interface PublicFluidSchedule {
 }
 
 
+/** Whether a connection is actually delivering, not merely whether the last call succeeded.
+ *
+ * A webhook that silently stops looks identical to a quiet afternoon, so health
+ * is measured from the age of the newest thing we received, compared against
+ * the hours this business is actually active. */
+type ConnectionHealthState =
+  | 'connected'
+  | 'quiet'
+  | 'degraded'
+  | 'attention'
+  | 'disconnected';
+
+interface ConnectionHealth {
+  state: ConnectionHealthState;
+  /** When we last received real data — not when we last polled successfully. */
+  lastEventAt: string | null;
+  quietForMs: number | null;
+  /** How long silence is allowed before this counts as degraded, right now. */
+  toleranceMs: number;
+  /** Whether the business is expected to be generating activity at this moment. */
+  activeHours: boolean;
+  /** One sentence in business language, or null when healthy. */
+  reason: string | null;
+}
+
 interface QuoWebhookStatus {
   state: 'receiving' | 'ready' | 'pending';
   url: string;
@@ -418,13 +443,106 @@ async function saveStore(): Promise<void> {
   await writeChain;
 }
 
+// Ottawa Painters answer the phone Monday to Saturday. Silence outside those
+// hours is normal and must not raise an alarm, or the alarm gets ignored.
+const ACTIVE_HOURS_ZONE = 'America/Toronto';
+const ACTIVE_HOUR_FROM = 8;
+const ACTIVE_HOUR_UNTIL = 18;
+
+function withinActiveHours(at: Date): boolean {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: ACTIVE_HOURS_ZONE,
+    hour: 'numeric',
+    hour12: false,
+    weekday: 'short',
+  }).formatToParts(at);
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value ?? '0');
+  const weekday = parts.find((part) => part.type === 'weekday')?.value ?? '';
+  if (weekday === 'Sun') return false;
+  return hour >= ACTIVE_HOUR_FROM && hour < ACTIVE_HOUR_UNTIL;
+}
+
+function describeQuiet(quietForMs: number): string {
+  const minutes = Math.round(quietForMs / 60_000);
+  if (minutes < 90) return `${minutes} minutes`;
+  const hours = quietForMs / 3_600_000;
+  return hours < 24 ? `${hours.toFixed(1)} hours` : `${Math.round(hours / 24)} days`;
+}
+
+/** Newest received data per provider, and how long silence may last before it matters. */
+async function connectionFreshness(
+  connection: StoredConnection,
+): Promise<{ lastEventAt: string | null; toleranceMs: number }> {
+  if (connection.provider === 'gmail') {
+    // Gmail is polled, so the poll completing is the liveness signal: if the
+    // Fluid process stops, nothing else reports it.
+    try {
+      const payload = await activityFunctionJson<{ sync: StoredActivitySyncState | null }>('state', {
+        accountEmail: connection.email.toLowerCase(),
+      });
+      return {
+        lastEventAt: payload.sync?.last_sync_completed_at ?? null,
+        toleranceMs: gmailActivitySyncIntervalMs * 4,
+      };
+    } catch {
+      return { lastEventAt: null, toleranceMs: gmailActivitySyncIntervalMs * 4 };
+    }
+  }
+  // Quo pushes, so the newest webhook event is the only evidence it is alive.
+  try {
+    const status = await quoFunctionJson<{ lastEvent?: { received_at?: string } | null }>('status');
+    return { lastEventAt: status.lastEvent?.received_at ?? null, toleranceMs: 3 * 3_600_000 };
+  } catch {
+    return { lastEventAt: null, toleranceMs: 3 * 3_600_000 };
+  }
+}
+
+async function connectionHealth(
+  connection: StoredConnection,
+  problems: string[],
+): Promise<ConnectionHealth> {
+  const now = new Date();
+  const activeHours = withinActiveHours(now);
+  const { lastEventAt, toleranceMs } = await connectionFreshness(connection);
+  const quietForMs = lastEventAt === null ? null : Math.max(0, now.getTime() - Date.parse(lastEventAt));
+  const base = { lastEventAt, quietForMs, toleranceMs, activeHours };
+  const label = connection.provider === 'gmail' ? 'Gmail' : 'Quo';
+
+  if (problems.length > 0) {
+    return { ...base, state: 'disconnected', reason: `${label} is not configured on the server.` };
+  }
+  if (connection.status === 'error') {
+    return {
+      ...base,
+      state: 'attention',
+      reason: connection.error ?? `${label} needs to be reconnected.`,
+    };
+  }
+  if (lastEventAt === null) {
+    return { ...base, state: 'quiet', reason: `Nothing has arrived from ${label} yet.` };
+  }
+  if (quietForMs !== null && quietForMs > toleranceMs && activeHours) {
+    return {
+      ...base,
+      state: 'degraded',
+      reason: `Nothing from ${label} for ${describeQuiet(quietForMs)}, during working hours.`,
+    };
+  }
+  if (quietForMs !== null && quietForMs > toleranceMs) {
+    return { ...base, state: 'quiet', reason: `Quiet for ${describeQuiet(quietForMs)}, outside working hours.` };
+  }
+  return { ...base, state: 'connected', reason: null };
+}
+
 async function toPublicConnection(connection: StoredConnection): Promise<PublicConnection> {
   const problems = connection.provider === 'gmail'
     ? gmailConfigurationProblems()
     : quoConfigurationProblems();
   const lastChecked = connection.lastCheckedAt ? Date.parse(connection.lastCheckedAt) : Number.NaN;
   const nextAt = Number.isFinite(lastChecked) ? lastChecked + healthCheckIntervalMs : Date.now();
+  const health = await connectionHealth(connection, problems);
   const common = {
+    health,
     id: connection.id,
     status: problems.length > 0 ? 'error' : connection.status,
     createdAt: connection.createdAt,
@@ -1309,81 +1427,13 @@ async function syncDueActivities(): Promise<void> {
 
 
 
-function scheduleIntervalLabel(intervalMs: number): string {
-  if (intervalMs % 3_600_000 === 0) {
-    const hours = intervalMs / 3_600_000;
-    return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
-  }
-  if (intervalMs % 60_000 === 0) {
-    const minutes = intervalMs / 60_000;
-    return `Every ${minutes} minute${minutes === 1 ? '' : 's'}`;
-  }
-  const seconds = Math.max(1, Math.round(intervalMs / 1_000));
-  return `Every ${seconds} second${seconds === 1 ? '' : 's'}`;
-}
 
-function nextScheduledAt(lastAttemptAt: number, intervalMs: number, enabled: boolean): string | null {
-  if (!enabled) return null;
-  const nextAt = lastAttemptAt > 0 ? lastAttemptAt + intervalMs : Date.now() + intervalMs;
-  return new Date(Math.max(Date.now(), nextAt)).toISOString();
-}
 
+// Fluid's own ingestion no longer appears here. Gmail is pulled in by a
+// connection, not a schedule the operator manages, so its cadence and health
+// belong on the Connections page beside the account it belongs to.
 async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
-  const gmail = store.connections.find((connection): connection is StoredGmailConnection =>
-    connection.provider === 'gmail' && connection.email.toLowerCase() === intendedEmail)
-    ?? store.connections.find((connection): connection is StoredGmailConnection => connection.provider === 'gmail');
-  const configured = gmailConfigurationProblems().length === 0 && Boolean(supabaseProjectUrl);
-  const inboxEnabled = configured && gmail !== undefined && gmail.status !== 'error' && gmailCanReadEmails(gmail);
-
-  let activityState: StoredActivitySyncState | null = null;
-  let activityStatusError: string | null = null;
-
-  if (gmail !== undefined && configured) {
-    try {
-      const payload = await activityFunctionJson<{ sync: StoredActivitySyncState | null }>('state', {
-        accountEmail: gmail.email.toLowerCase(),
-      });
-      activityState = payload.sync;
-    } catch (error) {
-      activityStatusError = errorMessage(error);
-    }
-  }
-
-  const inboxAttempt = gmail === undefined ? 0 : lastActivitySyncAttemptAt.get(gmail.id) ?? 0;
-  const inboxLastError = activityState?.last_error
-    ?? (gmail?.status === 'error' ? gmail.error : null)
-    ?? activityStatusError;
-
-  return [
-    {
-      id: 'fluid-gmail-activities',
-      runtimeName: 'fluid-gmail-activities',
-      name: 'Gmail inbox sync',
-      icon: '⚙️',
-      description: 'Imports new Gmail messages into Fluid Signals from the durable Gmail history cursor.',
-      schedule: scheduleIntervalLabel(gmailActivitySyncIntervalMs),
-      profile: 'Fluid server',
-      mode: 'Script-only automation',
-      runtimeMode: 'script',
-      steps: [
-        'Read Gmail changes since the durable history cursor.',
-        'Upsert messages idempotently into Fluid Signals.',
-      ],
-      enabled: inboxEnabled,
-      state: inboxEnabled
-        ? activeActivitySyncs.size > 0 ? 'Running' : 'Active'
-        : gmail === undefined ? 'Needs Gmail connection' : 'Needs attention',
-      nextRunAt: nextScheduledAt(inboxAttempt, gmailActivitySyncIntervalMs, inboxEnabled),
-      lastRunAt: activityState?.last_sync_completed_at ?? (inboxAttempt > 0 ? new Date(inboxAttempt).toISOString() : null),
-      lastRunStatus: activeActivitySyncs.size > 0 ? 'running' : activityState?.last_sync_status ?? null,
-      lastError: inboxLastError,
-      historyAgentId: null,
-      contractStatus: 'built-in',
-      source: 'fluid',
-      historyAvailable: false,
-      definition: null,
-    },
-  ];
+  return [];
 }
 
 

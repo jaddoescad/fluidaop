@@ -711,3 +711,34 @@
   .cn-card-foot { flex-direction: column; align-items: stretch; }
   .cn-card-foot .cn-actions { justify-content: flex-end; }
 }
+
+/* Degraded banner — a connection that authenticates but has stopped delivering.
+   Amber, not red: nothing is broken, data has simply stopped arriving. */
+.cn-degraded {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 42%, var(--line));
+  border-radius: 10px;
+  background: var(--warn-soft);
+}
+
+.cn-degraded p {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.cn-degraded .cn-btn { flex: none; }
+
+/* freshness — the single most useful fact about a live connection */
+.cn-fresh {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}

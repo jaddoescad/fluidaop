@@ -23,10 +23,21 @@ interface GmailConnection {
   lastHealthyAt: string | null;
   nextCheckAt: string | null;
   error: string | null;
+  health: ConnectionHealth;
   permissions: {
     readEmails: boolean;
     applyLabels: boolean;
   };
+}
+
+/** Whether the connection is actually delivering, not just whether it authenticates. */
+interface ConnectionHealth {
+  state: 'connected' | 'quiet' | 'degraded' | 'attention' | 'disconnected';
+  lastEventAt: string | null;
+  quietForMs: number | null;
+  toleranceMs: number;
+  activeHours: boolean;
+  reason: string | null;
 }
 
 interface QuoPhoneNumber {
@@ -47,6 +58,7 @@ interface QuoConnection {
   lastHealthyAt: string | null;
   nextCheckAt: string | null;
   error: string | null;
+  health: ConnectionHealth;
   webhook: {
     state: 'receiving' | 'ready' | 'pending';
     url: string;
@@ -208,6 +220,38 @@ function QuoLogo({ dim = false }: { dim?: boolean }) {
 }
 
 
+function HealthPill({ health }: { health: ConnectionHealth }) {
+  const meta =
+    health.state === 'connected'
+      ? { cls: 'ok', dot: '', label: 'Receiving' }
+      : health.state === 'quiet'
+        ? { cls: 'off', dot: '', label: 'Quiet' }
+        : health.state === 'degraded'
+          ? { cls: 'warn', dot: ' cn-dot-breathe', label: 'Not receiving' }
+          : health.state === 'attention'
+            ? { cls: 'danger', dot: '', label: 'Needs attention' }
+            : { cls: 'off', dot: '', label: 'Not configured' };
+  return (
+    <span className={`cn-pill cn-pill-${meta.cls}`}>
+      <i className={`cn-dot${meta.dot}`} />
+      {meta.label}
+    </span>
+  );
+}
+
+/** "2 minutes ago" — the single most useful fact about a live connection. */
+function sinceLabel(iso: string | null): string {
+  if (iso === null) return 'nothing yet';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return 'unknown';
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = ms / 3_600_000;
+  if (hours < 24) return `${hours.toFixed(hours < 10 ? 1 : 0)} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
 function StatusPill({
   status,
 }: {
@@ -298,8 +342,19 @@ function ConnectedCard({
           <b>{c.email}</b>
           <span>Gmail</span>
         </div>
-        <StatusPill status={c.status} />
+        <HealthPill health={c.health} />
       </div>
+
+      <p className="cn-fresh">Last sync {sinceLabel(c.health.lastEventAt)}</p>
+
+      {c.health.state === 'degraded' && (
+        <div className="cn-degraded" role="status">
+          <p>{c.health.reason}</p>
+          <button type="button" className="cn-btn" onClick={onCheck} disabled={checking}>
+            {checking ? 'Resyncing…' : 'Resync now'}
+          </button>
+        </div>
+      )}
 
       {c.status === 'error' && (
         <p className="cn-problem">
@@ -617,8 +672,19 @@ function ConnectedQuoCard({
           <b>Quo</b>
           <span>Business phone &amp; SMS</span>
         </div>
-        <StatusPill status={c.status} />
+        <HealthPill health={c.health} />
       </div>
+
+      <p className="cn-fresh">Last event {sinceLabel(c.health.lastEventAt)}</p>
+
+      {c.health.state === 'degraded' && (
+        <div className="cn-degraded" role="status">
+          <p>{c.health.reason}</p>
+          <button type="button" className="cn-btn" onClick={onCheck} disabled={busy}>
+            {busy ? 'Backfilling…' : 'Backfill now'}
+          </button>
+        </div>
+      )}
       <div className="cn-quo-summary">
         <span>{lineSummary}</span>
         {selectedCount === 0 ? (

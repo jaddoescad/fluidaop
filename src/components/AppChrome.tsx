@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { type HermesStatus } from '../agents/hermes';
 
 const NAV_MAIN = [
@@ -20,13 +21,52 @@ const NAV_FOOT = [
 
 const LIVE_PAGES = new Set(['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts']);
 
-export function SideNav({ active = 'Board', onNav }: {
+/** Connections that authenticate but have stopped delivering data.
+ *
+ * Polled here rather than passed down, so the warning is visible from every
+ * page without threading state through each one. A pipe going quiet is the
+ * failure mode that otherwise goes unnoticed until someone looks. */
+function useConnectionAlert(): string | undefined {
+  const [alert, setAlert] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const response = await fetch('/api/connections', { headers: { Accept: 'application/json' } });
+        if (!response.ok) return;
+        const payload = (await response.json()) as {
+          connections?: Array<{ health?: { state?: string; reason?: string | null } }>;
+        };
+        const broken = (payload.connections ?? []).filter(
+          (connection) => connection.health?.state === 'degraded' || connection.health?.state === 'attention',
+        );
+        if (cancelled) return;
+        setAlert(broken.length === 0
+          ? undefined
+          : broken.map((connection) => connection.health?.reason).filter(Boolean).join(' ') || 'A connection needs attention');
+      } catch {
+        // A failed poll is not itself an alert; the page shows connection errors.
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+  return alert;
+}
+
+export function SideNav({ active = 'Board', onNav, alerts }: {
   active?: string;
   onNav?: (label: string) => void;
+  /** Pages needing attention, e.g. a connection that has stopped delivering. */
+  alerts?: Record<string, string | undefined>;
 }) {
+  const connectionAlert = useConnectionAlert();
+  const resolved: Record<string, string | undefined> = { Connections: connectionAlert, ...alerts };
   const item = (entry: { icon: string; label: string }) => {
     const selected = entry.label === active;
     const live = onNav !== undefined && LIVE_PAGES.has(entry.label);
+    const alert = resolved[entry.label];
     return (
       <button
         key={entry.label}
@@ -34,10 +74,11 @@ export function SideNav({ active = 'Board', onNav }: {
         className={`fl-nav-item${selected ? ' on' : ''}`}
         onClick={live ? () => onNav(entry.label) : undefined}
         aria-current={selected ? 'page' : undefined}
-        title={live || selected ? undefined : `${entry.label} is not available yet`}
+        title={alert ?? (live || selected ? undefined : `${entry.label} is not available yet`)}
       >
         <span className="fl-nav-ico" aria-hidden="true">{entry.icon}</span>
         {entry.label}
+        {alert !== undefined && <span className="fl-nav-alert" aria-label={alert} />}
       </button>
     );
   };
