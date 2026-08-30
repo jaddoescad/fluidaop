@@ -161,9 +161,17 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
   );
 }
 
-export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string) => void; header: ReactNode }) {
+export function PeoplePage({ onNavigate, header, view = 'contacts' }: {
+  onNavigate: (label: string) => void;
+  header: ReactNode;
+  /** Which population this page shows. Employees are separated from customer-facing
+      contacts because they are a different kind of record, not a filter of one. */
+  view?: 'contacts' | 'employees';
+}) {
+  const employees = view === 'employees';
+  const role = employees ? 'employee' : 'lead';
+  const navLabel = employees ? 'Employees' : 'Contacts';
   const [roles, setRoles] = useState<RoleDefinition[]>([]);
-  const [role, setRole] = useState('');
   const [search, setSearch] = useState('');
   const [contacts, setContacts] = useState<ContactRow[]>([]);
   const [contactCount, setContactCount] = useState(0);
@@ -200,13 +208,15 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
 
 
   return <div className="v v-flow v-zen pp-root"><div className="fl-shell">
-    <SideNav active="Contacts" onNav={onNavigate} />
+    <SideNav active={navLabel} onNav={onNavigate} />
     <div className="fl-frame">{header}<main className="pp-main"><div className="pp-inner">
-      <header className="pp-head"><div><h1>Contacts</h1><p>People and businesses connected across Gmail, Quo messages, and calls.</p></div><div className="pp-counts"><span><strong>{contactCount.toLocaleString()}</strong> Contacts</span></div></header>
-      <div className="pp-toolbar"><label className="pp-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search Contacts" aria-label="Search Contacts" /></label><div className="pp-role-filters"><button type="button" className={!role ? 'is-active' : ''} onClick={() => setRole('')}>All</button>{roles.map((item) => <button type="button" key={item.key} className={role === item.key ? 'is-active' : ''} onClick={() => setRole(item.key)}>{item.name}</button>)}</div></div>
+      <header className="pp-head"><div><h1>{navLabel}</h1><p>{employees
+        ? 'People who work here, and the calls and messages they appear in.'
+        : 'People and businesses connected across Gmail, Quo messages, and calls.'}</p></div><div className="pp-counts"><span><strong>{contactCount.toLocaleString()}</strong> {navLabel}</span></div></header>
+      <div className="pp-toolbar"><label className="pp-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${navLabel}`} aria-label={`Search ${navLabel}`} /></label></div>
       {error ? <div className="pp-state pp-state-error" role="alert"><strong>Couldn’t complete that request</strong><p>{error}</p><button type="button" onClick={() => void loadContacts(null, false)}>Try again</button></div>
         : loading ? <div className="pp-state" role="status">Loading contacts…</div>
-        : contacts.length === 0 ? <div className="pp-state"><strong>No Contacts in this view</strong><p>Unmatched identities stay hidden until they are safely resolved.</p></div> : <section className="pp-directory" aria-label="Contact directory">
+        : contacts.length === 0 ? <div className="pp-state"><strong>No {navLabel.toLowerCase()} yet</strong><p>Unmatched identities stay hidden until they are safely resolved.</p></div> : <section className="pp-directory" aria-label="Contact directory">
           <div className="pp-columns" aria-hidden="true"><span>Contact</span><span>Identifiers</span><span>Role</span><span>Deals</span><span>Signals</span></div>
           {contacts.map((contact) => <button type="button" className="pp-row" key={contact.id} onClick={() => setSelectedContactId(contact.id)}>
             <span className="pp-person"><span className="pp-avatar">{initials(contact.displayName)}</span><span><strong>{contact.displayName}</strong><small>{contact.entityType}</small></span></span>
@@ -215,7 +225,7 @@ export function PeoplePage({ onNavigate, header }: { onNavigate: (label: string)
             <span className="pp-signals"><span>{contact.dealCount.toLocaleString()}</span><small>{contact.activeDealCount} active</small></span>
             <span className="pp-signals"><span>{contact.linkedSignalCount.toLocaleString()}</span><small>{relativeTime(contact.lastSignalAt)}</small></span>
           </button>)}
-          {contactCursor ? <button type="button" className="pp-more" disabled={loadingMore} onClick={() => void loadContacts(contactCursor, true)}>{loadingMore ? 'Loading…' : 'Load more Contacts'}</button> : <p className="pp-end">Showing all {contactCount.toLocaleString()} Contacts</p>}
+          {contactCursor ? <button type="button" className="pp-more" disabled={loadingMore} onClick={() => void loadContacts(contactCursor, true)}>{loadingMore ? 'Loading…' : `Load more ${navLabel.toLowerCase()}`}</button> : <p className="pp-end">Showing all {contactCount.toLocaleString()} {navLabel.toLowerCase()}</p>}
         </section>}
     </div></main>{selectedContactId ? <ContactDetail contactId={selectedContactId} onClose={() => setSelectedContactId(null)} /> : null}</div>
   </div></div>;

@@ -11,6 +11,7 @@ const NAV_MAIN = [
   { icon: '◷', label: 'Schedules' },
   { icon: '🔌', label: 'Connections' },
   { icon: '👥', label: 'Contacts' },
+  { icon: '🧑‍🔧', label: 'Employees' },
   { icon: '📊', label: 'Insights' },
 ] as const;
 
@@ -19,7 +20,7 @@ const NAV_FOOT = [
   { icon: '💬', label: 'Help & feedback' },
 ] as const;
 
-const LIVE_PAGES = new Set(['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts']);
+const LIVE_PAGES = new Set(['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts', 'Employees']);
 
 /** Connections that authenticate but have stopped delivering data.
  *

@@ -26,7 +26,7 @@ import './flow.css';
 import './zen.css';
 import './fleet.css';
 
-type AppPage = 'Board' | 'Agents' | 'Skills' | 'Actions' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts';
+type AppPage = 'Board' | 'Agents' | 'Skills' | 'Actions' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts' | 'Employees';
 
 function pageFromPath(): AppPage {
   if (window.location.pathname === '/agents' || window.location.pathname.startsWith('/agents/')) return 'Agents';
@@ -35,6 +35,7 @@ function pageFromPath(): AppPage {
   if (window.location.pathname === '/schedules' || window.location.pathname === '/automations') return 'Schedules';
   if (window.location.pathname === '/connections') return 'Connections';
   if (window.location.pathname === '/labels') return 'Labels';
+  if (window.location.pathname === '/employees') return 'Employees';
   if (window.location.pathname === '/contacts' || window.location.pathname === '/people') return 'Contacts';
   if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
   return 'Board';
@@ -130,7 +131,7 @@ export function FleetV() {
   );
 
   const navigate = (label: string) => {
-    if (!['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Contacts', 'Connections'].includes(label)) return;
+    if (!['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Contacts', 'Employees', 'Connections'].includes(label)) return;
     const path = label === 'Agents'
       ? '/agents'
       : label === 'Skills'
@@ -145,6 +146,8 @@ export function FleetV() {
               ? '/labels'
               : label === 'Contacts'
                 ? '/contacts'
+              : label === 'Employees'
+                ? '/employees'
                 : label === 'Activity'
                   ? '/activity'
                   : '/';
@@ -174,6 +177,7 @@ export function FleetV() {
   if (page === 'Activity') return <ActivitiesPage onNavigate={navigate} header={appHeader} />;
   if (page === 'Labels') return <LabelsPage onNavigate={navigate} header={appHeader} />;
   if (page === 'Contacts') return <PeoplePage onNavigate={navigate} header={appHeader} />;
+  if (page === 'Employees') return <PeoplePage onNavigate={navigate} header={appHeader} view="employees" />;
   if (page === 'Connections') return <ConnectionsPage onNavigate={navigate} header={appHeader} />;
 
   if (!s.booted) return <div className="boot" />;

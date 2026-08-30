@@ -8,10 +8,6 @@
 .pp-counts span { display: flex; flex-direction: column; text-align: right; }
 .pp-counts strong { color: var(--ink); font-size: 17px; font-weight: 650; }
 .pp-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 0 10px; }
-.pp-role-filters { display: flex; min-width: 0; gap: 5px; overflow-x: auto; }
-.pp-toolbar button { flex: none; padding: 5px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--faint); font-size: 11px; cursor: pointer; }
-.pp-toolbar button:hover { color: var(--ink); }
-.pp-toolbar button.is-active { border-color: var(--line); background: var(--card); color: var(--ink); }
 .pp-search { display: flex; width: min(230px, 32vw); flex: none; align-items: center; gap: 7px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--faint); }
 .pp-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 11px; }
 .pp-search input::placeholder { color: var(--faint); }
