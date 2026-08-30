@@ -505,107 +505,8 @@ function QuoWebhookSection({ webhook, now }: { webhook: QuoConnection['webhook']
   );
 }
 
-type ImportKind = 'messages' | 'calls';
-type ImportFileState =
-  | { phase: 'idle' }
-  | { phase: 'selected'; file: File }
-  | { phase: 'uploading'; file: File }
-  | { phase: 'done'; file: File; imported: number; skipped: number }
-  | { phase: 'error'; file: File; message: string };
 
-const IMPORT_ROWS: { kind: ImportKind; title: string; hint: string }[] = [
-  { kind: 'messages', title: 'Message logs', hint: 'CSV exported from Quo → Messages' },
-  { kind: 'calls', title: 'Call logs', hint: 'CSV exported from Quo → Calls' },
-];
 
-function QuoImportPanel({ connectionId }: { connectionId: string }) {
-  const [rows, setRows] = useState<Record<ImportKind, ImportFileState>>({
-    messages: { phase: 'idle' }, calls: { phase: 'idle' },
-  });
-  const pickFile = (kind: ImportKind, file: File | null) => {
-    setRows((current) => ({
-      ...current,
-      [kind]: file === null ? { phase: 'idle' } : { phase: 'selected', file },
-    }));
-  };
-  const upload = async (kind: ImportKind) => {
-    const selected = rows[kind];
-    if (selected.phase !== 'selected' && selected.phase !== 'error') return;
-    const file = selected.file;
-    setRows((current) => ({ ...current, [kind]: { phase: 'uploading', file } }));
-    try {
-      const text = await file.text();
-      const result = await api<{ imported: number; skipped: number }>(
-        `/api/connections/quo/${encodeURIComponent(connectionId)}/import?kind=${kind}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'text/csv; charset=utf-8',
-            'x-fluid-filename': encodeURIComponent(file.name),
-          },
-          body: text,
-        },
-      );
-      setRows((current) => ({
-        ...current,
-        [kind]: { phase: 'done', file, imported: result.imported, skipped: result.skipped },
-      }));
-    } catch (error) {
-      setRows((current) => ({
-        ...current,
-        [kind]: { phase: 'error', file, message: errText(error) },
-      }));
-    }
-  };
-  return (
-    <div className="cn-import">
-      <p className="cn-manage-note">Upload CSV exports from Quo. Each file imports independently.</p>
-      {IMPORT_ROWS.map(({ kind, title, hint }) => {
-        const state = rows[kind];
-        const inputId = `cn-import-${connectionId}-${kind}`;
-        return (
-          <div className="cn-import-row" key={kind}>
-            <div className="cn-import-row-head">
-              <label htmlFor={inputId} className="cn-import-label">{title}</label>
-              <span className="cn-import-hint" id={`${inputId}-hint`}>{hint}</span>
-            </div>
-            <div className="cn-import-row-body">
-              <input
-                id={inputId}
-                type="file"
-                accept=".csv,text/csv"
-                aria-describedby={`${inputId}-hint`}
-                className="cn-import-input"
-                disabled={state.phase === 'uploading'}
-                onChange={(event) => pickFile(kind, event.target.files?.[0] ?? null)}
-              />
-              {(state.phase === 'selected' || state.phase === 'error') && (
-                <button type="button" className="cn-btn cn-btn-sm cn-btn-primary" onClick={() => void upload(kind)}>
-                  Upload
-                </button>
-              )}
-            </div>
-            {state.phase === 'uploading' && (
-              <p className="cn-import-status cn-import-status-busy" role="status">
-                <i className="cn-dot cn-dot-breathe" /> Uploading {state.file.name}…
-              </p>
-            )}
-            {state.phase === 'done' && (
-              <p className="cn-import-status cn-import-status-ok" role="status">
-                {state.imported} imported{state.skipped > 0 ? `, ${state.skipped} skipped` : ''} from {state.file.name}
-              </p>
-            )}
-            {state.phase === 'error' && (
-              <p className="cn-import-status cn-import-status-err" role="alert">
-                {state.file.name} failed: {state.message}
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 function ConnectedQuoCard({
   c,
@@ -786,12 +687,6 @@ function ConnectedQuoCard({
                 <section aria-label="Webhook">
                   <h3 className="cn-manage-label">Webhook</h3>
                   <QuoWebhookSection webhook={c.webhook} now={now} />
-                </section>
-              )}
-              {selectedCount > 0 && (
-                <section aria-label="Import history">
-                  <h3 className="cn-manage-label">Import history</h3>
-                  <QuoImportPanel connectionId={c.id} />
                 </section>
               )}
               <section aria-label="Disconnect">
