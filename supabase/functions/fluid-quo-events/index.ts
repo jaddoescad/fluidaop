@@ -1111,25 +1111,33 @@ async function quoMessageContentCandidates(supabase: SupabaseClient, url: URL) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? '100'), 1), 200);
   const { data, error } = await supabase
     .from('activities')
-    .select('id,external_id,direction,from_phone,to_phones,occurred_at')
+    .select('id,external_id,direction,from_phone,to_phones,occurred_at,source_metadata')
     .eq('source', 'quo')
     .eq('preview', QUO_MESSAGE_PLACEHOLDER)
     .order('occurred_at', { ascending: false })
     .limit(limit);
   if (error) throw error;
-  return (data ?? []).map((row) => ({
-    id: row.id,
-    externalId: row.external_id,
-    direction: row.direction,
-    // The counterparty is whichever end is not our own line.
-    counterparty: row.direction === 'inbound'
-      ? row.from_phone
-      : (Array.isArray(row.to_phones) ? row.to_phones[0] : null),
-    line: row.direction === 'inbound'
-      ? (Array.isArray(row.to_phones) ? row.to_phones[0] : null)
-      : row.from_phone,
-    occurredAt: row.occurred_at,
-  })).filter((row) => row.counterparty && row.line);
+  return (data ?? []).map((row) => {
+    // Which line the message belongs to is recorded by Quo; inferring it from
+    // the phone fields picks up the customer's number on inbound rows.
+    const metrics = (row.source_metadata ?? {}) as Record<string, unknown>;
+    const quoMetrics = (metrics.quoMetrics ?? {}) as Record<string, unknown>;
+    const lineLabel = typeof quoMetrics.phoneNumberLabel === 'string' ? quoMetrics.phoneNumberLabel : null;
+    return {
+      id: row.id,
+      externalId: row.external_id,
+      direction: row.direction,
+      // Every end of the thread, not just one: a group text needs all of its
+      // participants to be addressable, and asking for one returns that
+      // person's private thread instead.
+      participants: [
+        row.from_phone,
+        ...(Array.isArray(row.to_phones) ? row.to_phones : []),
+      ].filter((value): value is string => typeof value === 'string' && value.trim() !== ''),
+      lineLabel,
+      occurredAt: row.occurred_at,
+    };
+  }).filter((row) => row.participants.length > 0 && row.lineLabel);
 }
 
 /** Write a recovered body back over its placeholder. */

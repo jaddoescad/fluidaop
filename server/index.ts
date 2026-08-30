@@ -1052,8 +1052,10 @@ interface QuoMessageCandidate {
   id: number;
   externalId: string;
   direction: string;
-  counterparty: string;
-  line: string;
+  /** Every end of the thread, ours included; group texts have more than two. */
+  participants: string[];
+  /** The Quo line this belongs to, as Quo labels it — "Sales", "Production". */
+  lineLabel: string;
   occurredAt: string;
 }
 
@@ -1078,39 +1080,57 @@ async function runQuoMessageBackfill(apiKey: string, phoneNumbers: QuoPhoneNumbe
   totals.candidates = candidates.length;
   if (candidates.length === 0) return totals;
 
-  const lineByNumber = new Map(phoneNumbers.map((number) => [number.e164, number.id]));
+  const lineByLabel = new Map(phoneNumbers.map((number) => [number.label ?? '', number]));
 
   // One request per conversation, not per message: several placeholders often
   // belong to the same thread.
   const conversations = new Map<string, QuoMessageCandidate[]>();
   for (const candidate of candidates) {
-    const key = `${candidate.line}|${candidate.counterparty}`;
+    // Key on the whole participant set: a group thread is a different
+    // conversation from any of its members' private ones.
+    const key = `${candidate.lineLabel}|${[...candidate.participants].sort().join(',')}`;
     const group = conversations.get(key);
     if (group) group.push(candidate);
     else conversations.set(key, [candidate]);
   }
 
   for (const [key, group] of conversations) {
-    const [line, counterparty] = key.split('|');
-    const phoneNumberId = lineByNumber.get(line);
-    if (phoneNumberId === undefined) {
+    const [lineLabel] = key.split('|');
+    const line = lineByLabel.get(lineLabel);
+    if (line === undefined) {
       totals.unmatched += group.length;
       continue;
     }
     totals.conversations += 1;
     try {
-      const search = `phoneNumberId=${encodeURIComponent(phoneNumberId)}`
-        + `&participants=${encodeURIComponent(counterparty)}`
-        + '&maxResults=100';
-      const result = await fetchQuoJson<{ data?: Array<{ createdAt?: string; text?: string }> }>(
-        `/messages?${search}`,
-        apiKey,
+      // Page back until every gap in this thread is covered: the oldest
+      // placeholder tells us how far to go.
+      const oldest = group.reduce(
+        (earliest, candidate) => Math.min(earliest, Date.parse(candidate.occurredAt)),
+        Number.POSITIVE_INFINITY,
       );
       const byInstant = new Map<number, string>();
-      for (const message of result.data ?? []) {
-        if (typeof message.createdAt !== 'string' || typeof message.text !== 'string') continue;
-        const at = Date.parse(message.createdAt);
-        if (Number.isFinite(at) && message.text.trim() !== '') byInstant.set(Math.floor(at / 1000), message.text);
+      let pageToken: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const others = [...new Set(group[0].participants)].filter((phone) => phone !== line.e164);
+        const search = `phoneNumberId=${encodeURIComponent(line.id)}`
+          + others.map((phone) => `&participants=${encodeURIComponent(phone)}`).join('')
+          + '&maxResults=100'
+          + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+        const result: {
+          data?: Array<{ createdAt?: string; text?: string }>;
+          nextPageToken?: string | null;
+        } = await fetchQuoJson(`/messages?${search}`, apiKey);
+        let reachedOldest = false;
+        for (const message of result.data ?? []) {
+          if (typeof message.createdAt !== 'string' || typeof message.text !== 'string') continue;
+          const at = Date.parse(message.createdAt);
+          if (!Number.isFinite(at)) continue;
+          if (at < oldest - 60_000) reachedOldest = true;
+          if (message.text.trim() !== '') byInstant.set(Math.floor(at / 1000), message.text);
+        }
+        pageToken = typeof result.nextPageToken === 'string' ? result.nextPageToken : null;
+        if (pageToken === null || reachedOldest) break;
       }
       for (const candidate of group) {
         const second = Math.floor(Date.parse(candidate.occurredAt) / 1000);
