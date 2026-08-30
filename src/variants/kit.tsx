@@ -2085,7 +2085,7 @@ export function RunPopup({
     lastSpeaker = 'you';
     return (
       <div
-        className={`fd-turn${cont ? ' fd-cont' : ''}`}
+        className={`fd-turn fd-you${cont ? ' fd-cont' : ''}`}
         key={key}
         data-history-id={signal?.id}
       >
@@ -2103,7 +2103,7 @@ export function RunPopup({
               )}
             </div>
           )}
-          <div className="fd-text">{t}</div>
+          <div className="fd-bubble"><div className="fd-text">{t}</div></div>
         </div>
       </div>
     );
@@ -2120,7 +2120,7 @@ export function RunPopup({
     lastSpeaker = 'them';
     lastSigMeta = { channel: sig.channel, at: sig.at };
     return (
-      <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={sig.id} data-history-id={sig.id}>
+      <div className={`fd-turn fd-them${cont ? ' fd-cont' : ''}`} key={sig.id} data-history-id={sig.id}>
         <span className="fd-avatar">{!cont && <Avatar name={p?.name ?? '—'} />}</span>
         <div className="fd-main">
           {!cont && (
@@ -2134,7 +2134,7 @@ export function RunPopup({
               {isTrig && <span className="fd-trig">{subject.type === 'signal' ? 'this one' : 'triggered this'}</span>}
             </div>
           )}
-          <div className="fd-text">{sig.text}</div>
+          <div className="fd-bubble"><div className="fd-text">{sig.text}</div></div>
         </div>
       </div>
     );
@@ -2274,7 +2274,10 @@ export function RunPopup({
           {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
           {subject.type === 'signal' && selectedSignal && (
             <>
-              <article className="fd-turn fd-sel" data-history-id={selectedSignal.id}>
+              <article
+                className={`fd-turn fd-sel ${selectedSignal.direction === 'outbound' ? 'fd-you' : 'fd-them'}`}
+                data-history-id={selectedSignal.id}
+              >
                 <span className="fd-avatar">
                   <Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : p?.name ?? '—'} />
                 </span>
@@ -2305,7 +2308,7 @@ export function RunPopup({
                 {selectedSignal.channel === 'email' && (
                   <h3 className="fd-sel-subject">{selectedSignal.title?.trim() || '(no subject)'}</h3>
                 )}
-                <div className="fd-sel-text">
+                <div className="fd-bubble fd-sel-text">
                   <p className="fd-sel-text-reply">{selectedBody?.reply ?? selectedSignal.text}</p>
                   {selectedBody?.quoted && (
                     <details className="fd-sel-quote">
