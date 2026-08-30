@@ -243,7 +243,9 @@ export function FleetV() {
               archivedLoading={board.archivedPipelineLoading}
               onLoadMoreArchived={() => void board.loadMoreArchivedPipeline()}
               onOpenLead={(deal) => {
-                act.focus(deal.personId);
+                // Opening a lead only opens its workspace. It used to also focus
+                // the board on that person, so one click both filtered the
+                // signals column and opened a popup over it.
                 setLeadSel(deal.id);
                 void board.openPipelineHistory(deal.id);
               }}
@@ -264,10 +266,7 @@ export function FleetV() {
           suspended={runSel !== null}
           stageHistory={board.pipelineHistories[leadDeal.id] ?? null}
           stageHistoryLoading={board.pipelineHistoryLoadingId === leadDeal.id}
-          onClose={() => {
-            setLeadSel(null);
-            act.focus(null);
-          }}
+          onClose={() => setLeadSel(null)}
           onLoadSignal={(signalId) => void board.openSignal(signalId, leadDeal.personId)}
           onOpenAction={(id) => {
             setRunSel({ type: 'action', id });
