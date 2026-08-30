@@ -2089,6 +2089,13 @@ export function RunPopup({
         key={key}
         side="you"
         sender="You"
+        avatar={<Avatar name="Jad" />}
+        meta={signal ? (
+          <>
+            <SourceTag channel={signal.channel} />
+            <DirectionTag direction="outbound" />
+          </>
+        ) : undefined}
         grouped={cont}
         time={signal ? fmtAge(signal.at, s.now) : undefined}
         historyId={signal?.id}
@@ -2113,6 +2120,8 @@ export function RunPopup({
         key={sig.id}
         side="them"
         sender={p?.name ?? '—'}
+        avatar={<Avatar name={p?.name ?? '—'} />}
+        meta={<><SourceTag channel={sig.channel} /><DirectionTag direction={sig.direction ?? 'inbound'} /></>}
         grouped={cont}
         time={fmtAge(sig.at, s.now)}
         marker={isTrig ? (subject.type === 'signal' ? 'this one' : 'triggered this') : undefined}
@@ -2261,6 +2270,11 @@ export function RunPopup({
               <ConversationTurn
                 side={selectedSignal.direction === 'outbound' ? 'you' : 'them'}
                 sender={selectedSignal.direction === 'outbound' ? 'You' : p?.name ?? '—'}
+                avatar={<Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : p?.name ?? '—'} />}
+                meta={<>
+                  <SourceTag channel={selectedSignal.channel} />
+                  <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
+                </>}
                 time={fmtAge(selectedSignal.at, s.now)}
                 marker="this one"
                 highlighted

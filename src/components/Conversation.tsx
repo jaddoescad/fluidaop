@@ -49,11 +49,17 @@ export function ConversationEvent({
   );
 }
 
-/** One message. Ours right, theirs left — reading a thread should never require
- *  reading names to work out who spoke. */
+/** One message.
+ *
+ * The speaker is identified outside the bubble — avatar, name, then how the
+ * message arrived — so the attribution reads as a line about the message
+ * rather than as part of it. Ours right, theirs left, so who spoke is legible
+ * before any of it is read. */
 export function ConversationTurn({
   side,
   sender,
+  avatar,
+  meta,
   time,
   automated = false,
   marker,
@@ -68,6 +74,10 @@ export function ConversationTurn({
 }: {
   side: TurnSide;
   sender: string;
+  /** Initials disc, or whatever identifies the speaker at a glance. */
+  avatar?: ReactNode;
+  /** How the message arrived — channel and source tags. */
+  meta?: ReactNode;
   time?: string;
   automated?: boolean;
   /** e.g. "this one" on the signal a card points at. */
@@ -92,20 +102,24 @@ export function ConversationTurn({
       className={`cv-turn cv-${side}${grouped ? ' cv-grouped' : ''}${highlighted ? ' cv-marked' : ''}`}
       data-history-id={historyId}
     >
-      <div className="cv-bubble">
+      <span className="cv-avatar" aria-hidden="true">{!grouped && avatar}</span>
+      <div className="cv-main">
         {!grouped && (
           <div className="cv-head">
             <span className="cv-sender">{sender}</span>
+            {meta && <span className="cv-meta">{meta}</span>}
             {automated && <span className="cv-auto">automated</span>}
             {flags}
             {marker && <span className="cv-marker">{marker}</span>}
             {time && <span className="cv-time">{time}</span>}
           </div>
         )}
-        {tags}
-        {subject && subject.trim() !== '' && <h3 className="cv-subject">{subject}</h3>}
-        <div className="cv-body">{children}</div>
-        {footer}
+        <div className="cv-bubble">
+          {tags}
+          {subject && subject.trim() !== '' && <h3 className="cv-subject">{subject}</h3>}
+          <div className="cv-body">{children}</div>
+          {footer}
+        </div>
       </div>
     </article>
   );

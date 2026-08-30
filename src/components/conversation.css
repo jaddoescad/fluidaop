@@ -43,57 +43,81 @@
 
 /* ---------- a message ---------- */
 
+/* Avatar and attribution sit outside the bubble: the line says who spoke and
+   how it arrived, the bubble holds only what they said. */
 .cv-turn {
+  display: flex;
+  gap: 10px;
   max-width: var(--cv-max);
   min-width: 0;
 }
 
 .cv-them { align-self: flex-start; }
-.cv-you { align-self: flex-end; }
 .cv-none { align-self: stretch; max-width: 100%; }
 
-.cv-bubble {
-  padding: 10px 13px;
-  border: 1px solid var(--cv-line);
-  border-radius: var(--cv-radius);
-  background: var(--cv-surface);
+.cv-you {
+  align-self: flex-end;
+  flex-direction: row-reverse;
 }
 
-.cv-them .cv-bubble { border-bottom-left-radius: var(--cv-tail); }
+.cv-you .cv-head { flex-direction: row-reverse; }
+.cv-you .cv-time { margin-left: 0; margin-right: auto; }
 
-.cv-you .cv-bubble {
-  border-color: color-mix(in srgb, var(--cv-accent) 34%, var(--cv-line));
-  border-bottom-right-radius: var(--cv-tail);
-  background: color-mix(in srgb, var(--cv-accent) 11%, var(--cv-surface));
+.cv-avatar {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* consecutive messages from one side: no repeated header, tighter, square top */
-.cv-grouped { margin-top: -6px; }
-.cv-them.cv-grouped .cv-bubble { border-top-left-radius: var(--cv-tail); }
-.cv-you.cv-grouped .cv-bubble { border-top-right-radius: var(--cv-tail); }
+.cv-avatar .avatar,
+.cv-avatar > span {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  box-shadow: none;
+  font-size: 11px;
+  font-weight: 650;
+}
 
-/* the one message the surrounding view is about */
-.cv-marked .cv-bubble { box-shadow: 0 0 0 1px var(--cv-accent); }
+.cv-initials {
+  background: color-mix(in srgb, var(--cv-accent) 22%, var(--cv-surface));
+  color: var(--cv-ink);
+}
+
+.cv-main { min-width: 0; flex: 1; }
 
 .cv-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .cv-sender {
   color: var(--cv-ink);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 650;
 }
 
-.cv-auto,
-.cv-marker {
-  font-size: 10px;
+.cv-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--cv-faint);
+  font-size: 11px;
 }
 
+.cv-meta .src { font-size: 10px; }
+
+.cv-auto,
+.cv-marker { font-size: 10px; color: var(--cv-faint); }
 .cv-marker { color: var(--cv-accent); }
 
 .cv-time {
@@ -103,6 +127,29 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+.cv-bubble {
+  padding: 10px 13px;
+  border: 1px solid var(--cv-line);
+  border-radius: var(--cv-radius);
+  border-top-left-radius: var(--cv-tail);
+  background: var(--cv-surface);
+}
+
+.cv-you .cv-bubble {
+  border-color: color-mix(in srgb, var(--cv-accent) 34%, var(--cv-line));
+  border-top-left-radius: var(--cv-radius);
+  border-top-right-radius: var(--cv-tail);
+  background: color-mix(in srgb, var(--cv-accent) 11%, var(--cv-surface));
+}
+
+/* consecutive messages from one side: no avatar, no repeated header */
+.cv-grouped { margin-top: -6px; }
+.cv-grouped .cv-bubble,
+.cv-you.cv-grouped .cv-bubble { border-radius: var(--cv-radius); }
+
+/* the one message the surrounding view is about */
+.cv-marked .cv-bubble { box-shadow: 0 0 0 1px var(--cv-accent); }
 
 .cv-subject {
   margin: 0 0 4px;

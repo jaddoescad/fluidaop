@@ -1,3 +1,4 @@
+import { CHANNEL_LABEL } from '../channels';
 import { ConversationDay, ConversationEvent, ConversationTurn, type TurnSide } from '../components/Conversation';
 import {
   FormEvent,
@@ -78,6 +79,27 @@ function dayLabel(at: number): string {
 function dayKey(at: number): string {
   const day = new Date(at);
   return `${day.getFullYear()}-${day.getMonth()}-${day.getDate()}`;
+}
+
+/** Initials for the thread avatar — two letters where a name gives them. */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+/** Milestones are not a channel, so they fall outside CHANNEL_LABEL's map. */
+function channelLabel(channel: string): string {
+  return (CHANNEL_LABEL as Record<string, string>)[channel] ?? channel;
+}
+
+/** Which system the message came through — Quo, Gmail, DripJobs. */
+function sourceLabel(source: string): string {
+  if (source === 'quo') return 'Quo';
+  if (source === 'gmail') return 'Gmail';
+  if (source === 'dripjobs') return 'DripJobs';
+  return source;
 }
 
 function shortDate(at: number): string {
@@ -481,6 +503,8 @@ export function LeadWorkspace({
         key={touchpoint.id}
         side={side}
         sender={who}
+        avatar={<span className="cv-initials">{initials(who)}</span>}
+        meta={<>{channelLabel(touchpoint.channel)} · {sourceLabel(touchpoint.source)}</>}
         time={clockTime(touchpoint.occurredAt)}
         automated={touchpoint.isAutomated}
         grouped={grouped}
