@@ -21,7 +21,6 @@ export interface Act {
   triggerReminder: (id: string) => void;
   cancelReminder: (id: string) => void;
   stopSeq: (instId: string) => void;
-  settleSignal: (id: string) => Promise<void>;
   acceptRecommendation: (signalId: string, recommendationId: string) => Promise<string>;
   updateActionDraft: (actionId: string, revision: number, draftBody: string) => Promise<void>;
   simulateActionSend: (actionId: string, revision: number) => Promise<void>;

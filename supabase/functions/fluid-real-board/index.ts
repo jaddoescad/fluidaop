@@ -64,6 +64,10 @@ function integerId(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
 }
 
+function dripJobsDealId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{30,}$/.test(value);
+}
+
 function boundedText(value: unknown, maximum: number, required = false): string | null {
   if (typeof value !== 'string') return required ? null : '';
   const cleaned = value.trim();
@@ -125,7 +129,10 @@ async function addIdentityResolutions(
   client: SupabaseClient,
   items: Array<Record<string, unknown>>,
 ): Promise<Array<Record<string, unknown>>> {
-  const activityIds = items
+  // Current read models emit an authoritative resolution directly. Keep the
+  // suggestion lookup only as a compatibility fallback during rolling deploys.
+  const unresolvedItems = items.filter((item) => !item.contact && !item.identityResolution);
+  const activityIds = unresolvedItems
     .map((item) => Number(item.id))
     .filter((id) => Number.isSafeInteger(id) && id > 0);
   if (activityIds.length === 0) return items;
@@ -170,7 +177,7 @@ async function addIdentityResolutions(
 
   return items.map((item) => ({
     ...item,
-    identityResolution: resolutionByActivity.get(Number(item.id)) ?? null,
+    identityResolution: item.identityResolution ?? resolutionByActivity.get(Number(item.id)) ?? null,
   }));
 }
 
@@ -196,6 +203,47 @@ async function people(client: SupabaseClient, url: URL): Promise<Response> {
     items: result?.items ?? [],
     nextCursor: encodeCursor(result?.nextCursor),
   });
+}
+
+async function pipeline(client: SupabaseClient, url: URL): Promise<Response> {
+  if (url.searchParams.get('archived') === 'true') {
+    const receivedMonth = url.searchParams.get('receivedMonth');
+    if (receivedMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(receivedMonth)) {
+      return response({ error: 'Invalid received month' }, 400);
+    }
+    const rawCursor = url.searchParams.get('cursor');
+    const cursor = decodeCursor(rawCursor);
+    if (rawCursor && (!cursor || typeof cursor.at !== 'string' || typeof cursor.id !== 'string')) {
+      return response({ error: 'Invalid archived pipeline cursor' }, 400);
+    }
+    const result = await rpc(client, 'list_archived_dripjobs_pipeline', {
+      p_workspace_key: WORKSPACE_KEY,
+      p_limit: positiveInt(url.searchParams.get('limit'), 60, 100),
+      p_cursor_archived_at: cursor?.at ?? null,
+      p_cursor_deal_id: cursor?.id ?? null,
+      p_received_month: receivedMonth ? `${receivedMonth}-01` : null,
+    }) as { count?: unknown; bucketCounts?: unknown; monthCounts?: unknown; items?: unknown[]; nextCursor?: unknown };
+    return response({
+      count: Number.isSafeInteger(Number(result?.count)) ? Number(result?.count) : 0,
+      bucketCounts: result?.bucketCounts ?? {},
+      monthCounts: result?.monthCounts ?? {},
+      items: result?.items ?? [],
+      nextCursor: encodeCursor(result?.nextCursor),
+    });
+  }
+  return response(await rpc(client, 'list_current_dripjobs_pipeline', {
+    p_workspace_key: WORKSPACE_KEY,
+  }));
+}
+
+async function pipelineHistory(client: SupabaseClient, url: URL): Promise<Response> {
+  const dealId = url.searchParams.get('dealId');
+  if (!dripJobsDealId(dealId)) return response({ error: 'Invalid DripJobs deal id' }, 400);
+  return response(await rpc(client, 'list_dripjobs_deal_journey', {
+    p_workspace_key: WORKSPACE_KEY,
+    p_deal_id: dealId,
+    p_limit: positiveInt(url.searchParams.get('limit'), 100, 500),
+  }));
 }
 
 async function signals(client: SupabaseClient, url: URL): Promise<Response> {
@@ -247,10 +295,21 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
     ? await addAutomatedFlags(client, [result.signal as Record<string, unknown>])
     : [];
   const selected = await addIdentityResolutions(client, selectedWithFlags);
-  const { data: content, error: contentError } = await client.from('activities')
-    .select('source,account_key,external_thread_id,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at')
-    .eq('workspace_key', WORKSPACE_KEY).eq('id', activityId).maybeSingle();
-  if (contentError) throw contentError;
+  const [contentResult, recordingResult, summaryResult] = await Promise.all([
+    client.from('activities')
+      .select('source,account_key,external_thread_id,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at')
+      .eq('workspace_key', WORKSPACE_KEY).eq('id', activityId).maybeSingle(),
+    client.from('activity_call_recordings')
+      .select('status,recordings,unavailable_reason,updated_at')
+      .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId).maybeSingle(),
+    client.from('activity_call_summaries')
+      .select('status,summary,next_steps,jobs,unavailable_reason,updated_at')
+      .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId).maybeSingle(),
+  ]);
+  if (contentResult.error) throw contentResult.error;
+  if (recordingResult.error) throw recordingResult.error;
+  if (summaryResult.error) throw summaryResult.error;
+  const content = contentResult.data;
   let threadMessageCount = 1;
   if (content?.external_thread_id) {
     const { count, error } = await client.from('activities').select('id', { count: 'exact', head: true })
@@ -304,6 +363,20 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
         locked: !(definition?.enabled ?? false),
       };
     }),
+    recordings: recordingResult.data ? {
+      status: recordingResult.data.status,
+      items: Array.isArray(recordingResult.data.recordings) ? recordingResult.data.recordings : [],
+      unavailableReason: recordingResult.data.unavailable_reason,
+      updatedAt: recordingResult.data.updated_at,
+    } : null,
+    callSummary: summaryResult.data ? {
+      status: summaryResult.data.status,
+      summary: Array.isArray(summaryResult.data.summary) ? summaryResult.data.summary : [],
+      nextSteps: Array.isArray(summaryResult.data.next_steps) ? summaryResult.data.next_steps : [],
+      jobs: summaryResult.data.jobs,
+      unavailableReason: summaryResult.data.unavailable_reason,
+      updatedAt: summaryResult.data.updated_at,
+    } : null,
     historyNextCursor: encodeCursor(result.historyNextCursor),
   });
 }
@@ -586,6 +659,8 @@ Deno.serve(async (req: Request) => {
     const client = db();
     if (req.method === 'GET' && action === 'summary') return await summary(client);
     if (req.method === 'GET' && action === 'people') return await people(client, url);
+    if (req.method === 'GET' && action === 'pipeline') return await pipeline(client, url);
+    if (req.method === 'GET' && action === 'pipeline-history') return await pipelineHistory(client, url);
     if (req.method === 'GET' && action === 'signals') return await signals(client, url);
     if (req.method === 'GET' && action === 'signal') return await signal(client, url);
     if (req.method === 'GET' && action === 'action-definitions') return await actionDefinitions(client);
@@ -595,6 +670,46 @@ Deno.serve(async (req: Request) => {
     if (req.method === 'GET' && action === 'automations') return response({ items: [], nextCursor: null });
     if (req.method !== 'POST') return response({ error: 'Method not allowed' }, 405);
     const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+    if (action === 'ingest-dripjobs-chat') {
+      const contactId = boundedText(body.contactId, 200, true);
+      const channelId = boundedText(body.channelId, 500, true);
+      const supportUserId = boundedText(body.supportUserId, 500, true);
+      const customer = body.customer && typeof body.customer === 'object' && !Array.isArray(body.customer)
+        ? body.customer as Record<string, unknown>
+        : null;
+      const customerName = boundedText(customer?.name, 500, true);
+      const customerEmail = boundedText(customer?.email, 1000);
+      const customerPhone = boundedText(customer?.phone, 200);
+      const messages = Array.isArray(body.messages) ? body.messages : null;
+      const firstSeenAt = messages?.reduce<string | null>((earliest, item) => {
+        if (!item || typeof item !== 'object') return earliest;
+        const value = (item as Record<string, unknown>).occurredAt;
+        if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return earliest;
+        return earliest === null || Date.parse(value) < Date.parse(earliest) ? value : earliest;
+      }, null) ?? null;
+      if (!contactId || !channelId || !supportUserId || !customerName ||
+        customerEmail === null || customerPhone === null || !messages || !firstSeenAt ||
+        messages.length < 1 || messages.length > 500 ||
+        JSON.stringify(messages).length > 5_000_000) {
+        return response({ error: 'Invalid DripJobs chat import' }, 400);
+      }
+      const personId = await rpc(client, 'ensure_dripjobs_chat_contact', {
+        p_workspace_key: WORKSPACE_KEY,
+        p_dripjobs_contact_id: contactId,
+        p_customer_name: customerName,
+        p_customer_email: customerEmail || null,
+        p_customer_phone: customerPhone || null,
+        p_first_seen_at: firstSeenAt,
+      });
+      const imported = await rpc(client, 'ingest_dripjobs_contact_chat_messages', {
+        p_workspace_key: WORKSPACE_KEY,
+        p_dripjobs_contact_id: contactId,
+        p_channel_key: channelId,
+        p_support_user_id: supportUserId,
+        p_messages: messages,
+      });
+      return response({ personId, imported });
+    }
     if (action === 'update-action-definition') return await updateActionDefinition(client, body);
     if (action === 'accept-recommendation') {
       if (!integerId(String(body.activityId)) || !uuid(body.recommendationId)) {
@@ -641,18 +756,6 @@ Deno.serve(async (req: Request) => {
         p_workspace_key: WORKSPACE_KEY, p_action_id: body.actionId,
         p_actor: typeof body.actor === 'string' ? body.actor : 'manager',
       }));
-    }
-    if (action === 'settle') {
-      if (!integerId(String(body.activityId)) || body.resolution !== 'no_action') {
-        return response({ error: 'Invalid Signal resolution' }, 400);
-      }
-      const result = await rpc(client, 'settle_signal_recommendations', {
-        p_workspace_key: WORKSPACE_KEY,
-        p_activity_id: body.activityId,
-        p_resolution: 'no_action',
-        p_reviewer: typeof body.reviewer === 'string' ? body.reviewer : 'manager',
-      });
-      return response(result);
     }
     return response({ error: 'Unknown Board action' }, 404);
   } catch (error) {

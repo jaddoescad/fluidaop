@@ -561,6 +561,8 @@ Deno.serve(async (req: Request) => {
       const cursor = uuidCursorFrom(url);
       if (cursor === false) return response({ error: 'Invalid Contact cursor' }, 400);
       const role = cleanText(url.searchParams.get('role'), 100);
+      const rawQuery = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+      const queryText = rawQuery.replace(/[,%()]/g, ' ').replace(/\s+/g, ' ').trim();
       const status = url.searchParams.get('status') === 'archived' ? 'archived' : 'active';
       if (role && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(role)) {
         return response({ error: 'Invalid Contact role' }, 400);
@@ -580,6 +582,13 @@ Deno.serve(async (req: Request) => {
       if (role) {
         query = query.eq('person_roles.role_key', role).eq('person_roles.active', true);
       }
+      if (queryText) {
+        query = query.or([
+          `display_name.ilike.%${queryText}%`,
+          `primary_email.ilike.%${queryText}%`,
+          `primary_phone.ilike.%${queryText}%`,
+        ].join(','));
+      }
       if (cursor) {
         query = query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`);
       }
@@ -589,20 +598,34 @@ Deno.serve(async (req: Request) => {
       const hasMore = fetched.length > limit;
       const rawContacts = fetched.slice(0, limit);
       const personIds = rawContacts.map((contact) => contact.id);
-      const activityResult = personIds.length === 0
-        ? { data: [], error: null }
-        : await supabase
-          .from('contact_activity_stats')
-          .select('person_id,linked_signal_count,last_signal_at')
-          .eq('workspace_key', 'ottawa-painters')
-          .in('person_id', personIds);
+      const [activityResult, dealResult] = personIds.length === 0
+        ? [{ data: [], error: null }, { data: [], error: null }]
+        : await Promise.all([
+          supabase
+            .from('contact_activity_stats')
+            .select('person_id,linked_signal_count,last_signal_at')
+            .eq('workspace_key', 'ottawa-painters')
+            .in('person_id', personIds),
+          supabase
+            .from('dripjobs_sales_deals')
+            .select('person_id,deal_id,archived_at')
+            .in('person_id', personIds),
+        ]);
       if (activityResult.error) throw activityResult.error;
+      if (dealResult.error) throw dealResult.error;
       const stats = new Map<string, { count: number; lastSignalAt: string | null }>();
       for (const row of activityResult.data ?? []) {
         stats.set(row.person_id, {
           count: Number(row.linked_signal_count ?? 0),
           lastSignalAt: row.last_signal_at ?? null,
         });
+      }
+      const dealStats = new Map<string, { count: number; activeCount: number }>();
+      for (const deal of dealResult.data ?? []) {
+        const current = dealStats.get(deal.person_id) ?? { count: 0, activeCount: 0 };
+        current.count += 1;
+        if (deal.archived_at === null) current.activeCount += 1;
+        dealStats.set(deal.person_id, current);
       }
       const contacts = rawContacts.map((contact) => ({
         id: contact.id,
@@ -616,6 +639,8 @@ Deno.serve(async (req: Request) => {
           .map((entry) => entry.role_key))],
         linkedSignalCount: stats.get(contact.id)?.count ?? 0,
         lastSignalAt: stats.get(contact.id)?.lastSignalAt ?? null,
+        dealCount: dealStats.get(contact.id)?.count ?? 0,
+        activeDealCount: dealStats.get(contact.id)?.activeCount ?? 0,
         createdAt: contact.created_at,
         updatedAt: contact.updated_at,
       }));
@@ -630,7 +655,7 @@ Deno.serve(async (req: Request) => {
     if (req.method === 'GET' && action === 'contact') {
       const contactId = url.searchParams.get('contactId');
       if (!validUuid(contactId)) return response({ error: 'Valid contactId is required' }, 400);
-      const [personResult, rolesResult, claimsResult, sourcesResult] = await Promise.all([
+      const [personResult, rolesResult, claimsResult, sourcesResult, dealsResult] = await Promise.all([
         supabase
           .from('people')
           .select('id,display_name,primary_email,primary_phone,status,entity_type,created_at,updated_at')
@@ -655,8 +680,12 @@ Deno.serve(async (req: Request) => {
           .select('source_system,source_record_type,source_record_id,source_created_at,source_updated_at,first_synced_at,last_synced_at')
           .eq('person_id', contactId)
           .order('last_synced_at', { ascending: false }),
+        supabase.rpc('list_contact_deals', {
+          p_person_id: contactId,
+          p_workspace_key: 'ottawa-painters',
+        }),
       ]);
-      const failure = [personResult, rolesResult, claimsResult, sourcesResult]
+      const failure = [personResult, rolesResult, claimsResult, sourcesResult, dealsResult]
         .map((result) => result.error).find(Boolean);
       if (failure) throw failure;
       if (!personResult.data) return response({ error: 'Contact not found' }, 404);
@@ -670,6 +699,35 @@ Deno.serve(async (req: Request) => {
       if (identityResult.error) throw identityResult.error;
       const identityById = new Map((identityResult.data ?? []).map((identity) => [identity.id, identity]));
       const person = personResult.data;
+      const roles = [...new Set((rolesResult.data ?? []).map((role) => role.role_key))].map((roleKey) => {
+        const evidence = (rolesResult.data ?? []).filter((role) => role.role_key === roleKey);
+        const latest = evidence.slice().sort((left, right) => right.last_seen_at.localeCompare(left.last_seen_at))[0];
+        return { ...latest, role_key: roleKey, sourceCount: evidence.length };
+      });
+      const identifiers = identityIds.flatMap((identityId) => {
+        const identity = identityById.get(identityId);
+        if (!identity) return [];
+        const claims = (claimsResult.data ?? []).filter((claim) => claim.identity_id === identityId);
+        const primaryClaim = claims.find((claim) => claim.is_primary) ?? claims[0];
+        if (!primaryClaim) return [];
+        return [{
+          id: identity.id,
+          kind: identity.kind,
+          value: identity.display_value,
+          displayName: identity.display_name,
+          classification: identity.classification,
+          confidence: Math.max(...claims.map((claim) => Number(claim.confidence))),
+          primary: claims.some((claim) => claim.is_primary),
+          sourceCount: claims.length,
+          source: {
+            system: primaryClaim.source_system,
+            recordType: primaryClaim.source_record_type,
+            recordId: primaryClaim.source_record_id,
+          },
+          firstSeenAt: claims.map((claim) => claim.first_seen_at).sort()[0],
+          lastSeenAt: claims.map((claim) => claim.last_seen_at).sort().at(-1),
+        }];
+      });
       return response({
         contact: {
           id: person.id,
@@ -681,27 +739,10 @@ Deno.serve(async (req: Request) => {
           createdAt: person.created_at,
           updatedAt: person.updated_at,
         },
-        roles: rolesResult.data ?? [],
-        identifiers: (claimsResult.data ?? []).flatMap((claim) => {
-          const identity = identityById.get(claim.identity_id);
-          return identity ? [{
-            id: identity.id,
-            kind: identity.kind,
-            value: identity.display_value,
-            displayName: identity.display_name,
-            classification: identity.classification,
-            confidence: claim.confidence,
-            primary: claim.is_primary,
-            source: {
-              system: claim.source_system,
-              recordType: claim.source_record_type,
-              recordId: claim.source_record_id,
-            },
-            firstSeenAt: claim.first_seen_at,
-            lastSeenAt: claim.last_seen_at,
-          }] : [];
-        }),
+        roles,
+        identifiers,
         sources: sourcesResult.data ?? [],
+        deals: dealsResult.data ?? { count: 0, activeCount: 0, items: [] },
       });
     }
 

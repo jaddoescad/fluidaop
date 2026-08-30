@@ -981,30 +981,6 @@ export function useLiveBoard(): LiveBoardController {
     }
   }, [apiSignals, details]);
 
-  const settleSignal = useCallback(async (id: string) => {
-    await json(`/api/board/signals/${id}/settle`, {
-      method: 'POST',
-      body: JSON.stringify({ resolution: 'no_action' }),
-    });
-    setApiSignals((current) => current.map((signal) => String(signal.id) === id
-      ? { ...signal, review: { status: 'settled', resolution: 'no_action', pendingRecommendationCount: 0 } }
-      : signal));
-    setDetails((current) => current[id] ? {
-      ...current,
-      [id]: {
-        ...current[id],
-        signal: current[id].signal ? {
-          ...current[id].signal,
-          reviewStatus: 'settled',
-          reviewResolution: 'no_action',
-          reviewedBy: 'manager',
-          reviewedAt: Date.now(),
-        } : null,
-        recommendations: [],
-      },
-    } : current);
-    await Promise.all([loadSummary(), loadPeople(false)]);
-  }, [loadPeople, loadSummary]);
 
   const openAction = useCallback(async (id: string) => {
     setActionDetails((current) => ({
@@ -1183,7 +1159,6 @@ export function useLiveBoard(): LiveBoardController {
   const act = useMemo<Act>(() => ({
     focus: setFocusId,
     togglePause: () => setPaused((value) => !value),
-    settleSignal,
     acceptRecommendation,
     updateActionDraft,
     simulateActionSend,
@@ -1207,7 +1182,7 @@ export function useLiveBoard(): LiveBoardController {
     triggerReminder: noOp,
     cancelReminder: noOp,
     stopSeq: noOp,
-  }), [acceptRecommendation, dismissAction, retryAction, settleSignal, simulateActionSend, updateActionDraft]);
+  }), [acceptRecommendation, dismissAction, retryAction, simulateActionSend, updateActionDraft]);
 
   return {
     s,

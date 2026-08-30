@@ -1765,12 +1765,10 @@ export function RunPopup({
 }) {
   const [text, setText] = useState('');
   const [notes, setNotes] = useState<{ who: 'you' | 'agent' | 'sys'; text: string }[]>([]);
-  const [settling, setSettling] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   useEffect(() => {
     setNotes([]);
     setText('');
-    setSettling(false);
     setAcceptingId(null);
   }, [subject.type, subject.id]);
 
@@ -2194,12 +2192,10 @@ export function RunPopup({
   if (subject.type === 'signal' && sg && selectedSignal && sgStatus) {
     signalDecisionSummary = sgStatus.key === 'open'
       ? selectedSignal.direction === 'outbound'
-        ? <>This was sent by your team. Review it, then manually settle this Signal.</>
+        ? <>This was sent by your team.</>
         : laterOutbound
-          ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. Review this Signal, then settle it manually.</>
-          : recommendations[0]?.reason ?? (!signalDetail?.loading
-            ? 'Hermes has no suggested action. You still need to decide whether this Signal needs one.'
-            : null)
+          ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. </>
+          : recommendations[0]?.reason ?? null
       : sgStatus.key === 'action'
         ? <>A reply draft is ready in Actions.</>
         : sgStatus.key === 'rem'
@@ -2210,7 +2206,7 @@ export function RunPopup({
               ? <>{sgStatus.label} ✓ Nothing is left here.</>
               : selectedSignal.reviewResolution === 'no_action'
                 ? <>You manually settled this Signal{selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}.</>
-                : <>No manual settlement is recorded for this Signal.</>;
+                : null;
   }
   const signalDecision = signalDecisionSummary ? (
     <article className="fd-dec"><p className="fd-dec-summary">{signalDecisionSummary}</p></article>
@@ -2415,7 +2411,8 @@ export function RunPopup({
               </ConversationTurn>
             </>
           )}
-          {day('d-agent', subject.type === 'signal' ? 'Summary & next step' : agent ? `${agent} on “${title}”` : 'Your move')}
+          {(subject.type !== 'signal' || signalDecisionSummary) &&
+            day('d-agent', subject.type === 'signal' ? 'Summary & next step' : agent ? `${agent} on “${title}”` : 'Your move')}
 
           {/* ================= signal: Hermes recommends; the user decides ================= */}
           {subject.type === 'signal' && sg && selectedSignal && sgStatus && (
@@ -2632,24 +2629,6 @@ export function RunPopup({
                   {recommendation.available ? (acceptingId === recommendation.id ? 'Creating…' : recommendation.label) : `🔒 ${recommendation.label}`}
                 </button>
               ))}
-            {subject.type === 'signal' && sg && sgStatus?.key === 'open' && (
-              <button
-                className="fc-chip fc-chip-primary"
-                disabled={settling}
-                onClick={() => {
-                  setSettling(true);
-                  void act.settleSignal(sg.id)
-                    .then(() => setNotes((current) => [...current, { who: 'you', text: 'Signal settled' }]))
-                    .catch((cause) => setNotes((current) => [...current, {
-                      who: 'agent',
-                      text: cause instanceof Error ? cause.message : 'Could not settle this Signal',
-                    }]))
-                    .finally(() => setSettling(false));
-                }}
-              >
-                {settling ? 'Settling…' : 'Mark settled'}
-              </button>
-            )}
             {subject.type === 'reminder' && r && r.doneAt === null && (
               <>
                 {!remActionOpen && (

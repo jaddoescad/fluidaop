@@ -2143,23 +2143,6 @@ app.get('/api/board/signals/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/board/signals/:id/settle', async (req, res, next) => {
-  try {
-    if (!/^[1-9][0-9]*$/.test(req.params.id) || req.body?.resolution !== 'no_action') {
-      throw new HttpError(400, 'Invalid Signal resolution');
-    }
-    res.json(await realBoardFunctionJson('settle', {}, {
-      method: 'POST',
-      body: JSON.stringify({
-        activityId: req.params.id,
-        resolution: 'no_action',
-        reviewer: 'manager',
-      }),
-    }));
-  } catch (error) {
-    next(error);
-  }
-});
 
 app.post('/api/board/signals/:signalId/recommendations/:recommendationId/accept', async (req, res, next) => {
   try {
