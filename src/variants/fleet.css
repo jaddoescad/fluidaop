@@ -420,29 +420,22 @@
 
 .fd-text b { font-weight: 650; color: #f2f3f7; }
 
-/* selected signal: one readable message, separate from its conversation */
+/* The selected signal is the newest message in this conversation, so it reads
+   as one — same avatar, name and meta as every other turn. Only a hairline on
+   the left marks which message the Signal points at; boxing it made a reply
+   from a customer look like a generated summary. */
 .fd-sel {
-  margin-left: 46px;
-  padding: 14px 16px;
-  border: 1px solid #2b2b34;
-  border-radius: 12px;
-  background: #17171d;
+  position: relative;
+  padding-left: 0;
 }
 
-.fd-sel-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 8px;
+.fd-sel .fd-main {
+  border-left: 2px solid #6c63d8;
+  padding-left: 12px;
+  margin-left: -14px;
 }
 
 .fd-sel-src {
-  color: #8f93a0;
-  font-size: 12px;
-}
-
-.fd-sel-line {
   color: #8f93a0;
   font-size: 12px;
 }

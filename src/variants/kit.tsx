@@ -2274,10 +2274,14 @@ export function RunPopup({
           {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
           {subject.type === 'signal' && selectedSignal && (
             <>
-              {day('d-selected', 'Selected Signal')}
-              <article className="fd-sel">
-                <div className="fd-sel-head">
-                  <span className="fd-sel-src">
+              <article className="fd-turn fd-sel" data-history-id={selectedSignal.id}>
+                <span className="fd-avatar">
+                  <Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : p?.name ?? '—'} />
+                </span>
+                <div className="fd-main">
+                <div className="fd-name">
+                  <b>{selectedSignal.direction === 'outbound' ? 'You' : p?.name ?? '—'}</b>
+                  <span className="fd-meta fd-meta-signal">
                     <SourceTag channel={selectedSignal.channel} />
                     <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
                     <span>· {fmtAge(selectedSignal.at, s.now)}</span>
@@ -2298,9 +2302,6 @@ export function RunPopup({
                     )}
                   </div>
                 )}
-                <div className="fd-sel-line">
-                  {selectedSignal.direction === 'outbound' ? 'To' : 'From'} {p?.name ?? '—'}
-                </div>
                 {selectedSignal.channel === 'email' && (
                   <h3 className="fd-sel-subject">{selectedSignal.title?.trim() || '(no subject)'}</h3>
                 )}
@@ -2418,6 +2419,7 @@ export function RunPopup({
                     )}
                   </div>
                 )}
+                </div>
               </article>
             </>
           )}
