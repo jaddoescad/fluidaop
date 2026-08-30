@@ -750,7 +750,8 @@ function quoWebhookUrl(): string {
 
 async function quoFunctionJson<T>(
   action: 'status' | 'backfill' | 'scope' | 'transcript' | 'transcript-candidates' |
-    'call-content' | 'call-content-candidates' | 'enrich-contacts',
+    'call-content' | 'call-content-candidates' | 'enrich-contacts' |
+    'message-content' | 'message-content-candidates',
   init?: RequestInit,
   search: Record<string, string> = {},
 ): Promise<T> {
@@ -1042,6 +1043,93 @@ async function runQuoCallContentBackfill(
         continue;
       }
       break;
+    }
+  }
+  return totals;
+}
+
+interface QuoMessageCandidate {
+  id: number;
+  externalId: string;
+  direction: string;
+  counterparty: string;
+  line: string;
+  occurredAt: string;
+}
+
+/** Recover message bodies the Quo Metrics export could not carry.
+ *
+ * The export records that a text happened but not what it said, so a webhook
+ * outage recovered through it leaves placeholders. Quo still has the bodies:
+ * GET /v1/messages returns them for a phone line and counterparty, and the
+ * timestamps match to the second, so a recovered body can be matched to its
+ * placeholder exactly rather than approximately.
+ *
+ * Note the query parameter is a repeated `participants`, not `participants[]`;
+ * the bracket form is rejected. */
+async function runQuoMessageBackfill(apiKey: string, phoneNumbers: QuoPhoneNumber[]): Promise<Record<string, number>> {
+  const totals: Record<string, number> = { candidates: 0, conversations: 0, recovered: 0, unmatched: 0, failed: 0 };
+  const payload = await quoFunctionJson<{ messages?: QuoMessageCandidate[] }>(
+    'message-content-candidates',
+    undefined,
+    { limit: '200' },
+  );
+  const candidates = payload.messages ?? [];
+  totals.candidates = candidates.length;
+  if (candidates.length === 0) return totals;
+
+  const lineByNumber = new Map(phoneNumbers.map((number) => [number.e164, number.id]));
+
+  // One request per conversation, not per message: several placeholders often
+  // belong to the same thread.
+  const conversations = new Map<string, QuoMessageCandidate[]>();
+  for (const candidate of candidates) {
+    const key = `${candidate.line}|${candidate.counterparty}`;
+    const group = conversations.get(key);
+    if (group) group.push(candidate);
+    else conversations.set(key, [candidate]);
+  }
+
+  for (const [key, group] of conversations) {
+    const [line, counterparty] = key.split('|');
+    const phoneNumberId = lineByNumber.get(line);
+    if (phoneNumberId === undefined) {
+      totals.unmatched += group.length;
+      continue;
+    }
+    totals.conversations += 1;
+    try {
+      const search = `phoneNumberId=${encodeURIComponent(phoneNumberId)}`
+        + `&participants=${encodeURIComponent(counterparty)}`
+        + '&maxResults=100';
+      const result = await fetchQuoJson<{ data?: Array<{ createdAt?: string; text?: string }> }>(
+        `/messages?${search}`,
+        apiKey,
+      );
+      const byInstant = new Map<number, string>();
+      for (const message of result.data ?? []) {
+        if (typeof message.createdAt !== 'string' || typeof message.text !== 'string') continue;
+        const at = Date.parse(message.createdAt);
+        if (Number.isFinite(at) && message.text.trim() !== '') byInstant.set(Math.floor(at / 1000), message.text);
+      }
+      for (const candidate of group) {
+        const second = Math.floor(Date.parse(candidate.occurredAt) / 1000);
+        // Allow a second either side: the export rounds, the API does not.
+        const text = byInstant.get(second) ?? byInstant.get(second - 1) ?? byInstant.get(second + 1);
+        if (text === undefined) {
+          totals.unmatched += 1;
+          continue;
+        }
+        await quoFunctionJson('message-content', {
+          method: 'POST',
+          body: JSON.stringify({ id: candidate.id, text }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        totals.recovered += 1;
+      }
+    } catch (error) {
+      if (error instanceof QuoApiError && (error.status === 401 || error.status === 429)) throw error;
+      totals.failed += group.length;
     }
   }
   return totals;
@@ -1665,6 +1753,19 @@ app.post('/api/internal/quo/transcript-backfill', async (req, res, next) => {
     res.json({ result: await runQuoTranscriptBackfill(callId) });
   } catch (error) {
     next(error);
+  }
+});
+
+app.post('/api/internal/quo/message-backfill', async (req, res, next) => {
+  try {
+    if (!authorizedHermesAutomation(req)) throw new HttpError(401, 'Unauthorized');
+    const connection = store.connections.find((item): item is StoredQuoConnection => item.provider === 'quo');
+    if (connection === undefined) throw new HttpError(409, 'No Quo connection is configured');
+    res.json({
+      result: await runQuoMessageBackfill(decryptToken(connection.encryptedApiKey), connection.phoneNumbers),
+    });
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Quo message backfill failed: ${errorMessage(error)}`));
   }
 });
 

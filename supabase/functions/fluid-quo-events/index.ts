@@ -32,7 +32,7 @@ type ActivityInput = {
 type ImportRun = {
   id: string;
   connection_id: string;
-  import_kind: 'contacts' | 'messages' | 'calls';
+  import_kind: 'contacts' | 'messages' | 'calls' | 'metrics';
   filename: string;
   status: 'running' | 'succeeded' | 'failed';
   rows_seen: number;
@@ -41,6 +41,30 @@ type ImportRun = {
   started_at: string;
   completed_at: string | null;
   last_error: string | null;
+};
+
+type QuoMetricRow = {
+  eventKey: string;
+  rowFingerprint: string;
+  sourceRowNumber: number;
+  type: 'message' | 'call' | 'voicemail';
+  direction: 'inbound' | 'outbound';
+  status: string;
+  statusDetails: string | null;
+  occurredAt: string;
+  updatedAt: string | null;
+  answeredAt: string | null;
+  deletedAt: string | null;
+  durationSeconds: number | null;
+  accountPhone: string;
+  actorPhone: string;
+  fromPhone: string;
+  toPhones: string[];
+  phoneNumberLabel: string | null;
+  belongsTo: string | null;
+  createdBy: string | null;
+  answeredBy: string | null;
+  userId: string | null;
 };
 
 type ScopePhoneNumber = {
@@ -69,8 +93,40 @@ type TranscriptInput = {
   }>;
 };
 
+type RecordingInput = {
+  callId: string;
+  completedAt: string | null;
+  recordings: Array<{
+    id: string | null;
+    url: string;
+    type: string | null;
+    duration: number | null;
+    startTime: string | null;
+    status: string | null;
+  }>;
+};
+
+type SummaryInput = {
+  callId: string;
+  summaryId: string | null;
+  createdAt: string | null;
+  summary: string[];
+  nextSteps: string[];
+  jobs: unknown;
+};
+
+type CallContentKind = 'transcript' | 'recording' | 'summary';
+type RetryableStatus = 'pending' | 'unavailable' | 'failed';
+
+type CallContentState = {
+  status: RetryableStatus | 'available' | null;
+  attemptCount: number;
+  nextRetryAt: string | null;
+};
+
 const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
 const encoder = new TextEncoder();
+const WORKSPACE_KEY = 'ottawa-painters';
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
@@ -253,6 +309,37 @@ function validImportBody(value: unknown): value is {
   return true;
 }
 
+function validMetricImportBody(value: unknown): value is {
+  run: ImportRun;
+  sourceFile: string;
+  sourceFileSha256: string;
+  rows: QuoMetricRow[];
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const body = value as Record<string, unknown>;
+  if (!body.run || typeof body.run !== 'object' || Array.isArray(body.run)) return false;
+  const run = body.run as Record<string, unknown>;
+  if (run.import_kind !== 'metrics') return false;
+  if (!cleanString(body.sourceFile, 240) || !/^[a-f0-9]{64}$/.test(String(body.sourceFileSha256 ?? ''))) return false;
+  if (!Array.isArray(body.rows) || body.rows.length < 1 || body.rows.length > 200) return false;
+  return body.rows.every((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    return /^[a-f0-9]{64}$/.test(String(row.eventKey ?? '')) &&
+      /^[a-f0-9]{64}$/.test(String(row.rowFingerprint ?? '')) &&
+      Number.isSafeInteger(row.sourceRowNumber) && Number(row.sourceRowNumber) > 1 &&
+      ['message', 'call', 'voicemail'].includes(String(row.type ?? '')) &&
+      ['inbound', 'outbound'].includes(String(row.direction ?? '')) &&
+      Boolean(cleanString(row.status, 100)) &&
+      Boolean(cleanString(row.occurredAt, 80) && Number.isFinite(Date.parse(String(row.occurredAt)))) &&
+      Boolean(e164(row.accountPhone) && e164(row.actorPhone) && e164(row.fromPhone)) &&
+      Array.isArray(row.toPhones) && row.toPhones.length > 0 && row.toPhones.length <= 50 &&
+      row.toPhones.every((phone) => Boolean(e164(phone))) &&
+      (row.durationSeconds === null || row.durationSeconds === undefined ||
+        (Number.isSafeInteger(row.durationSeconds) && Number(row.durationSeconds) >= 0));
+  });
+}
+
 function validScopeBody(value: unknown): value is {
   connectionId: string;
   phoneNumbers: ScopePhoneNumber[];
@@ -297,7 +384,7 @@ function finiteNumber(value: unknown, minimum = 0, maximum = Number.MAX_SAFE_INT
   return Number.isFinite(number) && number >= minimum && number <= maximum ? number : null;
 }
 
-function transcriptInput(payload: Record<string, unknown>): TranscriptInput | null {
+export function transcriptInput(payload: Record<string, unknown>): TranscriptInput | null {
   const type = cleanString(payload.type, 80);
   if (type !== 'call.transcript.completed' && type !== 'callTranscript') return null;
   const data = payload.data;
@@ -330,6 +417,95 @@ function transcriptInput(payload: Record<string, unknown>): TranscriptInput | nu
   };
 }
 
+function stringList(value: unknown, maximumItems = 100, maximumLength = 10_000): string[] {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+  return values.slice(0, maximumItems).flatMap((entry) => {
+    const raw = typeof entry === 'string'
+      ? entry
+      : entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? (entry as Record<string, unknown>).content ?? (entry as Record<string, unknown>).text
+        : null;
+    const cleaned = cleanString(raw, maximumLength);
+    return cleaned ? [cleaned] : [];
+  });
+}
+
+function boundedJson(value: unknown, maximumBytes: number, fallback: unknown): unknown {
+  try {
+    const encoded = JSON.stringify(value ?? fallback);
+    if (new TextEncoder().encode(encoded).length > maximumBytes) return fallback;
+    return JSON.parse(encoded) as unknown;
+  } catch {
+    return fallback;
+  }
+}
+
+function httpsUrl(value: unknown): string | null {
+  const raw = cleanString(value, 4_000);
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === 'https:' ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+export function recordingInput(payload: Record<string, unknown>): RecordingInput | null {
+  if (cleanString(payload.type, 80) !== 'call.recording.completed') return null;
+  const data = payload.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const rawObject = (data as Record<string, unknown>).object;
+  if (!rawObject || typeof rawObject !== 'object' || Array.isArray(rawObject)) return null;
+  const object = rawObject as Record<string, unknown>;
+  const callId = cleanString(object.callId, 200) ?? cleanString(object.id, 200);
+  if (!callId || !/^AC[A-Za-z0-9_-]+$/.test(callId)) return null;
+  const rawRecordings = Array.isArray(object.media)
+    ? object.media
+    : Array.isArray(object.recordings)
+      ? object.recordings
+      : [];
+  const recordings = rawRecordings.slice(0, 100).flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const row = entry as Record<string, unknown>;
+    const url = httpsUrl(row.url);
+    if (!url) return [];
+    return [{
+      id: cleanString(row.id, 200),
+      url,
+      type: cleanString(row.type, 100),
+      duration: finiteNumber(row.duration, 0, 1_000_000),
+      startTime: cleanString(row.startTime, 80),
+      status: cleanString(row.status, 100),
+    }];
+  });
+  if (recordings.length === 0) return null;
+  return {
+    callId,
+    completedAt: cleanString(object.completedAt, 80) ?? cleanString(object.createdAt, 80),
+    recordings,
+  };
+}
+
+export function summaryInput(payload: Record<string, unknown>): SummaryInput | null {
+  if (cleanString(payload.type, 80) !== 'call.summary.completed') return null;
+  const data = payload.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const rawObject = (data as Record<string, unknown>).object;
+  if (!rawObject || typeof rawObject !== 'object' || Array.isArray(rawObject)) return null;
+  const object = rawObject as Record<string, unknown>;
+  const callId = cleanString(object.callId, 200) ?? cleanString(object.id, 200);
+  if (!callId || !/^AC[A-Za-z0-9_-]+$/.test(callId)) return null;
+  return {
+    callId,
+    summaryId: cleanString(object.summaryId, 200) ?? cleanString(object.id, 200),
+    createdAt: cleanString(object.createdAt, 80) ?? cleanString(object.completedAt, 80),
+    summary: stringList(object.summary),
+    nextSteps: stringList(object.nextSteps),
+    jobs: boundedJson(object.jobs, 900_000, []),
+  };
+}
+
 function transcriptText(transcript: TranscriptInput): string {
   return truncateText(
     transcript.dialogue.map((line) => `${line.identifier ?? 'Speaker'}: ${line.content}`).join('\n'),
@@ -344,11 +520,12 @@ async function storeTranscript(
 ): Promise<void> {
   const text = transcriptText(transcript);
   const now = new Date().toISOString();
+  const attemptCount = await nextAttemptCount(supabase, 'activity_call_transcripts', activityId);
   const { error: transcriptError } = await supabase
     .from('activity_call_transcripts')
     .upsert({
       activity_id: activityId,
-      workspace_key: 'ottawa-painters',
+      workspace_key: WORKSPACE_KEY,
       provider: 'quo',
       provider_call_id: transcript.callId,
       provider_transcript_id: transcript.transcriptId,
@@ -358,6 +535,10 @@ async function storeTranscript(
       unavailable_reason: null,
       transcript_created_at: transcript.createdAt,
       fetched_at: now,
+      attempt_count: attemptCount,
+      last_attempted_at: now,
+      next_retry_at: null,
+      last_http_status: 200,
       updated_at: now,
     }, { onConflict: 'activity_id' });
   if (transcriptError) throw transcriptError;
@@ -386,6 +567,142 @@ async function storeTranscript(
     })
     .eq('id', activityId);
   if (updateError) throw updateError;
+}
+
+async function nextAttemptCount(
+  supabase: SupabaseClient,
+  table: 'activity_call_transcripts' | 'activity_call_recordings' | 'activity_call_summaries',
+  activityId: number,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from(table)
+    .select('attempt_count')
+    .eq('activity_id', activityId)
+    .maybeSingle();
+  if (error) throw error;
+  return Math.min(1000, Math.max(0, Number(data?.attempt_count ?? 0)) + 1);
+}
+
+async function storeRecording(
+  supabase: SupabaseClient,
+  activityId: number,
+  recording: RecordingInput,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const attemptCount = await nextAttemptCount(supabase, 'activity_call_recordings', activityId);
+  const { error } = await supabase.from('activity_call_recordings').upsert({
+    activity_id: activityId,
+    workspace_key: WORKSPACE_KEY,
+    provider: 'quo',
+    provider_call_id: recording.callId,
+    status: 'available',
+    recordings: recording.recordings,
+    unavailable_reason: null,
+    recording_completed_at: recording.completedAt,
+    fetched_at: now,
+    attempt_count: attemptCount,
+    last_attempted_at: now,
+    next_retry_at: null,
+    last_http_status: 200,
+    updated_at: now,
+  }, { onConflict: 'activity_id' });
+  if (error) throw error;
+}
+
+async function storeSummary(
+  supabase: SupabaseClient,
+  activityId: number,
+  summary: SummaryInput,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const attemptCount = await nextAttemptCount(supabase, 'activity_call_summaries', activityId);
+  const { error } = await supabase.from('activity_call_summaries').upsert({
+    activity_id: activityId,
+    workspace_key: WORKSPACE_KEY,
+    provider: 'quo',
+    provider_call_id: summary.callId,
+    provider_summary_id: summary.summaryId,
+    status: 'available',
+    summary: summary.summary,
+    next_steps: summary.nextSteps,
+    jobs: summary.jobs,
+    unavailable_reason: null,
+    summary_created_at: summary.createdAt,
+    fetched_at: now,
+    attempt_count: attemptCount,
+    last_attempted_at: now,
+    next_retry_at: null,
+    last_http_status: 200,
+    updated_at: now,
+  }, { onConflict: 'activity_id' });
+  if (error) throw error;
+}
+
+function contentTable(kind: CallContentKind):
+  'activity_call_transcripts' | 'activity_call_recordings' | 'activity_call_summaries' {
+  if (kind === 'transcript') return 'activity_call_transcripts';
+  if (kind === 'recording') return 'activity_call_recordings';
+  return 'activity_call_summaries';
+}
+
+async function storeContentStatus(
+  supabase: SupabaseClient,
+  activityId: number,
+  callId: string,
+  kind: CallContentKind,
+  status: RetryableStatus,
+  reason: string,
+  httpStatus: number | null,
+  nextRetryAt: string | null,
+): Promise<'available' | RetryableStatus> {
+  const table = contentTable(kind);
+  const { data: existing, error: existingError } = await supabase
+    .from(table)
+    .select('status,attempt_count')
+    .eq('activity_id', activityId)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing?.status === 'available') return 'available';
+  const now = new Date().toISOString();
+  const row: Record<string, unknown> = {
+    activity_id: activityId,
+    workspace_key: WORKSPACE_KEY,
+    provider: 'quo',
+    provider_call_id: callId,
+    status,
+    unavailable_reason: reason,
+    attempt_count: Math.min(1000, Math.max(0, Number(existing?.attempt_count ?? 0)) + 1),
+    last_attempted_at: now,
+    next_retry_at: status === 'unavailable' ? null : nextRetryAt,
+    last_http_status: httpStatus,
+    updated_at: now,
+  };
+  if (kind === 'transcript') {
+    Object.assign(row, { provider_transcript_id: null, dialogue: [], transcript_text: null, fetched_at: null });
+  } else if (kind === 'recording') {
+    Object.assign(row, { recordings: [], fetched_at: null });
+  } else {
+    Object.assign(row, { provider_summary_id: null, summary: [], next_steps: [], jobs: [], fetched_at: null });
+  }
+  const { error } = await supabase.from(table).upsert(row, { onConflict: 'activity_id' });
+  if (error) throw error;
+  if (kind === 'transcript') {
+    const { data: activity, error: activityError } = await supabase
+      .from('activities')
+      .select('source_metadata')
+      .eq('id', activityId)
+      .single();
+    if (activityError) throw activityError;
+    const metadata = activity.source_metadata && typeof activity.source_metadata === 'object'
+      ? activity.source_metadata as Record<string, unknown>
+      : {};
+    const { error: updateError } = await supabase.from('activities').update({
+      source_metadata: { ...metadata, transcriptStatus: status },
+      updated_at: now,
+    }).eq('id', activityId);
+    if (updateError) throw updateError;
+  }
+  return status;
 }
 
 async function findScopedCallActivity(
@@ -514,7 +831,7 @@ async function enrichQuoContacts(
   const { data: identities, error: identityError } = await supabase
     .from('identities')
     .select('id,normalized_value,display_name')
-    .eq('workspace_key', 'ottawa-painters')
+    .eq('workspace_key', WORKSPACE_KEY)
     .eq('kind', 'phone')
     .in('normalized_value', [...new Set(matched.map((candidate) => candidate.phone))]);
   if (identityError) throw identityError;
@@ -523,7 +840,7 @@ async function enrichQuoContacts(
     const identity = identityByPhone.get(candidate.phone);
     if (!identity) return [];
     return [{
-      workspace_key: 'ottawa-painters',
+      workspace_key: WORKSPACE_KEY,
       identity_id: identity.id,
       provider: 'quo',
       provider_id: candidate.providerId,
@@ -569,6 +886,186 @@ async function enrichQuoContacts(
   };
 }
 
+function callContentState(row: Record<string, unknown> | undefined): CallContentState {
+  const rawStatus = row?.status;
+  const status = rawStatus === 'pending' || rawStatus === 'available' ||
+      rawStatus === 'unavailable' || rawStatus === 'failed'
+    ? rawStatus
+    : null;
+  const nextRetryAt = typeof row?.next_retry_at === 'string' ? row.next_retry_at : null;
+  return {
+    status,
+    attemptCount: Math.max(0, Number(row?.attempt_count ?? 0)),
+    nextRetryAt,
+  };
+}
+
+function contentIsDue(state: CallContentState, now: number): boolean {
+  if (state.status === 'available' || state.status === 'unavailable') return false;
+  if (!state.nextRetryAt) return true;
+  const retryAt = Date.parse(state.nextRetryAt);
+  return !Number.isFinite(retryAt) || retryAt <= now;
+}
+
+async function callContentCandidates(
+  supabase: SupabaseClient,
+  url: URL,
+): Promise<{ calls: Array<Record<string, unknown>>; nextOffset: number | null }> {
+  const scope = await activeScope(supabase);
+  if (scope.phones.size === 0) return { calls: [], nextOffset: null };
+  const requestedCallId = cleanString(url.searchParams.get('callId'), 200);
+  if (requestedCallId && !/^AC[A-Za-z0-9_-]+$/.test(requestedCallId)) {
+    return { calls: [], nextOffset: null };
+  }
+  const requestedLimit = Number.parseInt(url.searchParams.get('limit') ?? '', 10);
+  const limit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, 100)
+    : 100;
+  const requestedOffset = Number.parseInt(url.searchParams.get('offset') ?? '', 10);
+  const offset = !requestedCallId && Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+    ? Math.min(requestedOffset, 1_000_000)
+    : 0;
+  const scanLimit = requestedCallId ? 1 : 500;
+  const rawKind = url.searchParams.get('kind');
+  const requestedKind: CallContentKind | null = rawKind === 'transcript' || rawKind === 'recording' || rawKind === 'summary'
+    ? rawKind
+    : null;
+  let query = supabase
+    .from('activities')
+    .select('id,external_id,account_phone,occurred_at')
+    .eq('source', 'quo')
+    .eq('event_type', 'call.completed')
+    .in('account_phone', [...scope.phones])
+    .order('occurred_at', { ascending: false })
+    .order('id', { ascending: false })
+    .range(offset, offset + scanLimit - 1);
+  if (requestedCallId) query = query.eq('external_id', requestedCallId);
+  const callsResult = await query;
+  if (callsResult.error) throw callsResult.error;
+  const calls = callsResult.data ?? [];
+  const activityIds = calls.map((call) => call.id);
+  if (activityIds.length === 0) return { calls: [], nextOffset: null };
+  const [transcriptsResult, recordingsResult, summariesResult] = await Promise.all([
+    supabase.from('activity_call_transcripts')
+      .select('activity_id,status,attempt_count,next_retry_at')
+      .eq('workspace_key', WORKSPACE_KEY).in('activity_id', activityIds),
+    supabase.from('activity_call_recordings')
+      .select('activity_id,status,attempt_count,next_retry_at')
+      .eq('workspace_key', WORKSPACE_KEY).in('activity_id', activityIds),
+    supabase.from('activity_call_summaries')
+      .select('activity_id,status,attempt_count,next_retry_at')
+      .eq('workspace_key', WORKSPACE_KEY).in('activity_id', activityIds),
+  ]);
+  if (transcriptsResult.error) throw transcriptsResult.error;
+  if (recordingsResult.error) throw recordingsResult.error;
+  if (summariesResult.error) throw summariesResult.error;
+  const asMap = (rows: Array<Record<string, unknown>>) => new Map(
+    rows.map((row) => [Number(row.activity_id), row]),
+  );
+  const transcripts = asMap(transcriptsResult.data ?? []);
+  const recordings = asMap(recordingsResult.data ?? []);
+  const summaries = asMap(summariesResult.data ?? []);
+  const now = Date.now();
+  const dueCalls = calls.flatMap((call) => {
+    const artifacts = {
+      transcript: callContentState(transcripts.get(Number(call.id))),
+      recording: callContentState(recordings.get(Number(call.id))),
+      summary: callContentState(summaries.get(Number(call.id))),
+    };
+    const needed = (Object.entries(artifacts) as Array<[CallContentKind, CallContentState]>)
+      .filter(([, state]) => contentIsDue(state, now))
+      .map(([kind]) => kind);
+    const selectedNeeded = requestedKind ? needed.filter((kind) => kind === requestedKind) : needed;
+    return selectedNeeded.length > 0 ? [{ ...call, artifacts, needed: selectedNeeded }] : [];
+  }).slice(0, limit);
+  return {
+    calls: dueCalls,
+    nextOffset: !requestedCallId && calls.length === scanLimit ? offset + scanLimit : null,
+  };
+}
+
+function retryStatus(value: unknown): RetryableStatus | null {
+  return value === 'pending' || value === 'unavailable' || value === 'failed' ? value : null;
+}
+
+async function storeInternalCallContent(
+  supabase: SupabaseClient,
+  body: Record<string, unknown>,
+  forcedKind?: CallContentKind,
+): Promise<Response> {
+  const kind = forcedKind ?? body.kind;
+  if (kind !== 'transcript' && kind !== 'recording' && kind !== 'summary') {
+    return response({ error: 'A valid call-content kind is required' }, 400);
+  }
+  const callId = cleanString(body.callId, 200);
+  if (!callId || !/^AC[A-Za-z0-9_-]+$/.test(callId)) {
+    return response({ error: 'A valid call id is required' }, 400);
+  }
+  const scope = await activeScope(supabase);
+  const activity = await findScopedCallActivity(supabase, scope, callId);
+  if (!activity) return response({ ignored: true, reason: 'call-out-of-scope' });
+
+  const status = retryStatus(body.status);
+  if (status) {
+    const reason = cleanString(body.reason, 1000) ?? `Quo ${kind} is not available yet.`;
+    const rawHttpStatus = Number(body.httpStatus);
+    const httpStatus = Number.isInteger(rawHttpStatus) && rawHttpStatus >= 100 && rawHttpStatus <= 599
+      ? rawHttpStatus
+      : null;
+    const rawNextRetryAt = cleanString(body.nextRetryAt, 80);
+    const nextRetryAt = rawNextRetryAt && Number.isFinite(Date.parse(rawNextRetryAt))
+      ? rawNextRetryAt
+      : new Date(Date.now() + 6 * 60 * 60_000).toISOString();
+    const storedStatus = await storeContentStatus(
+      supabase, activity.id, callId, kind, status, reason, httpStatus, nextRetryAt,
+    );
+    return response({ stored: true, status: storedStatus, activityId: activity.id });
+  }
+
+  if (kind === 'transcript') {
+    const transcript = transcriptInput({
+      id: body.transcriptId ?? `internal-${callId}`,
+      type: 'call.transcript.completed',
+      data: { object: body.data },
+    });
+    if (!transcript) return response({ error: 'Invalid transcript data' }, 400);
+    await storeTranscript(supabase, activity.id, transcript);
+  } else if (kind === 'recording') {
+    const raw = body.data;
+    const data = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const recording = recordingInput({
+      type: 'call.recording.completed',
+      data: { object: {
+        ...data,
+        id: callId,
+        media: Array.isArray(raw)
+          ? raw
+          : Array.isArray(data.media)
+            ? data.media
+            : Array.isArray(data.recordings)
+              ? data.recordings
+              : [],
+      } },
+    });
+    if (!recording) return response({ error: 'Invalid recording data' }, 400);
+    await storeRecording(supabase, activity.id, recording);
+  } else {
+    const raw = body.data;
+    const data = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const summary = summaryInput({
+      type: 'call.summary.completed',
+      data: { object: { ...data, callId } },
+    });
+    if (!summary) return response({ error: 'Invalid summary data' }, 400);
+    await storeSummary(supabase, activity.id, summary);
+  }
+  return response({ stored: true, status: 'available', activityId: activity.id });
+}
+
 async function handleInternal(req: Request, supabase: SupabaseClient, action: string): Promise<Response> {
   if (!authorizedInternal(req)) return response({ error: 'Unauthorized' }, 401);
   if (req.method === 'GET' && action === 'status') {
@@ -602,31 +1099,74 @@ async function handleInternal(req: Request, supabase: SupabaseClient, action: st
     });
   }
 
-  if (req.method === 'GET' && action === 'transcript-candidates') {
-    const scope = await activeScope(supabase);
-    if (scope.phones.size === 0) return response({ calls: [] });
-    const [callsResult, transcriptsResult] = await Promise.all([
-      supabase
-        .from('activities')
-        .select('id,external_id,account_phone,occurred_at')
-        .eq('source', 'quo')
-        .eq('event_type', 'call.completed')
-        .in('account_phone', [...scope.phones])
-        .gte('occurred_at', new Date(Date.now() - 30 * 24 * 60 * 60_000).toISOString())
-        .order('occurred_at', { ascending: false })
-        .limit(1000),
-      supabase
-        .from('activity_call_transcripts')
-        .select('activity_id')
-        .eq('workspace_key', 'ottawa-painters'),
-    ]);
-    if (callsResult.error) throw callsResult.error;
-    if (transcriptsResult.error) throw transcriptsResult.error;
-    const completed = new Set((transcriptsResult.data ?? []).map((row) => row.activity_id));
+/** Rows the Quo Metrics export could stand up as events but not fill in.
+ *
+ * The export carries delivery records — who, when, status — and no message
+ * body, so a webhook outage recovered through it leaves the text missing.
+ * These rows are addressable by counterparty and timestamp, which is what the
+ * Quo messages API needs. */
+const QUO_MESSAGE_PLACEHOLDER = 'Message content unavailable from Quo Metrics export';
+
+async function quoMessageContentCandidates(supabase: SupabaseClient, url: URL) {
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? '100'), 1), 200);
+  const { data, error } = await supabase
+    .from('activities')
+    .select('id,external_id,direction,from_phone,to_phones,occurred_at')
+    .eq('source', 'quo')
+    .eq('preview', QUO_MESSAGE_PLACEHOLDER)
+    .order('occurred_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    externalId: row.external_id,
+    direction: row.direction,
+    // The counterparty is whichever end is not our own line.
+    counterparty: row.direction === 'inbound'
+      ? row.from_phone
+      : (Array.isArray(row.to_phones) ? row.to_phones[0] : null),
+    line: row.direction === 'inbound'
+      ? (Array.isArray(row.to_phones) ? row.to_phones[0] : null)
+      : row.from_phone,
+    occurredAt: row.occurred_at,
+  })).filter((row) => row.counterparty && row.line);
+}
+
+/** Write a recovered body back over its placeholder. */
+async function storeQuoMessageContent(supabase: SupabaseClient, body: Record<string, unknown>) {
+  const id = Number(body.id);
+  const text = typeof body.text === 'string' ? body.text : '';
+  if (!Number.isSafeInteger(id) || id <= 0 || text.trim() === '') {
+    return response({ error: 'Invalid Quo message content payload' }, 400);
+  }
+  const { error } = await supabase
+    .from('activities')
+    .update({ preview: text, body_text: text })
+    .eq('id', id)
+    .eq('preview', QUO_MESSAGE_PLACEHOLDER);
+  if (error) throw error;
+  return response({ ok: true, id });
+}
+
+  if (req.method === 'GET' && action === 'message-content-candidates') {
+    return response({ messages: await quoMessageContentCandidates(supabase, new URL(req.url)) });
+  }
+
+  if (req.method === 'POST' && action === 'message-content') {
+    const body: unknown = await req.json().catch(() => null);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return response({ error: 'Invalid Quo message content payload' }, 400);
+    }
+    return await storeQuoMessageContent(supabase, body as Record<string, unknown>);
+  }
+
+  if (req.method === 'GET' && (action === 'transcript-candidates' || action === 'call-content-candidates')) {
+    const candidates = await callContentCandidates(supabase, new URL(req.url));
     return response({
-      calls: (callsResult.data ?? [])
-        .filter((call) => !completed.has(call.id))
-        .slice(0, 100),
+      calls: action === 'transcript-candidates'
+        ? candidates.calls.filter((call) => Array.isArray(call.needed) && call.needed.includes('transcript'))
+        : candidates.calls,
+      nextOffset: candidates.nextOffset,
     });
   }
 
@@ -651,44 +1191,36 @@ async function handleInternal(req: Request, supabase: SupabaseClient, action: st
     return response({ imported: importedActivities });
   }
 
-  if (req.method === 'POST' && action === 'transcript') {
+  if (req.method === 'POST' && action === 'metrics-reconcile') {
+    const body: unknown = await req.json().catch(() => null);
+    if (!validMetricImportBody(body)) return response({ error: 'Invalid Quo Metrics batch' }, 400);
+    const scope = await activeScope(supabase);
+    const outsideScope = body.rows.find((row) => !scope.phones.has(row.accountPhone));
+    if (outsideScope) {
+      return response({ error: `Metrics row ${outsideScope.sourceRowNumber} is outside the selected Quo phone line` }, 409);
+    }
+    const { data, error } = await supabase.rpc('ingest_quo_metric_activity_rows', {
+      p_workspace_key: WORKSPACE_KEY,
+      p_source_file: body.sourceFile,
+      p_source_file_sha256: body.sourceFileSha256,
+      p_rows: body.rows,
+    });
+    if (error) throw error;
+    const { error: runError } = await supabase.from('quo_import_runs').upsert(body.run, { onConflict: 'id' });
+    if (runError) throw runError;
+    return response({ reconciled: data });
+  }
+
+  if (req.method === 'POST' && (action === 'transcript' || action === 'call-content')) {
     const body: unknown = await req.json().catch(() => null);
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
-      return response({ error: 'Invalid Quo transcript payload' }, 400);
+      return response({ error: 'Invalid Quo call-content payload' }, 400);
     }
-    const object = body as Record<string, unknown>;
-    const callId = cleanString(object.callId, 200);
-    if (!callId) return response({ error: 'A call id is required' }, 400);
-    const scope = await activeScope(supabase);
-    const activity = await findScopedCallActivity(supabase, scope, callId);
-    if (!activity) return response({ ignored: true, reason: 'call-out-of-scope' });
-    if (object.status === 'unavailable') {
-      const reason = cleanString(object.reason, 1000) ?? 'Quo did not provide a transcript for this call.';
-      const now = new Date().toISOString();
-      const { error } = await supabase.from('activity_call_transcripts').upsert({
-        activity_id: activity.id,
-        workspace_key: 'ottawa-painters',
-        provider: 'quo',
-        provider_call_id: callId,
-        provider_transcript_id: null,
-        status: 'unavailable',
-        dialogue: [],
-        transcript_text: null,
-        unavailable_reason: reason,
-        fetched_at: now,
-        updated_at: now,
-      }, { onConflict: 'activity_id' });
-      if (error) throw error;
-      return response({ stored: true, status: 'unavailable', activityId: activity.id });
-    }
-    const transcript = transcriptInput({
-      id: object.transcriptId ?? `internal-${callId}`,
-      type: 'call.transcript.completed',
-      data: { object: object.data },
-    });
-    if (!transcript) return response({ error: 'Invalid transcript data' }, 400);
-    await storeTranscript(supabase, activity.id, transcript);
-    return response({ stored: true, status: 'available', activityId: activity.id });
+    return await storeInternalCallContent(
+      supabase,
+      body as Record<string, unknown>,
+      action === 'transcript' ? 'transcript' : undefined,
+    );
   }
 
   if (req.method === 'POST' && action === 'enrich-contacts') {
@@ -727,7 +1259,12 @@ function webhookActivity(payload: Record<string, unknown>, scope: ActiveScope): 
   const accountPhone = isCall
     ? phoneNumberId ? scope.phoneById.get(phoneNumberId) ?? null : null
     : direction === 'inbound' ? to[0] ?? null : from;
-  const actorPhone = isCall ? participants[0] ?? null : direction === 'inbound' ? from : to[0] ?? null;
+  const externalParticipants = isCall
+    ? participants.filter((phone) => phone !== accountPhone && !scope.phones.has(phone))
+    : [];
+  const actorPhone = isCall
+    ? externalParticipants[0] ?? participants.find((phone) => phone !== accountPhone) ?? null
+    : direction === 'inbound' ? from : to[0] ?? null;
   const occurredAt = cleanString(
     isCall ? item.completedAt ?? item.updatedAt ?? item.createdAt : item.createdAt,
     80,
@@ -735,7 +1272,14 @@ function webhookActivity(payload: Record<string, unknown>, scope: ActiveScope): 
   if (!externalId || !accountPhone || !occurredAt || !Number.isFinite(Date.parse(occurredAt))) return null;
   const text = isCall ? '' : cleanString(item.text ?? item.body, 100_000) ?? '';
   const media = !isCall && Array.isArray(item.media) ? item.media.slice(0, 50) : [];
-  const callStatus = isCall ? cleanString(item.status, 80) : null;
+  const rawCallStatus = isCall ? cleanString(item.status, 80) : null;
+  const callStatus = isCall
+    ? direction === 'inbound' && cleanString(item.answeredAt, 80)
+      ? 'answered'
+      : ['no-answer', 'no_answer', 'unanswered', 'missed'].includes((rawCallStatus ?? '').toLowerCase())
+        ? 'missed'
+        : rawCallStatus
+    : null;
   const durationSeconds = isCall ? finiteNumber(item.duration, 0, 1_000_000) : null;
   const threadId = actorPhone
     ? `quo:${phoneNumberId ?? accountPhone}:${normalizedPhone(actorPhone)}`
@@ -754,7 +1298,7 @@ function webhookActivity(payload: Record<string, unknown>, scope: ActiveScope): 
     from_email: null,
     from_phone: isCall ? direction === 'inbound' ? actorPhone : accountPhone : from,
     to_emails: [],
-    to_phones: isCall ? direction === 'inbound' ? [accountPhone] : participants : to,
+    to_phones: isCall ? direction === 'inbound' ? [accountPhone] : externalParticipants : to,
     cc_emails: [],
     subject: isCall ? `${direction === 'inbound' ? 'Incoming' : 'Outgoing'} call` : 'Text message',
     preview: isCall
@@ -770,19 +1314,30 @@ function webhookActivity(payload: Record<string, unknown>, scope: ActiveScope): 
     source_metadata: {
       quoEventId: payload.id,
       phoneNumberId,
+      quoType: isCall ? 'call' : 'message',
+      rawCallStatus,
       deliveryStatus: isCall ? null : item.status ?? null,
+      statusDetails: item.statusDetails ?? null,
       contactIds: Array.isArray(item.contactIds) ? item.contactIds.slice(0, 50) : [],
       media,
       participants,
+      createdAt: item.createdAt ?? null,
+      updatedAt: item.updatedAt ?? null,
       answeredAt: isCall ? item.answeredAt ?? null : null,
+      answeredBy: isCall ? item.answeredBy ?? null : null,
+      initiatedBy: isCall ? item.initiatedBy ?? null : null,
       completedAt: isCall ? item.completedAt ?? null : null,
+      callRoute: isCall ? item.callRoute ?? null : null,
+      forwardedFrom: isCall ? item.forwardedFrom ?? null : null,
+      forwardedTo: isCall ? item.forwardedTo ?? null : null,
+      aiHandled: isCall ? item.aiHandled ?? null : null,
       userId: isCall ? item.userId ?? null : null,
     },
     updated_at: new Date().toISOString(),
   };
 }
 
-Deno.serve(async (req: Request) => {
+export async function handleRequest(req: Request): Promise<Response> {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     if (!supabaseUrl) throw new Error('Supabase URL is unavailable');
@@ -796,7 +1351,8 @@ Deno.serve(async (req: Request) => {
 
     const rawBody = await req.text();
     if (!rawBody || rawBody.length > 1_000_000) return response({ error: 'Invalid webhook body' }, 400);
-    if (!(await verifyQuoSignature(rawBody, req.headers.get('openphone-signature')))) {
+    const signature = req.headers.get('openphone-signature') ?? req.headers.get('quo-signature');
+    if (!(await verifyQuoSignature(rawBody, signature))) {
       return response({ error: 'Invalid webhook signature' }, 401);
     }
     const payload = JSON.parse(rawBody) as Record<string, unknown>;
@@ -808,13 +1364,22 @@ Deno.serve(async (req: Request) => {
 
     const scope = await activeScope(supabase);
     const transcript = transcriptInput(payload);
-    const activity = transcript === null ? webhookActivity(payload, scope) : null;
-    const transcriptActivity = transcript === null
+    const recording = transcript === null ? recordingInput(payload) : null;
+    const summary = transcript === null && recording === null ? summaryInput(payload) : null;
+    const callContent: { kind: CallContentKind; value: TranscriptInput | RecordingInput | SummaryInput } | null = transcript
+      ? { kind: 'transcript', value: transcript }
+      : recording
+        ? { kind: 'recording', value: recording }
+        : summary
+          ? { kind: 'summary', value: summary }
+          : null;
+    const activity = callContent === null ? webhookActivity(payload, scope) : null;
+    const callContentActivity = callContent === null
       ? null
-      : await findScopedCallActivity(supabase, scope, transcript.callId);
+      : await findScopedCallActivity(supabase, scope, callContent.value.callId);
     if (
-      (transcript !== null && transcriptActivity === null) ||
-      (transcript === null && (activity === null || !activityIsInScope(activity, scope)))
+      (callContent !== null && callContentActivity === null) ||
+      (callContent === null && (activity === null || !activityIsInScope(activity, scope)))
     ) {
       // Do not retain payloads for phone lines the workspace did not select.
       return response({ ok: true, ignored: true });
@@ -851,8 +1416,12 @@ Deno.serve(async (req: Request) => {
     if (eventError) throw eventError;
 
     try {
-      if (transcript !== null && transcriptActivity !== null) {
-        await storeTranscript(supabase, transcriptActivity.id, transcript);
+      if (callContent?.kind === 'transcript' && callContentActivity !== null) {
+        await storeTranscript(supabase, callContentActivity.id, callContent.value as TranscriptInput);
+      } else if (callContent?.kind === 'recording' && callContentActivity !== null) {
+        await storeRecording(supabase, callContentActivity.id, callContent.value as RecordingInput);
+      } else if (callContent?.kind === 'summary' && callContentActivity !== null) {
+        await storeSummary(supabase, callContentActivity.id, callContent.value as SummaryInput);
       } else if (activity !== null) {
         await upsertActivities(supabase, [activity]);
       }
@@ -877,4 +1446,6 @@ Deno.serve(async (req: Request) => {
     console.error(error);
     return response({ error: authorizedInternal(req) ? errorMessage(error) : 'Unexpected function error' }, 500);
   }
-});
+}
+
+if (import.meta.main) Deno.serve((req: Request) => handleRequest(req));
