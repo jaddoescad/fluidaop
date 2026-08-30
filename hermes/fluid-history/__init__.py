@@ -41,7 +41,7 @@ class FluidHistoryTokenProvider(DashboardAuthProvider):
         return TokenPrincipal(
             principal="fluid-ottawa-painters",
             provider=self.name,
-            scopes=("fluid:history",),
+            scopes=("fluid:history", "fluid:manage"),
         )
 
     def start_login(self, *, redirect_uri: str) -> LoginStart:

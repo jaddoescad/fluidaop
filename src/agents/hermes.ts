@@ -161,6 +161,29 @@ export async function loadHermesAgents(): Promise<HermesAgentDefinition[]> {
   return schedules.filter((schedule) => schedule.runtimeMode === 'agent');
 }
 
+export async function changeHermesAgent(
+  agent: Pick<HermesAgentDefinition, 'id' | 'profile'>,
+  action: 'pause' | 'resume' | 'delete',
+): Promise<void> {
+  const endpoint = action === 'delete'
+    ? `/api/hermes/agents/${encodeURIComponent(agent.id)}?profile=${encodeURIComponent(agent.profile)}`
+    : `/api/hermes/agents/${encodeURIComponent(agent.id)}/${action}`;
+  const response = await fetch(endpoint, {
+    method: action === 'delete' ? 'DELETE' : 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: action === 'delete' ? undefined : JSON.stringify({ profile: agent.profile }),
+  });
+  const payload = (await response.json().catch(() => null)) as { detail?: unknown; error?: unknown } | null;
+  if (!response.ok) {
+    const detail = typeof payload?.detail === 'string'
+      ? payload.detail
+      : typeof payload?.error === 'string'
+        ? payload.error
+        : `Hermes ${action} returned HTTP ${response.status}`;
+    throw new Error(detail);
+  }
+}
+
 export async function loadHermesSkills(): Promise<HermesSkill[]> {
   const response = await fetch('/api/hermes/skills', { headers: { Accept: 'application/json' } });
   const payload = (await response.json().catch(() => null)) as HermesSkillsPayload | { error?: unknown } | null;

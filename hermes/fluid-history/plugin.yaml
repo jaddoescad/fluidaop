@@ -1,9 +1,9 @@
 name: fluid-history
-version: 1.3.1
-description: Read-only Hermes automation, skill, and run metadata for the Fluid operations dashboard.
+version: 1.4.0
+description: Scoped Hermes automation metadata and pause, resume, or delete controls for Fluid.
 author: Ottawa Painters
 kind: standalone
 requires_env:
   - name: HERMES_FLUID_HISTORY_SECRET
-    description: Dedicated bearer secret accepted only by the Fluid metadata endpoints.
+    description: Dedicated bearer secret accepted only by the Fluid metadata and bounded management endpoints.
     password: true

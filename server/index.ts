@@ -423,6 +423,37 @@ async function hermesMetadataJson(path: 'agents' | 'skills'): Promise<Record<str
   return payload as Record<string, unknown>;
 }
 
+type HermesAgentAction = 'pause' | 'resume' | 'delete';
+
+async function mutateHermesAgent(
+  action: HermesAgentAction,
+  jobId: string,
+  profile: string,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${hermesBaseUrl}/api/plugins/fluid-history/actions`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${hermesHistoryToken()}`,
+    },
+    body: JSON.stringify({ action, jobId, profile }),
+    signal: AbortSignal.timeout(8_000),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      && typeof (payload as { detail?: unknown }).detail === 'string'
+      ? (payload as { detail: string }).detail
+      : `Hermes ${action} returned HTTP ${response.status}`;
+    throw new HttpError(response.status === 404 ? 404 : 502, detail);
+  }
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new HttpError(502, `Hermes returned an invalid ${action} response`);
+  }
+  return payload as Record<string, unknown>;
+}
+
 function encryptToken(token: string): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey(), iv);
@@ -3085,6 +3116,34 @@ app.get('/api/hermes/schedules', async (_req, res, next) => {
     res.json(await hermesMetadataJson('agents'));
   } catch (error) {
     next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes schedules: ${errorMessage(error)}`));
+  }
+});
+
+app.post('/api/hermes/agents/:agentId/:action', async (req, res, next) => {
+  try {
+    const { agentId, action } = req.params;
+    const profile = typeof req.body?.profile === 'string' ? req.body.profile : 'default';
+    if ((action !== 'pause' && action !== 'resume')
+      || !/^[A-Za-z0-9_-]{1,128}$/.test(agentId)
+      || !/^[A-Za-z0-9_-]{1,64}$/.test(profile)) {
+      throw new HttpError(400, 'Invalid Hermes job reference');
+    }
+    res.json(await mutateHermesAgent(action as 'pause' | 'resume', agentId, profile));
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not update Hermes agent: ${errorMessage(error)}`));
+  }
+});
+
+app.delete('/api/hermes/agents/:agentId', async (req, res, next) => {
+  try {
+    const agentId = req.params.agentId;
+    const profile = typeof req.query.profile === 'string' ? req.query.profile : 'default';
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(agentId) || !/^[A-Za-z0-9_-]{1,64}$/.test(profile)) {
+      throw new HttpError(400, 'Invalid Hermes job reference');
+    }
+    res.json(await mutateHermesAgent('delete', agentId, profile));
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not delete Hermes agent: ${errorMessage(error)}`));
   }
 });
 

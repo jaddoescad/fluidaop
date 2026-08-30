@@ -1,8 +1,9 @@
-"""Scoped, read-only Hermes automation API for Fluid.
+"""Scoped Hermes automation management API for Fluid.
 
 Mounted by Hermes at ``/api/plugins/fluid-history``. Responses intentionally
-contain roster and run metadata only: no prompts, scripts, skill bodies, email
-content, invoice content, or session messages leave Hermes.
+contain roster and run metadata only, while the write endpoint permits only
+pause, resume, and delete for an exact cron job. No prompts, scripts, skill
+bodies, email content, invoice content, or session messages leave Hermes.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from hermes_cli.dashboard_auth.base import (
@@ -45,8 +47,10 @@ ROUTE_PATHS = (
     "/api/plugins/fluid-history/agents",
     "/api/plugins/fluid-history/runs",
     "/api/plugins/fluid-history/skills",
+    "/api/plugins/fluid-history/actions",
 )
 REQUIRED_SCOPE = "fluid:history"
+MANAGE_SCOPE = "fluid:manage"
 MIN_SECRET_CHARS = 43
 
 AGENT_JOB_NAME_PARTS = {
@@ -83,7 +87,7 @@ class FluidHistoryTokenProvider(DashboardAuthProvider):
         return TokenPrincipal(
             principal="fluid-ottawa-painters",
             provider=self.name,
-            scopes=(REQUIRED_SCOPE,),
+            scopes=(REQUIRED_SCOPE, MANAGE_SCOPE),
         )
 
     def start_login(self, *, redirect_uri: str) -> LoginStart:
@@ -188,6 +192,52 @@ def _agents_payload() -> Dict[str, Any]:
     ]
     agents.sort(key=lambda agent: (not agent["enabled"], agent["name"].casefold()))
     return {"agents": agents, "fetchedAt": datetime.now(timezone.utc).isoformat()}
+
+
+class AgentAction(BaseModel):
+    action: str
+    jobId: str
+    profile: str = "default"
+
+
+def _validate_job_ref(job_id: str, profile: str) -> tuple[str, str]:
+    if not job_id or len(job_id) > 128 or not all(char.isalnum() or char in "-_" for char in job_id):
+        raise HTTPException(status_code=400, detail="Invalid Hermes job id")
+    if not profile or len(profile) > 64 or not all(char.isalnum() or char in "-_" for char in profile):
+        raise HTTPException(status_code=400, detail="Invalid Hermes profile")
+    return job_id, profile
+
+
+def _apply_agent_action(body: AgentAction) -> Dict[str, Any]:
+    from hermes_cli import web_server as ws
+
+    job_id, profile = _validate_job_ref(body.jobId, body.profile)
+    matching = [
+        job for job in ws._list_cron_jobs_sync("all")
+        if str(job.get("id") or "") == job_id
+    ]
+    if len(matching) != 1:
+        raise HTTPException(status_code=404, detail="Hermes job not found")
+    actual_profile = str(matching[0].get("profile") or matching[0].get("profile_name") or "default")
+    if not hmac.compare_digest(actual_profile, profile):
+        raise HTTPException(status_code=409, detail="Hermes job profile changed; refresh and retry")
+
+    if body.action == "pause":
+        result = ws._pause_cron_job_sync(job_id, profile)
+    elif body.action == "resume":
+        result = ws._resume_cron_job_sync(job_id, profile)
+    elif body.action == "delete":
+        result = ws._delete_cron_job_sync(job_id, profile)
+    else:
+        raise HTTPException(status_code=400, detail="Action must be pause, resume, or delete")
+    return {
+        "ok": True,
+        "action": body.action,
+        "jobId": job_id,
+        "profile": profile,
+        "result": result,
+        "changedAt": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _skills_payload() -> Dict[str, Any]:
@@ -420,3 +470,12 @@ async def runs(
     if job is not None and (not job or len(job) > 128 or not all(char.isalnum() or char in "-_" for char in job)):
         raise HTTPException(status_code=400, detail="Invalid Hermes job id")
     return await run_in_threadpool(_history_payload, agent, job, limit)
+
+
+@router.post("/actions")
+async def actions(request: Request, body: AgentAction) -> Dict[str, Any]:
+    principal = getattr(request.state, "token_principal", None)
+    scopes = tuple(getattr(principal, "scopes", ())) if principal is not None else ()
+    if MANAGE_SCOPE not in scopes:
+        raise HTTPException(status_code=403, detail="Missing fluid:manage scope")
+    return await run_in_threadpool(_apply_agent_action, body)
