@@ -1,0 +1,164 @@
+/* One conversation, wherever it is shown.
+ *
+ * The lead workspace and the signal popup used to render threads separately,
+ * with two accents, two greys and two corner radii that had drifted apart by
+ * hand. Both now render these classes, so the two views cannot disagree.
+ *
+ * Tokens are local to the thread so a host can retune it without forking the
+ * layout — only the values below should ever differ between views. */
+.cv-thread {
+  --cv-surface: #1a1b21;
+  --cv-line: #26272f;
+  --cv-ink: #edeef2;
+  --cv-ink-2: #b7bac3;
+  --cv-faint: #7e838f;
+  --cv-accent: #9f9af2;
+  --cv-radius: 12px;
+  --cv-tail: 4px;
+  --cv-max: 86%;
+
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- day divider ---------- */
+
+.cv-day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+  color: var(--cv-faint);
+  font-size: 11px;
+}
+
+.cv-day::before,
+.cv-day::after {
+  height: 1px;
+  flex: 1;
+  background: var(--cv-line);
+  content: '';
+}
+
+/* ---------- a message ---------- */
+
+.cv-turn {
+  max-width: var(--cv-max);
+  min-width: 0;
+}
+
+.cv-them { align-self: flex-start; }
+.cv-you { align-self: flex-end; }
+.cv-none { align-self: stretch; max-width: 100%; }
+
+.cv-bubble {
+  padding: 10px 13px;
+  border: 1px solid var(--cv-line);
+  border-radius: var(--cv-radius);
+  background: var(--cv-surface);
+}
+
+.cv-them .cv-bubble { border-bottom-left-radius: var(--cv-tail); }
+
+.cv-you .cv-bubble {
+  border-color: color-mix(in srgb, var(--cv-accent) 34%, var(--cv-line));
+  border-bottom-right-radius: var(--cv-tail);
+  background: color-mix(in srgb, var(--cv-accent) 11%, var(--cv-surface));
+}
+
+/* consecutive messages from one side: no repeated header, tighter, square top */
+.cv-grouped { margin-top: -6px; }
+.cv-them.cv-grouped .cv-bubble { border-top-left-radius: var(--cv-tail); }
+.cv-you.cv-grouped .cv-bubble { border-top-right-radius: var(--cv-tail); }
+
+/* the one message the surrounding view is about */
+.cv-marked .cv-bubble { box-shadow: 0 0 0 1px var(--cv-accent); }
+
+.cv-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.cv-sender {
+  color: var(--cv-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.cv-auto,
+.cv-marker {
+  font-size: 10px;
+  color: var(--cv-faint);
+}
+
+.cv-marker { color: var(--cv-accent); }
+
+.cv-time {
+  margin-left: auto;
+  color: var(--cv-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cv-subject {
+  margin: 0 0 4px;
+  color: var(--cv-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cv-body {
+  color: var(--cv-ink);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cv-body p { margin: 0; }
+.cv-body p + p { margin-top: 8px; }
+
+/* ---------- an event ---------- */
+
+.cv-event {
+  align-self: center;
+  width: 100%;
+  max-width: var(--cv-max);
+  padding: 8px 13px;
+  border: 1px dashed var(--cv-line);
+  border-radius: 999px;
+  background: transparent;
+}
+
+.cv-event-rich {
+  border-style: solid;
+  border-radius: var(--cv-radius);
+  background: color-mix(in srgb, var(--cv-surface) 70%, transparent);
+}
+
+.cv-event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cv-ink-2);
+  font-size: 12px;
+}
+
+.cv-event-head strong { color: var(--cv-ink); font-weight: 600; }
+.cv-event-head svg { width: 14px; height: 14px; flex: none; color: var(--cv-faint); }
+.cv-you .cv-event-head svg { color: var(--cv-accent); }
+.cv-event-detail { color: var(--cv-faint); }
+
+.cv-event-time {
+  margin-left: auto;
+  color: var(--cv-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 620px) {
+  .cv-thread { --cv-max: 96%; }
+}

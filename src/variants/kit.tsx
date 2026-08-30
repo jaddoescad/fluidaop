@@ -1,5 +1,6 @@
 import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CHANNEL_LABEL } from '../channels';
+import { ConversationTurn } from '../components/Conversation';
 import { agentFor } from '../engine';
 import { HermesStatus } from '../agents/hermes';
 import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, MIN } from '../time';
@@ -2084,28 +2085,16 @@ export function RunPopup({
     const cont = lastSpeaker === 'you';
     lastSpeaker = 'you';
     return (
-      <div
-        className={`fd-turn fd-you${cont ? ' fd-cont' : ''}`}
+      <ConversationTurn
         key={key}
-        data-history-id={signal?.id}
+        side="you"
+        sender="You"
+        grouped={cont}
+        time={signal ? fmtAge(signal.at, s.now) : undefined}
+        historyId={signal?.id}
       >
-        <span className="fd-avatar">{!cont && <Avatar name="Jad" />}</span>
-        <div className="fd-main">
-          {!cont && (
-            <div className="fd-name">
-              <b>You</b>
-              {signal && (
-                <span className="fd-meta fd-meta-signal">
-                  <SourceTag channel={signal.channel} />
-                  <DirectionTag direction="outbound" />
-                  <span>· {fmtAge(signal.at, s.now)}</span>
-                </span>
-              )}
-            </div>
-          )}
-          <div className="fd-bubble"><div className="fd-text">{t}</div></div>
-        </div>
-      </div>
+        {t}
+      </ConversationTurn>
     );
   };
 
@@ -2120,23 +2109,18 @@ export function RunPopup({
     lastSpeaker = 'them';
     lastSigMeta = { channel: sig.channel, at: sig.at };
     return (
-      <div className={`fd-turn fd-them${cont ? ' fd-cont' : ''}`} key={sig.id} data-history-id={sig.id}>
-        <span className="fd-avatar">{!cont && <Avatar name={p?.name ?? '—'} />}</span>
-        <div className="fd-main">
-          {!cont && (
-            <div className="fd-name">
-              <b>{p?.name ?? '—'}</b>
-              <span className="fd-meta fd-meta-signal">
-                <SourceTag channel={sig.channel} />
-                <DirectionTag direction={sig.direction ?? 'inbound'} />
-                <span>· {fmtAge(sig.at, s.now)}</span>
-              </span>
-              {isTrig && <span className="fd-trig">{subject.type === 'signal' ? 'this one' : 'triggered this'}</span>}
-            </div>
-          )}
-          <div className="fd-bubble"><div className="fd-text">{sig.text}</div></div>
-        </div>
-      </div>
+      <ConversationTurn
+        key={sig.id}
+        side="them"
+        sender={p?.name ?? '—'}
+        grouped={cont}
+        time={fmtAge(sig.at, s.now)}
+        marker={isTrig ? (subject.type === 'signal' ? 'this one' : 'triggered this') : undefined}
+        highlighted={isTrig}
+        historyId={sig.id}
+      >
+        {sig.text}
+      </ConversationTurn>
     );
   };
 
@@ -2261,7 +2245,7 @@ export function RunPopup({
         </header>
 
         <div
-          className={`fc-body${subject.type === 'signal' && ctx.length === 0 ? ' fc-body-signal-pending' : ''}`}
+          className={`fc-body cv-thread${subject.type === 'signal' && ctx.length === 0 ? ' fc-body-signal-pending' : ''}`}
           ref={scrollRef}
         >
           {day('d-hist', `History with ${first}`)}
@@ -2274,24 +2258,17 @@ export function RunPopup({
           {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
           {subject.type === 'signal' && selectedSignal && (
             <>
-              <article
-                className={`fd-turn fd-sel ${selectedSignal.direction === 'outbound' ? 'fd-you' : 'fd-them'}`}
-                data-history-id={selectedSignal.id}
-              >
-                <span className="fd-avatar">
-                  <Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : p?.name ?? '—'} />
-                </span>
-                <div className="fd-main">
-                <div className="fd-name">
-                  <b>{selectedSignal.direction === 'outbound' ? 'You' : p?.name ?? '—'}</b>
-                  <span className="fd-meta fd-meta-signal">
-                    <SourceTag channel={selectedSignal.channel} />
-                    <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
-                    <span>· {fmtAge(selectedSignal.at, s.now)}</span>
-                  </span>
-                  <span className="fd-trig">this one</span>
-                </div>
-                {(selectedSignal.topic || selectedSignal.urgency) && (
+              <ConversationTurn
+                side={selectedSignal.direction === 'outbound' ? 'you' : 'them'}
+                sender={selectedSignal.direction === 'outbound' ? 'You' : p?.name ?? '—'}
+                time={fmtAge(selectedSignal.at, s.now)}
+                marker="this one"
+                highlighted
+                historyId={selectedSignal.id}
+                subject={selectedSignal.channel === 'email'
+                  ? (selectedSignal.title?.trim() || '(no subject)')
+                  : null}
+                tags={(selectedSignal.topic || selectedSignal.urgency) ? (
                   <div className="fd-sel-tags" aria-label="Signal labels">
                     {selectedSignal.topic && (
                       <span className="fl-plabel canonical-label" style={canonicalLabelStyle(selectedSignal.topicColor)}>
@@ -2304,11 +2281,9 @@ export function RunPopup({
                       </span>
                     )}
                   </div>
-                )}
-                {selectedSignal.channel === 'email' && (
-                  <h3 className="fd-sel-subject">{selectedSignal.title?.trim() || '(no subject)'}</h3>
-                )}
-                <div className="fd-bubble fd-sel-text">
+                ) : null}
+              >
+                <div className="fd-sel-text">
                   <p className="fd-sel-text-reply">{selectedBody?.reply ?? selectedSignal.text}</p>
                   {selectedBody?.quoted && (
                     <details className="fd-sel-quote">
@@ -2422,8 +2397,7 @@ export function RunPopup({
                     )}
                   </div>
                 )}
-                </div>
-              </article>
+              </ConversationTurn>
             </>
           )}
           {day('d-agent', subject.type === 'signal' ? 'Summary & next step' : agent ? `${agent} on “${title}”` : 'Your move')}

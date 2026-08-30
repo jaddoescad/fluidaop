@@ -1,3 +1,4 @@
+import { ConversationDay, ConversationEvent, ConversationTurn, type TurnSide } from '../components/Conversation';
 import {
   FormEvent,
   Fragment,
@@ -419,11 +420,7 @@ export function LeadWorkspace({
       lastSender = sender;
       return (
         <Fragment key={touchpoint.id}>
-          {newDay && (
-            <div className="lw-day" role="separator">
-              <span>{dayLabel(touchpoint.occurredAt)}</span>
-            </div>
-          )}
+          {newDay && <ConversationDay label={dayLabel(touchpoint.occurredAt)} />}
           {renderTouchpoint(touchpoint, grouped)}
         </Fragment>
       );
@@ -456,50 +453,45 @@ export function LeadWorkspace({
     // in one column wearing the same colour.
     // A touchpoint with no recorded direction stays full width rather than
     // claiming a side it cannot prove.
-    const side = touchpoint.direction === null ? 'is-undirected' : `is-${touchpoint.direction}`;
+    const side: TurnSide = touchpoint.direction === 'outbound'
+      ? 'you'
+      : touchpoint.direction === 'inbound' ? 'them' : 'none';
 
     // A call is something that happened, not something that was said, so it
     // reads as a timeline event rather than another speech bubble.
     if (touchpoint.channel === 'call') {
       return (
-        <div className={`lw-call-event ${side}`} key={touchpoint.id}>
-          <div className="lw-call-event-head">
-            <Icon aria-hidden="true" />
-            <strong>{title}</strong>
-            {duration && <span className="lw-call-event-dur">{duration}</span>}
-            <span className="lw-call-event-when">{clockTime(touchpoint.occurredAt)}</span>
-          </div>
+        <ConversationEvent
+          key={touchpoint.id}
+          side={touchpoint.direction === 'outbound' ? 'you' : touchpoint.direction === 'inbound' ? 'them' : 'none'}
+          icon={<Icon aria-hidden="true" />}
+          title={title}
+          detail={duration}
+          time={clockTime(touchpoint.occurredAt)}
+        >
           {renderCallEvidence(touchpoint, detail)}
-        </div>
+        </ConversationEvent>
       );
     }
 
     const who = touchpoint.direction === 'outbound' ? 'Ottawa Painters' : displayName;
 
     return (
-      <article
-        className={`fd-sel lw-signal-card ${side}${grouped ? ' is-grouped' : ''}`}
+      <ConversationTurn
         key={touchpoint.id}
+        side={side}
+        sender={who}
+        time={clockTime(touchpoint.occurredAt)}
+        automated={touchpoint.isAutomated}
+        grouped={grouped}
+        subject={touchpoint.channel === 'email' ? touchpoint.subject : null}
+        flags={review?.key === 'action' ? <span className="lw-flag lw-flag-action">draft in Actions</span> : null}
+        footer={touchpoint.evidenceKind === 'inferred'
+          ? <div className="lw-chat-badges"><span>Estimated stage</span></div>
+          : null}
       >
-        {!grouped && (
-          <div className="fd-sel-head">
-            <span className="lw-sender">{who}</span>
-            {touchpoint.isAutomated && <span className="lw-flag lw-flag-auto">automated</span>}
-            {review?.key === 'action' && <span className="lw-flag lw-flag-action">draft in Actions</span>}
-            <span className="lw-signal-when">{clockTime(touchpoint.occurredAt)}</span>
-          </div>
-        )}
-        {touchpoint.channel === 'email' && touchpoint.subject.trim() && (
-          <h3 className="fd-sel-subject">{touchpoint.subject}</h3>
-        )}
-          <p className="fd-sel-text lw-signal-main">{preview || title}</p>
-        {(touchpoint.isAutomated || touchpoint.evidenceKind === 'inferred') && (
-          <div className="lw-chat-badges">
-            {touchpoint.isAutomated && <span>Automated</span>}
-            {touchpoint.evidenceKind === 'inferred' && <span>Estimated stage</span>}
-          </div>
-        )}
-      </article>
+        {preview || title}
+      </ConversationTurn>
     );
   };
 
@@ -521,7 +513,7 @@ export function LeadWorkspace({
           </span>
         </div>
         {section.touchpoints.length > 0 && (
-          <div className="lw-chat-stage-stream">{renderStream(section.touchpoints)}</div>
+          <div className="lw-chat-stage-stream cv-thread">{renderStream(section.touchpoints)}</div>
         )}
       </section>
     );
@@ -544,7 +536,7 @@ export function LeadWorkspace({
             {` · ${priorTotal} earlier ${priorTotal === 1 ? 'communication' : 'communications'} · ${dateSpan}`}
           </span>
         </div>
-        <div className="lw-chat-stage-stream">{renderStream(priorTouchpoints)}</div>
+        <div className="lw-chat-stage-stream cv-thread">{renderStream(priorTouchpoints)}</div>
       </section>
     );
   };
