@@ -7,12 +7,10 @@ import { resolve } from 'node:path';
 const AGENT_KEY = 'case-reconciler';
 const PROMPT_VERSION = 'fluid-case-reconciler-v1';
 const DEFAULT_MODEL = 'nous/openai/gpt-5.6-luna';
-const DEFAULT_URL = 'https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-operational-context';
+const DEFAULT_URL = 'https://fskrxkiujtfuxntcrjam.supabase.co/functions/v1/fluid-operational-context';
 const API_URL = (process.env.FLUID_OPERATIONAL_CONTEXT_URL || DEFAULT_URL).replace(/\/$/, '');
 const API_SECRET = (
   process.env.FLUID_OPERATIONAL_CONTEXT_SECRET ||
-  process.env.FLUID_SIGNAL_TRIAGE_SECRET ||
-  process.env.FLUID_EMAIL_CATEGORIZER_SECRET ||
   ''
 ).trim();
 const STATE_DIR = resolve(process.env.FLUID_CASE_RECONCILER_STATE_DIR || '/opt/data/fluid/case-reconciler');

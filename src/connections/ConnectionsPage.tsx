@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
+import { ApiError, apiJson as api } from '../lib/api';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './connections.css';
@@ -23,6 +24,7 @@ interface GmailConnection {
   lastHealthyAt: string | null;
   nextCheckAt: string | null;
   error: string | null;
+  disconnectPending: boolean;
   health: ConnectionHealth;
   permissions: {
     readEmails: boolean;
@@ -58,6 +60,7 @@ interface QuoConnection {
   lastHealthyAt: string | null;
   nextCheckAt: string | null;
   error: string | null;
+  disconnectPending: boolean;
   health: ConnectionHealth;
   webhook: {
     state: 'receiving' | 'ready' | 'pending';
@@ -87,41 +90,6 @@ interface ConnectionLoadFailure {
 const INTENDED_EMAIL = 'info@paintersottawa.com';
 
 // ---------- API ----------
-
-class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) {
-    let detail = `the server answered ${res.status}`;
-    try {
-      const body: unknown = await res.json();
-      if (
-        body !== null &&
-        typeof body === 'object' &&
-        'error' in body &&
-        typeof (body as { error: unknown }).error === 'string'
-      ) {
-        detail = (body as { error: string }).error;
-      }
-    } catch {
-      // non-JSON error body — keep the status text
-    }
-    throw new ApiError(detail, res.status);
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
-}
 
 function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -277,6 +245,73 @@ function StatusPill({
 
 type Notice = { tone: 'ok' | 'danger' | 'info'; text: string; detail?: string };
 
+function DisconnectControls({
+  label,
+  pending,
+  busy,
+  onDisconnect,
+  onForgetLocally,
+  onCancel,
+}: {
+  label: string;
+  pending: boolean;
+  busy: boolean;
+  onDisconnect: () => void;
+  onForgetLocally: () => void;
+  onCancel: () => void;
+}) {
+  const [confirmForget, setConfirmForget] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, [confirmForget]);
+
+  if (confirmForget) {
+    return (
+      <div className="cn-confirm" role="alertdialog" aria-label={`Forget ${label} locally`}>
+        <p>
+          <b>Provider access may remain active.</b> Forgetting locally removes Fluid’s saved connection
+          without completing provider cleanup. Use this only after retrying disconnect.
+        </p>
+        <div className="cn-actions">
+          <button type="button" className="cn-btn cn-btn-danger" onClick={onForgetLocally} disabled={busy}>
+            {busy ? 'Forgetting…' : 'Forget locally'}
+          </button>
+          <button ref={cancelRef} type="button" className="cn-btn" onClick={() => setConfirmForget(false)} disabled={busy}>
+            Go back
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
+      <p>
+        {pending ? (
+          <>Cleanup for <b>{label}</b> is still pending. Retry provider cleanup before removing Fluid’s local record.</>
+        ) : (
+          <>Disconnect <b>{label}</b>? Fluid loses access immediately. Provider data itself is not deleted.</>
+        )}
+      </p>
+      <div className="cn-actions">
+        <button type="button" className="cn-btn cn-btn-danger" onClick={onDisconnect} disabled={busy}>
+          {busy ? (pending ? 'Retrying…' : 'Disconnecting…') : (pending ? 'Retry disconnect' : 'Disconnect')}
+        </button>
+        {pending && (
+          <button type="button" className="cn-btn" onClick={() => setConfirmForget(true)} disabled={busy}>
+            Forget locally…
+          </button>
+        )}
+        <button ref={cancelRef} type="button" className="cn-btn" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- connected account card ----------
 
 function ConnectedCard({
@@ -288,6 +323,7 @@ function ConnectedCard({
   onCheck,
   onReconnect,
   onDisconnect,
+  onForgetLocally,
   onConfirmChange,
 }: {
   c: GmailConnection;
@@ -298,13 +334,13 @@ function ConnectedCard({
   onCheck: () => void;
   onReconnect: () => void;
   onDisconnect: () => void;
+  onForgetLocally: () => void;
   onConfirmChange: (open: boolean) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
   const manageRef = useRef<HTMLButtonElement | null>(null);
   const menuItemRef = useRef<HTMLButtonElement | null>(null);
-  const cancelRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -327,10 +363,6 @@ function ConnectedCard({
       document.removeEventListener('keydown', onKey);
     };
   }, [menuOpen]);
-
-  useEffect(() => {
-    if (confirming) cancelRef.current?.focus();
-  }, [confirming]);
 
   const checking = busy || c.status === 'checking';
 
@@ -363,6 +395,12 @@ function ConnectedCard({
         </p>
       )}
 
+      {c.disconnectPending && (
+        <div className="cn-degraded" role="status">
+          <p><b>Cleanup pending.</b> Fluid could not finish revoking this Gmail connection.</p>
+        </div>
+      )}
+
       <div className="cn-capabilities" aria-label="Granted Gmail permissions">
         <span>Permissions</span>
         <strong>
@@ -372,31 +410,14 @@ function ConnectedCard({
       </div>
 
       {confirming ? (
-        <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
-          <p>
-            Disconnect <b>{c.email}</b>? Fluid loses access to this inbox immediately. Nothing in
-            Gmail itself is deleted, and you can reconnect any time.
-          </p>
-          <div className="cn-actions">
-            <button
-              type="button"
-              className="cn-btn cn-btn-danger"
-              onClick={onDisconnect}
-              disabled={busy}
-            >
-              {busy ? 'Disconnecting…' : 'Disconnect'}
-            </button>
-            <button
-              ref={cancelRef}
-              type="button"
-              className="cn-btn"
-              onClick={() => onConfirmChange(false)}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <DisconnectControls
+          label={c.email}
+          pending={c.disconnectPending}
+          busy={busy}
+          onDisconnect={onDisconnect}
+          onForgetLocally={onForgetLocally}
+          onCancel={() => onConfirmChange(false)}
+        />
       ) : (
         <div className="cn-card-foot">
           <dl className="cn-meta">
@@ -446,7 +467,7 @@ function ConnectedCard({
                       onConfirmChange(true);
                     }}
                   >
-                    Disconnect…
+                    {c.disconnectPending ? 'Retry disconnect…' : 'Disconnect…'}
                   </button>
                 </div>
               )}
@@ -516,6 +537,7 @@ function ConnectedQuoCard({
   manageOpen,
   onCheck,
   onDisconnect,
+  onForgetLocally,
   onConfirmChange,
   onManageChange,
   onScopeSave,
@@ -527,16 +549,13 @@ function ConnectedQuoCard({
   manageOpen: boolean;
   onCheck: () => void;
   onDisconnect: () => void;
+  onForgetLocally: () => void;
   onConfirmChange: (open: boolean) => void;
   onManageChange: (open: boolean) => void;
   onScopeSave: (phoneNumberIds: string[]) => Promise<void>;
 }) {
-  const cancelRef = useRef<HTMLButtonElement | null>(null);
   const [scopeDraft, setScopeDraft] = useState<string[]>(c.selectedPhoneNumberIds);
   const [scopeError, setScopeError] = useState<string | null>(null);
-  useEffect(() => {
-    if (confirming) cancelRef.current?.focus();
-  }, [confirming]);
   useEffect(() => {
     setScopeDraft(c.selectedPhoneNumberIds);
     setScopeError(null);
@@ -621,16 +640,20 @@ function ConnectedQuoCard({
       {c.status === 'error' && (
         <p className="cn-problem">{c.error ?? 'The last health check failed. Try a manual check, or reconnect.'}</p>
       )}
-      {confirming ? (
-        <div className="cn-confirm" role="group" aria-label="Confirm disconnect">
-          <p>Disconnect <b>Quo</b>? Fluid loses access to this workspace’s calls and texts immediately. Nothing in Quo itself is deleted.</p>
-          <div className="cn-actions">
-            <button type="button" className="cn-btn cn-btn-danger" onClick={onDisconnect} disabled={busy}>
-              {busy ? 'Disconnecting…' : 'Disconnect'}
-            </button>
-            <button ref={cancelRef} type="button" className="cn-btn" onClick={() => onConfirmChange(false)} disabled={busy}>Cancel</button>
-          </div>
+      {c.disconnectPending && (
+        <div className="cn-degraded" role="status">
+          <p><b>Cleanup pending.</b> Fluid could not finish revoking this Quo connection.</p>
         </div>
+      )}
+      {confirming ? (
+        <DisconnectControls
+          label="Quo"
+          pending={c.disconnectPending}
+          busy={busy}
+          onDisconnect={onDisconnect}
+          onForgetLocally={onForgetLocally}
+          onCancel={() => onConfirmChange(false)}
+        />
       ) : (
         <>
           <div className="cn-card-foot">
@@ -691,7 +714,7 @@ function ConnectedQuoCard({
               )}
               <section aria-label="Disconnect">
                 <button type="button" className="cn-btn cn-btn-sm cn-btn-danger" onClick={() => onConfirmChange(true)}>
-                  Disconnect…
+                  {c.disconnectPending ? 'Retry disconnect…' : 'Disconnect…'}
                 </button>
               </section>
             </div>
@@ -873,23 +896,29 @@ export function ConnectionsPage({
   };
 
 
-  const disconnect = async (c: Connection) => {
+  const disconnect = async (c: Connection, forceLocal = false) => {
     setBusyId(c.id);
     setActionError(null);
     try {
-      await api<void>(`/api/connections/${c.id}`, { method: 'DELETE' });
+      const suffix = forceLocal ? '?force=local' : '';
+      await api<void>(`/api/connections/${encodeURIComponent(c.id)}${suffix}`, { method: 'DELETE' });
       setPayload((p) =>
         p === null ? p : { ...p, connections: p.connections.filter((x) => x.id !== c.id) },
       );
       setNotice({
         tone: 'info',
-        text: `${c.provider === 'gmail' ? c.email : 'Quo'} disconnected.`,
-        detail: c.provider === 'gmail'
-          ? 'Fluid no longer has access to this inbox. Nothing in Gmail itself was changed.'
-          : 'Fluid no longer has access to this workspace’s calls and texts. Nothing in Quo itself was changed.',
+        text: forceLocal
+          ? `${c.provider === 'gmail' ? c.email : 'Quo'} forgotten locally.`
+          : `${c.provider === 'gmail' ? c.email : 'Quo'} disconnected.`,
+        detail: forceLocal
+          ? 'Fluid removed its saved connection, but provider access may still be active.'
+          : c.provider === 'gmail'
+            ? 'Fluid no longer has access to this inbox. Nothing in Gmail itself was changed.'
+            : 'Fluid no longer has access to this workspace’s calls and texts. Nothing in Quo itself was changed.',
       });
     } catch (e) {
       setActionError(`Couldn’t disconnect: ${errText(e)}.`);
+      if (!forceLocal) await load(true);
     } finally {
       setBusyId(null);
       setConfirmId(null);
@@ -1064,6 +1093,7 @@ export function ConnectionsPage({
                           onCheck={() => void checkNow(c.id)}
                           onReconnect={() => void connect()}
                           onDisconnect={() => void disconnect(c)}
+                          onForgetLocally={() => void disconnect(c, true)}
                           onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
                         />
                       ))}
@@ -1077,6 +1107,7 @@ export function ConnectionsPage({
                           manageOpen={manageOpenId === c.id}
                           onCheck={() => void checkNow(c.id)}
                           onDisconnect={() => void disconnect(c)}
+                          onForgetLocally={() => void disconnect(c, true)}
                           onConfirmChange={(open) => setConfirmId(open ? c.id : null)}
                           onManageChange={(open) => setManageOpenId(open ? c.id : null)}
                           onScopeSave={(phoneNumberIds) => saveQuoScope(c, phoneNumberIds)}

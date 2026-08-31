@@ -1,4 +1,5 @@
 # Deterministic maintenance on the Hermes host. These run scripts directly;
 # they do not wake an AI profile.
 17 */6 * * * /usr/bin/node /opt/data/bin/fluid-quo-maintenance.mjs enrich-contacts >> /opt/data/logs/fluid-quo-contact-enrichment.log 2>&1
+11 * * * * /usr/bin/node /opt/data/bin/fluid-quo-maintenance.mjs backfill-call-content >> /opt/data/logs/fluid-quo-call-content.log 2>&1
 33 2 * * * /usr/bin/node /opt/data/bin/fluid-signal-triage.mjs reconcile --limit 1000 >> /opt/data/logs/fluid-signal-reconcile.log 2>&1

@@ -1,5 +1,6 @@
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
+import { apiJson as api } from '../lib/api';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './activities.css';
@@ -129,31 +130,6 @@ interface ActivitiesPayload {
 }
 
 // ---------- API ----------
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) {
-    let detail = `the server answered HTTP ${res.status}`;
-    try {
-      const body: unknown = await res.json();
-      if (
-        body !== null &&
-        typeof body === 'object' &&
-        'error' in body &&
-        typeof (body as { error: unknown }).error === 'string'
-      ) {
-        detail = (body as { error: string }).error;
-      }
-    } catch {
-      // non-JSON error body — keep the status text
-    }
-    throw new Error(detail);
-  }
-  return (await res.json()) as T;
-}
 
 function cursorQuery(limit: number, cursor: Cursor | null): string {
   const params = new URLSearchParams({ limit: String(limit) });

@@ -11,13 +11,16 @@ persistent work items; it does not use seeded demo cards.
 npm install
 cp .env.example .env
 npm run dev
-npm run typecheck
-npm run typecheck:server
-npm run build
 ```
 
-The Vite app and local API share `http://localhost:5173` in development. Browser code
-never receives provider tokens, the Supabase service role, or raw Slack data.
+The Vite app and local API share `http://localhost:5173` in development. The API binds
+only to `127.0.0.1`; this is intentionally a single-user local application and has no
+login flow. Browser code never receives provider tokens, the Supabase database secret,
+or unbounded/unlinked Slack payloads. Linked Slack excerpts are deliberately returned
+only inside the relevant Job context.
+
+The code-only quality gate is `npm run verify:code`. With the local Supabase stack
+running, `npm run verify` also executes the SQL contract suite.
 
 ## Connections
 
@@ -34,9 +37,11 @@ Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and a stable
 the refresh token encrypted, checks the connection every five minutes, and imports
 messages incrementally. Each Activity is one email; Gmail thread history is separate,
 collapsed context. Signal triage is the only classifier. A deterministic worker projects
-its topic onto new inbound messages as a single `Fluid/<topic>` Gmail label. It removes
-only superseded `Fluid/` topic labels and never sends, archives, deletes, or changes
-personal labels. Existing mail is not backfilled.
+its topic onto new inbound messages as one `Fluid/<topic>` label, with managed role
+labels in the same `Fluid/` namespace. It removes only superseded labels in that managed
+namespace (or labels already recorded in Fluid's mapping table) and never sends,
+archives, deletes, or changes labels outside Fluid's ownership. Existing mail is not
+backfilled.
 
 ### Quo
 
@@ -46,28 +51,20 @@ context without importing every workspace contact.
 
 ### Slack
 
-Create a Slack OAuth app with the read-only user scopes `channels:read`,
-`channels:history`, and `users:read`, then add:
+Slack is dormant infrastructure, not a connection offered by the local UI. This repo
+contains the signed event receiver and the database-backed internal sync contract, but
+does not contain a Slack OAuth callback or a token-owning sync client. Do not configure
+the previously documented `/api/oauth/slack/callback`; it does not exist.
 
-```text
-http://localhost:5173/api/oauth/slack/callback
-```
+If an external connector is added later, it must provision workspaces, channels, users,
+messages, and sync state through the internal `fluid-slack-events` actions using
+`FLUID_SLACK_SYNC_SECRET`, and Slack event delivery must use `SLACK_SIGNING_SECRET`.
+Only selected public `#job-*` channels and `#sales` are modeled. A job channel links only
+when its final numeric suffix exactly matches the Job's DripJobs proposal ID.
+`#all-ottawa-painters`, private channels, Slack writeback, and file downloads remain out
+of scope.
 
-Set `SLACK_CLIENT_ID` and `SLACK_CLIENT_SECRET` locally. Set `SLACK_SIGNING_SECRET` as a
-Supabase Edge Function secret, then subscribe the app's `message.channels` user event
-to:
-
-```text
-https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-slack-events
-```
-
-Fluid automatically selects public `#job-*` channels and `#sales`. A job channel links
-only when its final numeric suffix exactly matches the Job's DripJobs proposal ID.
-`#all-ottawa-painters`, private channels, Slack writeback, and file downloads are out of
-scope. Initial backfill is resumable and bounded to the latest 15 messages per selected
-channel, with thread replies fetched only for sampled messages that have replies.
-
-## Operational cases and the fixed Board
+## Operational cases and the Board
 
 Every Job has one operational Case. Structured DripJobs, scheduling, completion, and
 payment facts outrank communication evidence. Gmail, Quo, and Slack support the case;
@@ -78,24 +75,26 @@ Work items use stable fingerprints and reconcile on every Case revision, so retr
 not duplicate records and completed or cancelled production cannot be resurrected by
 old messages. Job context contains bounded, paginated evidence and work-item history.
 
-The Board keeps its fixed five-column UI: People, Signals, Actions, Reminders, and
-Automations. People and Gmail/Quo Signals are live, cursor-paginated data. Slack stays
-inside linked Job context and never appears as a global Signal. Actions, Reminders, and
-Automations show only user-created records, so earlier generated operational work items
-remain available for audit without appearing on the Board.
+The Board combines a live, cursor-paginated Signal inbox with the DripJobs sales
+pipeline. Pipeline stages and archived history come from provider data rather than a
+hard-coded demo layout. Contacts, Employees, Activity, Labels, Actions, Schedules, and
+Connections each have a dedicated route. Slack stays inside linked Job context and
+never appears as a global Signal.
 
 Opening an eligible inbound Gmail Signal can show one concrete Hermes recommendation
 for an enabled capability. The user must accept it before an Action exists. The first
 working capability is **Draft email to customer**; it creates an editable draft in the
-existing Board Actions column. **Send (simulation)** records an audit event only: it
+existing Action detail flow. **Send (simulation)** records an audit event only: it
 does not call Gmail, create an outbound Activity, or claim the customer received it.
-The Signal stays unresolved until a real outbound Gmail message appears or the Action
-is cancelled. **No action needed** remains an explicit, idempotent dismissal.
+Pending Signals stay unresolved until a person explicitly settles them. A Signal with
+an open Action must be completed through that Action; it cannot also be settled as
+`no_action`. Provider activity may complete an Action, but it never silently makes the
+Signal review decision.
 
 `/actions` is the built-in Action Library. It separates reusable Hermes capabilities
-from live Board instances. Draft email is enabled; SMS draft, follow-up reminder, and
-internal task remain disabled placeholders until their handlers exist. Playwright
-screenshot coverage locks the five-column Board layout against silent redesigns.
+from live Board instances. Draft email is the only supported capability; the unused SMS,
+reminder, and internal-task placeholders were retired. Playwright covers the real Board,
+pipeline, Signal decision, Action, connection-cleanup, and failure states.
 
 ## Hermes reconciliation
 
@@ -117,18 +116,39 @@ agent result cannot overwrite a user's newer edit.
 
 ## Supabase
 
-Migrations live in `supabase/migrations`. The deployed Edge Functions are:
+Migrations live in `supabase/migrations`. Edge Functions share one runtime helper for
+database-secret loading, constant-time service-secret checks, admin-client creation, and
+JSON responses. They are called server-to-server with dedicated runtime secrets; no
+browser login or user-auth layer was added. The main function groups are:
 
 - `fluid-gmail-activities` — server-only Gmail activity ingestion and Signal read models.
 - `fluid-gmail-label-sync` — server-only leased outbox for deterministic Gmail labels.
 - `fluid-slack-events` — custom Slack signature verification and event ingestion.
-- `fluid-operational-context` — authenticated Board, Job context, work-item resolution,
+- `fluid-operational-context` — Board, Job context, work-item resolution,
   and reconciliation RPC bridge.
-- `fluid-real-board` — authenticated, cursor-paginated five-column Board read models
-  and the idempotent no-action settlement endpoint.
+- `fluid-real-board` — cursor-paginated Signal/pipeline read models, Action definitions,
+  recommendation acceptance, and guarded no-action settlement.
 - `fluid-signal-recommender` — server-only Hermes claim, completion, failure, and
   reconciliation bridge.
 - `fluid-action-runner` — server-only leased drafting jobs and revision-safe completion.
+- `fluid-customer-sync` — canonical lead sync and Contacts/Employees projections; the
+  legacy function name remains only as a deployment-compatible wrapper.
+- `fluid-dripjobs-events`, `fluid-dripjobs-pipeline`, `fluid-quo-events`, and
+  `fluid-signal-triage` — provider ingestion and deterministic processing endpoints.
 
 New raw-provider and reconciliation tables are server-only with RLS enabled. Manager
 read access is limited to the public case/work-item projections required by the app.
+
+### Migration-history warning
+
+The checked-in chain now has a conditional root-schema compatibility baseline, targeted
+foreign-key indexes, canonical lead/Action contracts, queue lifecycle hardening, and SQL
+contract coverage. Seeding is disabled because there is no seed file.
+
+The linked project's complete historical SQL is **not** present: the read-only snapshot
+records 191 remote-only versions, including 119 unavailable prehistory bodies. The
+baseline makes a clean local replay possible; it is not recovered remote history. Read
+`supabase/migrations/REMOTE_HISTORY_MANIFEST.md` before deployment. Do not run a normal
+`db push --include-all` or repair the remote migration ledger until the missing bodies or
+an explicit reconciliation plan have been reviewed. This cleanup did not push, repair,
+or otherwise mutate the linked database.

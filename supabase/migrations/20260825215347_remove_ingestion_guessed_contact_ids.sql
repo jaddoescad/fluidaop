@@ -26,7 +26,6 @@ where activity.id = link.activity_id
   and link.matched_by = 'contact_id';
 
 create temporary table fluid_activity_claim_resolution
-on commit drop
 as
 select ai.activity_id,
   min(claim.person_id::text)::uuid as person_id,
@@ -99,3 +98,5 @@ set suggestion_type = 'conflict',
     reason = excluded.reason,
     evidence = excluded.evidence,
     updated_at = now();
+
+drop table fluid_activity_claim_resolution;

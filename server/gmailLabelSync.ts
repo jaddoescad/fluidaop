@@ -1,4 +1,5 @@
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const MANAGED_LABEL_PREFIX = 'Fluid/';
 
 export interface FluidTopicLabel {
   id: number;
@@ -44,25 +45,39 @@ export class GmailLabelApiError extends Error {
     readonly status: number,
     message: string,
     readonly retryAfterSeconds: number | null = null,
+    readonly reason: string | null = null,
   ) {
     super(message);
   }
 
   get retryable(): boolean {
-    return this.status === 429 || this.status >= 500;
+    return this.status === 429 || this.status >= 500 || (
+      this.status === 403 && (
+        this.reason === 'rateLimitExceeded' ||
+        this.reason === 'userRateLimitExceeded' ||
+        /rate limit|quota exceeded/i.test(this.message)
+      )
+    );
   }
 }
 
 export function canonicalGmailTopicLabel(name: string): string {
-  const cleaned = name.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const cleaned = managedLabelSuffix(name);
   if (!cleaned) throw new Error('Fluid topic label name is empty');
-  return cleaned.slice(0, 225);
+  return `${MANAGED_LABEL_PREFIX}${cleaned.slice(0, 225 - MANAGED_LABEL_PREFIX.length)}`;
 }
 
 export function canonicalGmailSupplementalLabel(name: string): string {
-  const cleaned = name.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const cleaned = managedLabelSuffix(name);
   if (!cleaned) throw new Error('Supplemental Gmail label name is empty');
-  return cleaned.slice(0, 225);
+  return `${MANAGED_LABEL_PREFIX}${cleaned.slice(0, 225 - MANAGED_LABEL_PREFIX.length)}`;
+}
+
+function managedLabelSuffix(name: string): string {
+  const cleaned = name.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned.startsWith(MANAGED_LABEL_PREFIX)
+    ? cleaned.slice(MANAGED_LABEL_PREFIX.length).trim()
+    : cleaned;
 }
 
 export function planManagedLabelMutation(
@@ -195,15 +210,26 @@ export async function projectTopicToGmail(
   return { outcome: 'applied', gmailLabelId: gmailLabel.id, gmailLabelName: gmailLabel.name };
 }
 
-function responseError(payload: unknown, fallback: string): string {
+function responseError(
+  payload: unknown,
+  fallback: string,
+): { message: string; reason: string | null } {
   if (payload && typeof payload === 'object' && 'error' in payload) {
     const error = (payload as { error?: unknown }).error;
-    if (error && typeof error === 'object' && 'message' in error) {
-      const message = (error as { message?: unknown }).message;
-      if (typeof message === 'string' && message.trim()) return message.trim().slice(0, 500);
+    if (error && typeof error === 'object') {
+      const details = error as { message?: unknown; errors?: unknown };
+      const message = typeof details.message === 'string' && details.message.trim()
+        ? details.message.trim().slice(0, 500)
+        : fallback;
+      const first = Array.isArray(details.errors) ? details.errors[0] : null;
+      const reason = first && typeof first === 'object' && 'reason' in first &&
+          typeof (first as { reason?: unknown }).reason === 'string'
+        ? (first as { reason: string }).reason
+        : null;
+      return { message, reason };
     }
   }
-  return fallback;
+  return { message: fallback, reason: null };
 }
 
 export class GmailRestLabelClient implements GmailLabelClient {
@@ -215,23 +241,36 @@ export class GmailRestLabelClient implements GmailLabelClient {
   ) {}
 
   private async json<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await this.request(`${GMAIL_API}${path}`, {
-      ...init,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${this.accessToken}`,
-        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-        ...(init?.headers ?? {}),
-      },
-      signal: init?.signal ?? AbortSignal.timeout(15_000),
-    });
+    let response: Response;
+    try {
+      response = await this.request(`${GMAIL_API}${path}`, {
+        ...init,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.accessToken}`,
+          ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(init?.headers ?? {}),
+        },
+        signal: init?.signal ?? AbortSignal.timeout(15_000),
+      });
+    } catch {
+      // fetch only rejects before an HTTP response exists (for example DNS,
+      // socket, or timeout failures). Those are transient transport failures,
+      // not deterministic label-plan errors, so the leased job must retry.
+      throw new GmailLabelApiError(
+        503,
+        'Gmail label API request failed before receiving a response',
+      );
+    }
     const payload: unknown = await response.json().catch(() => null);
     if (!response.ok) {
       const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+      const detail = responseError(payload, `Gmail label API returned HTTP ${response.status}`);
       throw new GmailLabelApiError(
         response.status,
-        responseError(payload, `Gmail label API returned HTTP ${response.status}`),
+        detail.message,
         Number.isSafeInteger(retryAfter) && retryAfter > 0 ? retryAfter : null,
+        detail.reason,
       );
     }
     return payload as T;

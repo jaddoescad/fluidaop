@@ -5,8 +5,6 @@ import { fmtAge } from '../time';
 import { Avatar, DirectionTag, SourceTag } from '../variants/shared';
 import './live-action.css';
 
-type Note = { who: 'you' | 'agent' | 'sys'; text: string };
-
 export function LiveActionPopup({
   detail,
   person,
@@ -26,9 +24,6 @@ export function LiveActionPopup({
   const [showFullMessage, setShowFullMessage] = useState(false);
   const [busy, setBusy] = useState<'send' | 'retry' | 'dismiss' | 'save' | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // the composer is a conversation with Hermes, never the email itself
-  const [text, setText] = useState('');
-  const [notes, setNotes] = useState<Note[]>([]);
   // draft editing lives inside the email component, not in the composer
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState('');
@@ -38,8 +33,6 @@ export function LiveActionPopup({
   const awaiting = action?.status === 'awaiting_approval';
 
   useEffect(() => {
-    setText('');
-    setNotes([]);
     setEditing(false);
     setEditDraft('');
   }, [action?.id]);
@@ -62,7 +55,7 @@ export function LiveActionPopup({
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [notes.length, action?.status, editing]);
+  }, [action?.status, editing]);
 
   const run = async (kind: NonNullable<typeof busy>, work: () => Promise<void>, close = false) => {
     setBusy(kind); setError(null);
@@ -111,18 +104,6 @@ export function LiveActionPopup({
       setEditing(false);
       setEditDraft('');
     });
-  };
-
-  // conversational notes stay local, exactly like the Signal RunPopup — they
-  // never change the email; only the draft editor above does that
-  const send = () => {
-    const t = text.trim();
-    if (!t) return;
-    setText('');
-    const ack = awaiting
-      ? 'Noted — to change the email itself, use Edit on the draft above.'
-      : 'Noted — I’ll keep that with this Action.';
-    setNotes((current) => [...current, { who: 'you', text: t }, { who: 'agent', text: ack }]);
   };
 
   const emailCard = (sent: boolean): ReactNode => (
@@ -255,26 +236,6 @@ export function LiveActionPopup({
             </div>
           </div>
 
-          {notes.map((note, index) => {
-            const cont = index > 0 && notes[index - 1].who === note.who;
-            if (note.who === 'sys') return <div className="fc-sys" key={`note-${index}`}>{note.text}</div>;
-            return (
-              <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={`note-${index}`}>
-                <span className={`fd-avatar${!cont && note.who === 'agent' ? ' fd-avatar-agent' : ''}`}>
-                  {cont ? null : note.who === 'you' ? <Avatar name="Jad" /> : '✦'}
-                </span>
-                <div className="fd-main">
-                  {!cont && (
-                    <div className="fd-name">
-                      {note.who === 'you' ? <b>You</b> : <b className="fd-name-accent">Hermes</b>}
-                    </div>
-                  )}
-                  <div className="fd-text">{note.text}</div>
-                </div>
-              </div>
-            );
-          })}
-
           <div className="fc-replies">
             {awaiting && (
               <button
@@ -315,19 +276,6 @@ export function LiveActionPopup({
           <span className="la-sr" aria-live="polite">{busy ? `${busy} in progress` : error ?? status}</span>
         </div>
 
-        <footer className="fc-composer">
-          <input
-            className="fc-input"
-            aria-label="Reply to Hermes"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') send(); }}
-            placeholder="Reply to Hermes…"
-          />
-          <button className="fc-send" onClick={send} disabled={!text.trim()}>
-            Send
-          </button>
-        </footer>
       </div>
     </div>
   );

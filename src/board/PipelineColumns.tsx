@@ -1,4 +1,4 @@
-import { KeyboardEvent, useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { fmtAge, fmtDue } from '../time';
 import {
   PipelineDeal,
@@ -327,7 +327,6 @@ export function PipelineColumns({
   deals,
   onOpenLead,
   onOpenAction,
-  onOpenReminder,
   archivedBucketCounts,
   archivedHasMore,
   archivedLoading,
@@ -337,7 +336,6 @@ export function PipelineColumns({
   deals: PipelineDeal[];
   onOpenLead: (deal: PipelineDeal) => void;
   onOpenAction: (actionId: string) => void;
-  onOpenReminder: (reminderId: string) => void;
   archivedBucketCounts: Record<'cold_lead' | 'estimate_scheduled' | 'proposal_sent' | 'closed_with_appointment' | 'closed_without_appointment', number>;
   archivedHasMore: boolean;
   archivedLoading: boolean;
@@ -345,11 +343,16 @@ export function PipelineColumns({
 }) {
   const latestByPerson = useMemo(() => latestSignals(s.signals), [s.signals]);
   const peopleById = useMemo(() => new Map(s.people.map((person) => [person.id, person])), [s.people]);
-  const actionsByPerson = useMemo(() => new Map(s.actions.map((action) => [action.personId, action])), [s.actions]);
-  const remindersByPerson = useMemo(
-    () => new Map(s.reminders.map((reminder) => [reminder.personId, reminder])),
-    [s.reminders],
-  );
+  const actionsByPerson = useMemo(() => {
+    const groups = new Map<string, typeof s.actions>();
+    s.actions.forEach((action) => groups.set(action.personId, [...(groups.get(action.personId) ?? []), action]));
+    return groups;
+  }, [s.actions]);
+  const remindersByPerson = useMemo(() => {
+    const groups = new Map<string, typeof s.reminders>();
+    s.reminders.forEach((reminder) => groups.set(reminder.personId, [...(groups.get(reminder.personId) ?? []), reminder]));
+    return groups;
+  }, [s.reminders]);
   const dealsByStage = useMemo(() => {
     const groups = new Map<PipelineStage, PipelineDeal[]>(
       [...PIPELINE_STAGES, UNMAPPED_STAGE].map((stage) => [stage.key, []]),
@@ -363,13 +366,6 @@ export function PipelineColumns({
   const visibleStages = (dealsByStage.get('unmapped')?.length ?? 0) > 0
     ? [...PIPELINE_STAGES, UNMAPPED_STAGE]
     : PIPELINE_STAGES;
-
-  const openWithKeyboard = (event: KeyboardEvent<HTMLElement>, deal: PipelineDeal) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      onOpenLead(deal);
-    }
-  };
 
   return (
     <>
@@ -389,8 +385,8 @@ export function PipelineColumns({
                 const person = peopleById.get(deal.personId);
                 const latest = latestByPerson.get(deal.personId);
                 const latestAt = latestKnownAt(latest?.at, deal.latestSignalAt, person?.latestSignalAt);
-                const action = actionsByPerson.get(deal.personId);
-                const reminder = remindersByPerson.get(deal.personId);
+                const actions = actionsByPerson.get(deal.personId) ?? [];
+                const reminders = remindersByPerson.get(deal.personId) ?? [];
                 const source = leadSourceMeta(deal.source);
                 const dealName = meaningfulDealName(deal);
                 const showArchiveDivider = deal.archived && index === activeDeals.length;
@@ -405,15 +401,20 @@ export function PipelineColumns({
                   <article
                     className={`pipeline-card is-clickable${deal.archived ? ' is-archived' : ''}`}
                     onClick={() => onOpenLead(deal)}
-                    onKeyDown={(event) => openWithKeyboard(event, deal)}
-                    role="button"
-                    tabIndex={0}
                     title={latestAt
                       ? `Open ${deal.customerName}'s workspace · last signal on any stage ${fmtAge(latestAt, s.now)}`
                       : `Open ${deal.customerName}'s workspace`}
                   >
                     <div className="pipeline-card-top">
-                      <h3>{deal.customerName}</h3>
+                      <h3>
+                        <button
+                          type="button"
+                          className="pipeline-card-open"
+                          onClick={(event) => { event.stopPropagation(); onOpenLead(deal); }}
+                        >
+                          {deal.customerName}
+                        </button>
+                      </h3>
                     </div>
                     {dealName && <p className="pipeline-deal-name">{dealName}</p>}
                     <div className="pipeline-card-context">
@@ -423,16 +424,16 @@ export function PipelineColumns({
                     {latest && (
                       <p className="pipeline-card-message">{latest.text}</p>
                     )}
-                    {(action || reminder) && (
+                    {(actions.length > 0 || reminders.length > 0) && (
                       <div className="pipeline-next-work" onClick={(event) => event.stopPropagation()}>
-                        {action && (
-                          <button type="button" onClick={() => onOpenAction(action.id)}>✦ {action.title}</button>
-                        )}
-                        {reminder && (
-                          <button type="button" onClick={() => onOpenReminder(reminder.id)}>
+                        {actions.map((action) => (
+                          <button type="button" key={action.id} onClick={() => onOpenAction(action.id)}>✦ {action.title}</button>
+                        ))}
+                        {reminders.map((reminder) => (
+                          <span key={reminder.id}>
                             ⏰ {reminder.note} · {fmtDue(reminder.dueAt, s.now)}
-                          </button>
-                        )}
+                          </span>
+                        ))}
                       </div>
                     )}
                     <StageTouches

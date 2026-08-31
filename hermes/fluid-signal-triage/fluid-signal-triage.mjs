@@ -8,11 +8,10 @@ import { resolve } from 'node:path';
 const AGENT_KEY = 'signal-triage';
 const PROMPT_VERSION = 'fluid-signal-triage-v1';
 const DEFAULT_MODEL = 'nous/openai/gpt-5.6-luna';
-const DEFAULT_URL = 'https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-signal-triage';
+const DEFAULT_URL = 'https://fskrxkiujtfuxntcrjam.supabase.co/functions/v1/fluid-signal-triage';
 const API_URL = (process.env.FLUID_SIGNAL_TRIAGE_URL || DEFAULT_URL).replace(/\/$/, '');
 const API_SECRET = (
   process.env.FLUID_SIGNAL_TRIAGE_SECRET ||
-  process.env.FLUID_EMAIL_CATEGORIZER_SECRET ||
   ''
 ).trim();
 const STATE_DIR = resolve(process.env.FLUID_SIGNAL_TRIAGE_STATE_DIR || '/opt/data/fluid/signal-triage');

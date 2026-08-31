@@ -1,49 +1,10 @@
-import { createClient } from 'npm:@supabase/supabase-js@2.95.0';
+import { createAdminClient, jsonResponse as response, validSecret } from '../_shared/runtime.ts';
 
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
-const allowedRoles = new Set(['customer', 'employee', 'painter', 'applicant', 'contractor', 'supplier']);
-
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
-
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = new TextEncoder().encode(left);
-  const b = new TextEncoder().encode(right);
-  let different = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
-}
-
-function validSecret(supplied: string, candidates: Array<string | undefined>): boolean {
-  if (supplied.length < 43) return false;
-  return candidates.some((candidate) => {
-    const expected = candidate?.trim() ?? '';
-    return expected.length >= 43 && safeEqual(expected, supplied);
-  });
-}
+const allowedRoles = new Set(['lead', 'employee', 'painter', 'applicant', 'contractor', 'supplier']);
 
 function authorizedAgent(req: Request): boolean {
   return validSecret(req.headers.get('x-fluid-agent-secret')?.trim() ?? '', [
     Deno.env.get('FLUID_CUSTOMER_SYNC_SECRET'),
-    Deno.env.get('FLUID_EMAIL_CATEGORIZER_SECRET'),
   ]);
 }
 
@@ -66,20 +27,16 @@ Deno.serve(async (req: Request) => {
   if (action === 'run' && !authorizedAgent(req)) return response({ error: 'Agent authorization required' }, 403);
 
   try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    if (!supabaseUrl) throw new Error('Supabase URL is unavailable');
-    const supabase = createClient(supabaseUrl, databaseSecret(), {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = createAdminClient();
 
     if (req.method === 'GET' && action === 'status') {
-      const { data, error } = await supabase.rpc('read_customer_sync_status');
+      const { data, error } = await supabase.rpc('read_lead_sync_status');
       if (error) throw error;
       return response(data);
     }
 
     if (req.method === 'GET' && action === 'people') {
-      const role = (url.searchParams.get('role') ?? 'customer').trim().toLowerCase();
+      const role = (url.searchParams.get('role') ?? 'lead').trim().toLowerCase();
       if (!allowedRoles.has(role)) return response({ error: 'Invalid people role' }, 400);
       const limit = boundedInteger(url.searchParams.get('limit'), 30, 1, 100);
       const offset = boundedInteger(url.searchParams.get('offset'), 0, 0, 100_000);
@@ -118,7 +75,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (req.method === 'POST' && action === 'run') {
-      const { data, error } = await supabase.rpc('sync_ottawa_painters_customers');
+      const { data, error } = await supabase.rpc('sync_ottawa_painters_leads');
       if (error) throw error;
       if (data?.status === 'failed') return response(data, 500);
       return response(data);
@@ -127,6 +84,6 @@ Deno.serve(async (req: Request) => {
     return response({ error: 'Not found' }, 404);
   } catch (error) {
     console.error('fluid-customer-sync request failed');
-    return response({ error: error instanceof Error ? error.message : 'Unexpected customer sync error' }, 500);
+    return response({ error: error instanceof Error ? error.message : 'Unexpected lead sync error' }, 500);
   }
 });

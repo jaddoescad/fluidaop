@@ -1,5 +1,6 @@
 import { CSSProperties, ReactNode, useEffect, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
+import { apiJson as api } from '../lib/api';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './labels.css';
@@ -54,26 +55,6 @@ const tint = (color: string): CSSProperties => ({ ['--lc' as string]: color });
 function nextColor(labels: Label[]): string {
   const used = (color: string) => labels.filter((label) => label.color === color).length;
   return COLORS.reduce((best, color) => (used(color) < used(best) ? color : best), COLORS[0]);
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload &&
-      typeof (payload as { error: unknown }).error === 'string'
-      ? (payload as { error: string }).error
-      : `the server answered HTTP ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
 }
 
 export function LabelsPage({

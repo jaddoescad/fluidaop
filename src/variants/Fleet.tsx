@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AppPage, isAppPage, pageFromPath, pathForPage } from '../app/routes';
 import { ActivitiesPage } from '../activities/ActivitiesPage';
 import { ActionsPage } from '../actions/ActionsPage';
 import { LiveActionPopup } from '../actions/LiveActionPopup';
@@ -10,72 +11,71 @@ import { PeoplePage } from '../people/PeoplePage';
 import { SchedulesPage } from '../schedules/SchedulesPage';
 import { loadFluidSchedules } from '../schedules/fluid';
 import { SkillsPage } from '../skills/SkillsPage';
+import { KitHeader, SideNav } from '../components/AppChrome';
 import { LeadWorkspace } from '../board/LeadWorkspace';
 import { ALL_MONTHS, PipelineColumns, PipelineFilterBar, receivedMonthKey } from '../board/PipelineColumns';
 import { useLiveBoard } from '../board/useLiveBoard';
 import { derive } from './shared';
 import {
-  AgentInfo,
-  KitHeader,
   RunPopup,
   RunSubject,
-  SideNav,
   SignalsCol,
 } from './kit';
 import './flow.css';
 import './zen.css';
 import './fleet.css';
 
-type AppPage = 'Board' | 'Agents' | 'Skills' | 'Actions' | 'Activity' | 'Labels' | 'Schedules' | 'Connections' | 'Contacts' | 'Employees';
-
-function pageFromPath(): AppPage {
-  if (window.location.pathname === '/agents' || window.location.pathname.startsWith('/agents/')) return 'Agents';
-  if (window.location.pathname === '/skills') return 'Skills';
-  if (window.location.pathname === '/actions') return 'Actions';
-  if (window.location.pathname === '/schedules' || window.location.pathname === '/automations') return 'Schedules';
-  if (window.location.pathname === '/connections') return 'Connections';
-  if (window.location.pathname === '/labels') return 'Labels';
-  if (window.location.pathname === '/employees') return 'Employees';
-  if (window.location.pathname === '/contacts' || window.location.pathname === '/people') return 'Contacts';
-  if (window.location.pathname === '/activity' || window.location.pathname === '/activities') return 'Activity';
-  return 'Board';
-}
+type BoardPopupSubject = RunSubject | { type: 'action'; id: string };
 
 export function FleetV() {
-  const board = useLiveBoard();
-  const { s, act } = board;
-  const d = derive(s);
-  const [runSel, setRunSel] = useState<RunSubject | null>(null);
-  const [leadSel, setLeadSel] = useState<string | null>(null);
-  const [receivedMonth, setReceivedMonth] = useState<string>(ALL_MONTHS);
-  const [page, setPage] = useState<AppPage>(pageFromPath);
-  const [hermesStatus, setHermesStatus] = useState<HermesStatus | null>(null);
-  const [hermesSchedules, setHermesSchedules] = useState<HermesAgentDefinition[] | null>(null);
-  const [schedules, setSchedules] = useState<HermesAgentDefinition[] | null>(null);
-  const [hermesError, setHermesError] = useState<string | null>(null);
-  const [scheduleError, setScheduleError] = useState<string | null>(null);
-  const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
-  const hermesAgents = hermesSchedules?.filter((schedule) => schedule.runtimeMode === 'agent') ?? null;
+  const [page, setPage] = useState<AppPage>(() => pageFromPath(window.location.pathname));
 
   useEffect(() => {
-    const syncPage = () => setPage(pageFromPath());
+    const syncPage = () => setPage(pageFromPath(window.location.pathname));
     window.addEventListener('popstate', syncPage);
     return () => window.removeEventListener('popstate', syncPage);
   }, []);
 
-  const refreshHermes = useCallback(async () => {
+  const navigate = useCallback((label: string) => {
+    if (!isAppPage(label)) return;
+    const path = pathForPage(label);
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+    setPage(label);
+  }, []);
+
+  const header = <KitHeader />;
+  if (page === 'Agents') return <AgentsPage onNavigate={navigate} header={header} />;
+  if (page === 'Skills') return <SkillsPage onNavigate={navigate} header={header} />;
+  if (page === 'Actions') return <ActionsPage onNavigate={navigate} header={header} />;
+  if (page === 'Schedules') return <SchedulesRoute onNavigate={navigate} />;
+  if (page === 'Activity') return <ActivitiesPage onNavigate={navigate} header={header} />;
+  if (page === 'Labels') return <LabelsPage onNavigate={navigate} header={header} />;
+  if (page === 'Contacts') return <PeoplePage key="contacts" onNavigate={navigate} header={header} />;
+  if (page === 'Employees') return <PeoplePage key="employees" onNavigate={navigate} header={header} view="employees" />;
+  if (page === 'Connections') return <ConnectionsPage onNavigate={navigate} header={header} />;
+  return <BoardPage onNavigate={navigate} />;
+}
+
+function SchedulesRoute({ onNavigate }: { onNavigate: (label: string) => void }) {
+  const [status, setStatus] = useState<HermesStatus | null>(null);
+  const [schedules, setSchedules] = useState<HermesAgentDefinition[] | null>(null);
+  const [hermesError, setHermesError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
     const [statusResult, hermesSchedulesResult, fluidSchedulesResult] = await Promise.allSettled([
       loadHermesStatus(),
       loadHermesSchedules(),
       loadFluidSchedules(),
     ]);
-    setHermesStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
-    setHermesSchedules(hermesSchedulesResult.status === 'fulfilled' ? hermesSchedulesResult.value : null);
+    setStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
     const hermesFailure = statusResult.status === 'rejected'
-        ? statusResult.reason
-        : hermesSchedulesResult.status === 'rejected'
-          ? hermesSchedulesResult.reason
-          : null;
+      ? statusResult.reason
+      : hermesSchedulesResult.status === 'rejected' ? hermesSchedulesResult.reason : null;
     setHermesError(
       hermesFailure === null
         ? null
@@ -89,8 +89,8 @@ export function FleetV() {
     ];
     const allSchedulesFailed = fluidSchedulesResult.status === 'rejected' && hermesSchedulesResult.status === 'rejected';
     setSchedules(allSchedulesFailed ? null : availableSchedules);
-    setScheduleError(allSchedulesFailed ? 'Could not load Fluid or Hermes schedules.' : null);
-    setScheduleWarning(
+    setError(allSchedulesFailed ? 'Could not load Fluid or Hermes schedules.' : null);
+    setWarning(
       allSchedulesFailed
         ? null
         : fluidSchedulesResult.status === 'rejected'
@@ -102,10 +102,31 @@ export function FleetV() {
   }, []);
 
   useEffect(() => {
-    void refreshHermes();
-    const timer = window.setInterval(() => void refreshHermes(), 60_000);
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 60_000);
     return () => window.clearInterval(timer);
-  }, [refreshHermes]);
+  }, [refresh]);
+
+  return (
+    <SchedulesPage
+      onNavigate={onNavigate}
+      header={<KitHeader hermesStatus={status} hermesError={hermesError} />}
+      status={status}
+      schedules={schedules}
+      error={error}
+      warning={warning}
+      onRefresh={refresh}
+    />
+  );
+}
+
+function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
+  const board = useLiveBoard();
+  const { s, act } = board;
+  const d = useMemo(() => derive(s), [s]);
+  const [runSel, setRunSel] = useState<BoardPopupSubject | null>(null);
+  const [leadSel, setLeadSel] = useState<string | null>(null);
+  const [receivedMonth, setReceivedMonth] = useState<string>(ALL_MONTHS);
 
   /** Deals whose lead-received month matches the filter; undated deals drop out. */
   const visibleDeals = useMemo(
@@ -120,100 +141,34 @@ export function FleetV() {
     void board.filterArchivedPipeline(month === ALL_MONTHS ? null : month);
   }, [board.filterArchivedPipeline]);
 
-  const appHeader = (
-    <KitHeader
-      s={s}
-      act={act}
-      d={d}
-      hermesStatus={hermesStatus}
-      hermesError={hermesError}
-    />
+  if (!s.booted) return (
+    <div className="v v-flow v-zen v-fleet">
+      <div className="fl-shell">
+        <SideNav active="Board" onNav={onNavigate} />
+        <div className="fl-frame">
+          <KitHeader />
+          <main className="board-state" role="status" aria-live="polite">Loading Board…</main>
+        </div>
+      </div>
+    </div>
   );
-
-  const navigate = (label: string) => {
-    if (!['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Contacts', 'Employees', 'Connections'].includes(label)) return;
-    const path = label === 'Agents'
-      ? '/agents'
-      : label === 'Skills'
-        ? '/skills'
-        : label === 'Actions'
-          ? '/actions'
-        : label === 'Schedules'
-          ? '/schedules'
-          : label === 'Connections'
-            ? '/connections'
-            : label === 'Labels'
-              ? '/labels'
-              : label === 'Contacts'
-                ? '/contacts'
-              : label === 'Employees'
-                ? '/employees'
-                : label === 'Activity'
-                  ? '/activity'
-                  : '/';
-    if (window.location.pathname !== path) {
-      window.history.pushState(null, '', path);
-      // Pages that own a sub-route (Agents) track the path themselves and stay
-      // mounted across nav, so tell them the location moved under them.
-      window.dispatchEvent(new PopStateEvent('popstate'));
-    }
-    setPage(label as AppPage);
-  };
-
-  if (page === 'Agents') return <AgentsPage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Skills') return <SkillsPage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Actions') return <ActionsPage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Schedules') return (
-    <SchedulesPage
-      onNavigate={navigate}
-      header={appHeader}
-      status={hermesStatus}
-      schedules={schedules}
-      error={scheduleError}
-      warning={scheduleWarning}
-      onRefresh={refreshHermes}
-    />
-  );
-  if (page === 'Activity') return <ActivitiesPage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Labels') return <LabelsPage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Contacts') return <PeoplePage onNavigate={navigate} header={appHeader} />;
-  if (page === 'Employees') return <PeoplePage onNavigate={navigate} header={appHeader} view="employees" />;
-  if (page === 'Connections') return <ConnectionsPage onNavigate={navigate} header={appHeader} />;
-
-  if (!s.booted) return <div className="boot" />;
 
   const leadDeal = leadSel !== null
     ? board.pipelineDeals.find((deal) => deal.id === leadSel) ?? null
     : null;
 
-  const roster: AgentInfo[] = (hermesAgents ?? []).map((agent) => {
-    const profileAvailable = hermesStatus?.connected === true && hermesStatus.profiles.includes(agent.profile);
-    const connected = profileAvailable && agent.enabled && agent.lastError === null;
-    const paused = profileAvailable && !agent.enabled;
-    return {
-      id: agent.id,
-      emoji: agent.icon,
-      name: agent.name,
-      duty: agent.description,
-      status: connected ? 'online' : paused || hermesStatus === null ? 'checking' : 'offline',
-      line: connected
-        ? `${agent.schedule} · connected`
-        : paused
-          ? `${agent.schedule} · paused`
-          : hermesStatus === null
-            ? 'checking Hermes…'
-            : agent.lastError !== null
-              ? 'needs attention'
-              : 'Hermes unavailable',
-    };
-  });
-
   return (
     <div className="v v-flow v-zen v-fleet">
       <div className="fl-shell">
-        <SideNav d={d} roster={roster} active="Board" onNav={navigate} />
+        <SideNav active="Board" onNav={onNavigate} />
         <div className="fl-frame">
-          {appHeader}
+          <KitHeader />
+          {board.error && (
+            <div className="board-error" role="alert">
+              <span><strong>Board refresh failed.</strong> {board.error}</span>
+              <button type="button" onClick={() => void board.retry().catch(() => undefined)}>Try again</button>
+            </div>
+          )}
           <PipelineFilterBar
             now={s.now}
             capturedAt={board.pipelineCapturedAt}
@@ -257,7 +212,6 @@ export function FleetV() {
                 setRunSel({ type: 'action', id });
                 void board.openAction(id);
               }}
-              onOpenReminder={(id) => setRunSel({ type: 'reminder', id })}
             />
           </main>
         </div>
@@ -276,7 +230,6 @@ export function FleetV() {
             setRunSel({ type: 'action', id });
             void board.openAction(id);
           }}
-          onOpenReminder={(id) => setRunSel({ type: 'reminder', id })}
         />
       )}
       {runSel?.type === 'action' ? (

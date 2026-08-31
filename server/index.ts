@@ -12,7 +12,27 @@ import {
   GmailApiError,
 } from './gmailActivities.js';
 import { decorateEmailRecord } from './emailContent.js';
+import {
+  canForceRemoveConnection,
+  failedDisconnectUpdate,
+  googleRevocationIsComplete,
+  pendingDisconnectUpdate,
+} from './disconnectPolicy.js';
+import { GmailRestLabelClient, projectTopicToGmail } from './gmailLabelSync.js';
+import {
+  GmailLabelCompletion,
+  GmailLabelFailure,
+  GmailLabelSyncClaim,
+  runGmailLabelSyncBatch,
+} from './gmailLabelWorker.js';
+import { fetchWithTimeoutAndRetry } from './httpClient.js';
+import { bodyParserHttpError } from './httpErrors.js';
 import { isUuid } from './identifiers.js';
+import {
+  PendingOAuthAuthorization,
+  PendingOAuthAuthorizations,
+  StaleOAuthAuthorizationError,
+} from './oauthAuthorizationPolicy.js';
 import {
   parseQuoExport,
   QuoActivityInput,
@@ -20,6 +40,8 @@ import {
   QuoImportKind,
   QuoPhoneNumber,
 } from './quoCsv.js';
+import { SerializedTaskQueue } from './serializedTaskQueue.js';
+import { isPositiveSignalId, signalSettlementPayload } from './settlement.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -31,6 +53,8 @@ interface StoredConnectionBase {
   lastCheckedAt: string | null;
   lastHealthyAt: string | null;
   error: string | null;
+  /** Credentials stay durable while provider-side cleanup is pending. */
+  disconnectPending?: boolean;
 }
 
 interface StoredGmailConnection extends StoredConnectionBase {
@@ -152,14 +176,15 @@ interface QuoPhoneNumbersResponse {
   }>;
 }
 
-interface PendingAuthorization {
+interface PendingAuthorizationPayload {
   codeVerifier: string;
   redirectUri: string;
-  expiresAt: number;
 }
 
+type PendingAuthorization = PendingOAuthAuthorization<PendingAuthorizationPayload>;
 
-const app = express();
+
+export const app = express();
 const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const port = readPositiveInt(process.env.API_PORT, 8787);
@@ -176,6 +201,14 @@ const gmailActivitySyncIntervalMs = readPositiveInt(
   process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
   5 * 60_000,
 );
+const gmailLabelSyncIntervalMs = Math.max(5_000, readPositiveInt(
+  process.env.GMAIL_LABEL_SYNC_INTERVAL_MS,
+  30_000,
+));
+const gmailLabelSyncMaximumJobs = Math.min(
+  readPositiveInt(process.env.GMAIL_LABEL_SYNC_MAX_JOBS, 10),
+  100,
+);
 const supabaseProjectUrl = process.env.SUPABASE_PROJECT_URL?.trim().replace(/\/$/, '') ?? '';
 const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
@@ -191,12 +224,17 @@ const hermesAgentIds = new Set([
   'meta-ads-reporter',
 ]);
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
-const pendingAuthorizations = new Map<string, PendingAuthorization>();
+const gmailConnectionId = `gmail:${intendedEmail}`;
+const pendingAuthorizations = new PendingOAuthAuthorizations<PendingAuthorizationPayload>();
 const activeHealthChecks = new Map<string, Promise<PublicConnection>>();
 const activeActivitySyncs = new Map<string, Promise<ActivitySyncResult>>();
+const activeDisconnects = new Map<string, Promise<void>>();
 const lastActivitySyncAttemptAt = new Map<string, number>();
+const gmailLabelWorkerId = `fluid-server-${process.pid}-${randomUUID().slice(0, 8)}`;
 let store: ConnectionStore = { version: 1, connections: [] };
-let writeChain: Promise<void> = Promise.resolve();
+const storeWriteQueue = new SerializedTaskQueue();
+const connectionMutationQueue = new SerializedTaskQueue();
+let activeGmailLabelSync: Promise<void> | null = null;
 
 interface ActivitySyncResult {
   accountEmail: string;
@@ -228,7 +266,7 @@ interface StoredActivitySyncState {
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '16kb' }));
+app.use(express.json({ limit: '96kb' }));
 
 function readPositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10);
@@ -413,6 +451,10 @@ async function loadStore(): Promise<void> {
     store = { version: 1, connections: parsed.connections as StoredConnection[] };
     let migrated = false;
     for (const connection of store.connections) {
+      if (typeof connection.disconnectPending !== 'boolean') {
+        connection.disconnectPending = false;
+        migrated = true;
+      }
       if (connection.provider === 'gmail' && !Array.isArray(connection.scopes)) {
         // Existing grants predate Gmail label projection and are read-only.
         // Never infer write authority from a token we did not observe being granted.
@@ -434,13 +476,12 @@ async function loadStore(): Promise<void> {
 
 async function saveStore(): Promise<void> {
   const snapshot = `${JSON.stringify(store, null, 2)}\n`;
-  writeChain = writeChain.then(async () => {
+  await storeWriteQueue.run(async () => {
     await mkdir(dirname(storePath), { recursive: true });
     const temporaryPath = `${storePath}.${process.pid}.tmp`;
     await writeFile(temporaryPath, snapshot, { encoding: 'utf8', mode: 0o600 });
     await rename(temporaryPath, storePath);
   });
-  await writeChain;
 }
 
 // Ottawa Painters answer the phone Monday to Saturday. Silence outside those
@@ -549,6 +590,7 @@ async function toPublicConnection(connection: StoredConnection): Promise<PublicC
     updatedAt: connection.updatedAt,
     lastCheckedAt: connection.lastCheckedAt,
     lastHealthyAt: connection.lastHealthyAt,
+    disconnectPending: Boolean(connection.disconnectPending),
     nextCheckAt: new Date(nextAt).toISOString(),
     error:
       problems.length > 0
@@ -621,7 +663,7 @@ function base64UrlSha256(value: string): string {
 }
 
 async function fetchGoogleJson<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetchWithTimeoutAndRetry(url, init);
   const raw = await response.text();
   let payload: unknown = null;
   if (raw) {
@@ -648,9 +690,8 @@ function quoPhone(raw: string | undefined): string | null {
 }
 
 async function fetchQuoJson<T>(path: string, apiKey: string): Promise<T> {
-  const response = await fetch(`https://api.quo.com/v1${path}`, {
+  const response = await fetchWithTimeoutAndRetry(`https://api.quo.com/v1${path}`, {
     headers: { Accept: 'application/json', Authorization: apiKey },
-    signal: AbortSignal.timeout(30_000),
   });
   const raw = await response.text();
   let payload: unknown = null;
@@ -694,6 +735,48 @@ function selectedQuoPhoneNumbers(connection: StoredQuoConnection): QuoPhoneNumbe
   return connection.phoneNumbers.filter((number) => selected.has(number.id));
 }
 
+async function fluidFunctionJson<T>(
+  functionName: string,
+  action: string,
+  search: Record<string, string> = {},
+  init?: RequestInit,
+  options: {
+    headerName?: string;
+    serviceName?: string;
+    timeoutMs?: number;
+  } = {},
+): Promise<T> {
+  requireDatabaseConfigured();
+  const serviceName = options.serviceName ?? functionName;
+  const url = new URL(`${supabaseProjectUrl}/functions/v1/${functionName}`);
+  url.searchParams.set('action', action);
+  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
+  let response: globalThis.Response;
+  try {
+    response = await fetchWithTimeoutAndRetry(url, {
+      ...init,
+      headers: {
+        Accept: 'application/json',
+        [options.headerName ?? 'x-fluid-activity-secret']: activityFunctionSecret(),
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init?.headers ?? {}),
+      },
+    }, { timeoutMs: options.timeoutMs ?? 10_000 });
+  } catch {
+    throw new HttpError(502, `${serviceName} could not be reached`);
+  }
+  const raw = await response.text();
+  let payload: unknown = null;
+  if (raw) {
+    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
+  }
+  if (!response.ok) {
+    const detail = googleResponseError(payload) ?? `${serviceName} returned ${response.status}`;
+    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
+  }
+  return payload as T;
+}
+
 async function activityFunctionJson<T>(
   action:
     | 'list'
@@ -712,33 +795,9 @@ async function activityFunctionJson<T>(
   search: Record<string, string>,
   init?: RequestInit,
 ): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-gmail-activities`);
-  url.searchParams.set('action', action);
-  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
+  return await fluidFunctionJson<T>('fluid-gmail-activities', action, search, init, {
+    serviceName: 'Supabase activity service',
   });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try {
-      payload = JSON.parse(raw) as unknown;
-    } catch {
-      payload = raw;
-    }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Supabase activity service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
 }
 
 
@@ -755,34 +814,9 @@ async function quoFunctionJson<T>(
   init?: RequestInit,
   search: Record<string, string> = {},
 ): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(quoWebhookUrl());
-  url.searchParams.set('action', action);
-  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  return await fluidFunctionJson<T>('fluid-quo-events', action, search, init, {
+    serviceName: 'Supabase Quo service',
   });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try {
-      payload = JSON.parse(raw) as unknown;
-    } catch {
-      payload = raw;
-    }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Supabase Quo service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
 }
 
 
@@ -792,30 +826,9 @@ async function operationalFunctionJson<T>(
   search: Record<string, string> = {},
   init?: RequestInit,
 ): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-operational-context`);
-  url.searchParams.set('action', action);
-  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  return await fluidFunctionJson<T>('fluid-operational-context', action, search, init, {
+    serviceName: 'Operational context service',
   });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Operational context service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
 }
 
 async function realBoardFunctionJson<T>(
@@ -826,30 +839,20 @@ async function realBoardFunctionJson<T>(
   search: Record<string, string> = {},
   init?: RequestInit,
 ): Promise<T> {
-  requireDatabaseConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-real-board`);
-  url.searchParams.set('action', action);
-  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-    signal: init?.signal ?? AbortSignal.timeout(30_000),
+  return await fluidFunctionJson<T>('fluid-real-board', action, search, init, {
+    serviceName: 'Real Board service',
   });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try { payload = JSON.parse(raw) as unknown; } catch { payload = raw; }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Real Board service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
+}
+
+async function gmailLabelFunctionJson<T>(
+  action: 'status' | 'claim' | 'complete' | 'fail',
+  search: Record<string, string> = {},
+  init?: RequestInit,
+): Promise<T> {
+  return await fluidFunctionJson<T>('fluid-gmail-label-sync', action, search, init, {
+    headerName: 'x-fluid-gmail-label-sync-secret',
+    serviceName: 'Gmail label sync service',
+  });
 }
 
 
@@ -1176,30 +1179,10 @@ async function customerFunctionJson<T>(
   search: Record<string, string> = {},
 ): Promise<T> {
   requireActivityConfigured();
-  const url = new URL(`${supabaseProjectUrl}/functions/v1/fluid-customer-sync`);
-  url.searchParams.set('action', action);
-  for (const [key, value] of Object.entries(search)) url.searchParams.set(key, value);
-  const response = await fetch(url, {
-    headers: {
-      Accept: 'application/json',
-      'x-fluid-activity-secret': activityFunctionSecret(),
-    },
-    signal: AbortSignal.timeout(15_000),
+  return await fluidFunctionJson<T>('fluid-customer-sync', action, search, undefined, {
+    serviceName: 'Supabase people service',
+    timeoutMs: 15_000,
   });
-  const raw = await response.text();
-  let payload: unknown = null;
-  if (raw) {
-    try {
-      payload = JSON.parse(raw) as unknown;
-    } catch {
-      payload = raw;
-    }
-  }
-  if (!response.ok) {
-    const detail = googleResponseError(payload) ?? `Supabase people service returned ${response.status}`;
-    throw new HttpError(response.status >= 500 ? 502 : response.status, detail);
-  }
-  return payload as T;
 }
 
 function googleResponseError(payload: unknown): string | null {
@@ -1249,9 +1232,9 @@ async function exchangeAuthorizationCode(
     code,
     client_id: process.env.GOOGLE_CLIENT_ID ?? '',
     client_secret: process.env.GOOGLE_CLIENT_SECRET ?? '',
-    redirect_uri: pending.redirectUri,
+    redirect_uri: pending.payload.redirectUri,
     grant_type: 'authorization_code',
-    code_verifier: pending.codeVerifier,
+    code_verifier: pending.payload.codeVerifier,
   });
   return fetchGoogleJson<GoogleTokenResponse>('https://oauth2.googleapis.com/token', {
     method: 'POST',
@@ -1283,18 +1266,27 @@ async function getGmailProfile(accessToken: string): Promise<GmailProfile> {
 }
 
 async function revokeGoogleToken(token: string): Promise<void> {
-  const url = new URL('https://oauth2.googleapis.com/revoke');
-  url.searchParams.set('token', token);
-  const response = await fetch(url, {
+  const response = await fetchWithTimeoutAndRetry('https://oauth2.googleapis.com/revoke', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }),
   });
-  if (!response.ok) throw new Error(`Google token revocation returned ${response.status}`);
+  // A revoked/expired credential already satisfies the cleanup invariant. This
+  // also makes retrying safe when the first successful response was lost.
+  if (googleRevocationIsComplete(response.status)) {
+    await response.body?.cancel().catch(() => undefined);
+    return;
+  }
+  await response.body?.cancel().catch(() => undefined);
+  throw new Error(`Google token revocation returned ${response.status}`);
 }
 
 async function performHealthCheck(connectionId: string): Promise<PublicConnection> {
   const connection = store.connections.find((item) => item.id === connectionId);
   if (!connection) throw new HttpError(404, 'Connection not found');
+  if (connection.disconnectPending) {
+    throw new HttpError(409, 'Connection cleanup is pending; retry disconnect instead');
+  }
   if (connection.provider === 'gmail') requireGmailConfigured();
   else if (connection.provider === 'quo' && quoConfigurationProblems().length > 0) {
     throw new HttpError(503, `Missing server configuration: ${quoConfigurationProblems().join(', ')}`);
@@ -1342,7 +1334,9 @@ async function performHealthCheck(connectionId: string): Promise<PublicConnectio
 function checkConnection(connectionId: string): Promise<PublicConnection> {
   const running = activeHealthChecks.get(connectionId);
   if (running) return running;
-  const check = performHealthCheck(connectionId).finally(() => {
+  const check = connectionMutationQueue.run(
+    async () => await performHealthCheck(connectionId),
+  ).finally(() => {
     activeHealthChecks.delete(connectionId);
   });
   activeHealthChecks.set(connectionId, check);
@@ -1351,6 +1345,7 @@ function checkConnection(connectionId: string): Promise<PublicConnection> {
 
 async function performActivitySync(connection: StoredGmailConnection): Promise<ActivitySyncResult> {
   requireActivityConfigured();
+  assertGmailConnectionActive(connection);
   const startedAt = new Date().toISOString();
   let previousState: StoredActivitySyncState | null = null;
   let stateLoaded = false;
@@ -1362,6 +1357,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
     if (!accountEmail || accountEmail !== connection.email.toLowerCase()) {
       throw new Error(`Google returned a different mailbox (${accountEmail ?? 'unknown'})`);
     }
+    assertGmailConnectionActive(connection);
 
     const statePayload = await activityFunctionJson<{ sync: StoredActivitySyncState | null }>(
       'state',
@@ -1401,6 +1397,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
     } else {
       nextHistoryId = imported.historyId;
     }
+    assertGmailConnectionActive(connection);
 
     const completedAt = new Date().toISOString();
     const syncStateBase = {
@@ -1414,6 +1411,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
     };
     let upserted = 0;
     for (let index = 0; index < imported.activities.length; index += 200) {
+      assertGmailConnectionActive(connection);
       const activities = imported.activities.slice(index, index + 200);
       upserted += activities.length;
       await activityFunctionJson<{ upserted: number }>('upsert', {}, {
@@ -1431,6 +1429,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
         }),
       });
     }
+    assertGmailConnectionActive(connection);
     await activityFunctionJson<{ upserted: number }>('upsert', {}, {
       method: 'POST',
       body: JSON.stringify({
@@ -1449,6 +1448,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
       } satisfies { activities: GmailActivityRow[]; syncState: Record<string, unknown> }),
     });
 
+    assertGmailConnectionActive(connection);
     connection.status = 'connected';
     connection.lastCheckedAt = completedAt;
     connection.lastHealthyAt = completedAt;
@@ -1470,7 +1470,7 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
     const message = publicGoogleError(error);
     // If the state read itself failed, do not overwrite a cursor we never saw.
     // A later retry can safely resume from the durable value already in Supabase.
-    if (stateLoaded) {
+    if (stateLoaded && gmailConnectionIsActive(connection)) {
       await activityFunctionJson<{ upserted: number }>('upsert', {}, {
         method: 'POST',
         body: JSON.stringify({
@@ -1495,7 +1495,21 @@ async function performActivitySync(connection: StoredGmailConnection): Promise<A
   }
 }
 
+function gmailConnectionIsActive(connection: StoredGmailConnection): boolean {
+  return store.connections.some((candidate) => candidate === connection) &&
+    !connection.disconnectPending;
+}
+
+function assertGmailConnectionActive(connection: StoredGmailConnection): void {
+  if (!gmailConnectionIsActive(connection)) {
+    throw new HttpError(409, 'Gmail connection cleanup is pending');
+  }
+}
+
 function syncActivities(connection: StoredGmailConnection): Promise<ActivitySyncResult> {
+  if (connection.disconnectPending) {
+    return Promise.reject(new HttpError(409, 'Connection cleanup is pending'));
+  }
   const running = activeActivitySyncs.get(connection.id);
   if (running) return running;
   lastActivitySyncAttemptAt.set(connection.id, Date.now());
@@ -1510,7 +1524,7 @@ async function syncDueActivities(): Promise<void> {
   if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
   const now = Date.now();
   const due = store.connections.filter((connection): connection is StoredGmailConnection => {
-    if (connection.provider !== 'gmail') return false;
+    if (connection.provider !== 'gmail' || connection.disconnectPending) return false;
     const lastAttempt = lastActivitySyncAttemptAt.get(connection.id) ?? 0;
     return now - lastAttempt >= gmailActivitySyncIntervalMs;
   });
@@ -1526,6 +1540,76 @@ async function syncDueActivities(): Promise<void> {
       console.warn(`Gmail activity auto-sync failed: ${publicGoogleError(result.reason)}`);
     }
   }
+}
+
+async function syncGmailLabelsForConnection(
+  connection: StoredGmailConnection,
+): Promise<{ claimed: number; completed: number; failed: number }> {
+  requireActivityConfigured();
+  if (connection.disconnectPending || !gmailCanModifyLabels(connection)) {
+    return { claimed: 0, completed: 0, failed: 0 };
+  }
+  const accessToken = await refreshAccessToken(decryptToken(connection.encryptedRefreshToken));
+  const client = new GmailRestLabelClient(accessToken);
+  return await runGmailLabelSyncBatch({
+    maxJobs: gmailLabelSyncMaximumJobs,
+    shouldContinue: () => gmailConnectionIsActive(connection) && gmailCanModifyLabels(connection),
+    claim: async () => await gmailLabelFunctionJson<GmailLabelSyncClaim>('claim', {}, {
+      method: 'POST',
+      body: JSON.stringify({
+        worker: gmailLabelWorkerId,
+        accountEmail: connection.email.toLowerCase(),
+        leaseSeconds: 300,
+      }),
+    }),
+    project: async (messageId, desired, topics, mappings, supplemental) => {
+      return await projectTopicToGmail(client, messageId, desired, topics, mappings, supplemental);
+    },
+    complete: async (completion: GmailLabelCompletion) => {
+      await gmailLabelFunctionJson('complete', {}, {
+        method: 'POST',
+        body: JSON.stringify(completion),
+      });
+    },
+    fail: async (failure: GmailLabelFailure) => {
+      await gmailLabelFunctionJson('fail', {}, {
+        method: 'POST',
+        body: JSON.stringify(failure),
+      });
+    },
+  });
+}
+
+function syncDueGmailLabels(): Promise<void> {
+  if (activeGmailLabelSync) return activeGmailLabelSync;
+  const run = (async () => {
+    if (gmailConfigurationProblems().length > 0 || !supabaseProjectUrl) return;
+    const connections = store.connections.filter(
+      (connection): connection is StoredGmailConnection => (
+        connection.provider === 'gmail' &&
+        connection.status === 'connected' &&
+        !connection.disconnectPending &&
+        gmailCanModifyLabels(connection)
+      ),
+    );
+    for (const connection of connections) {
+      try {
+        const result = await syncGmailLabelsForConnection(connection);
+        if (result.claimed > 0) {
+          console.log(
+            `Gmail label sync processed ${result.claimed} job(s) for ${connection.email} ` +
+            `(${result.completed} completed, ${result.failed} failed).`,
+          );
+        }
+      } catch (error) {
+        console.warn(`Gmail label sync failed for ${connection.email}: ${publicGoogleError(error)}`);
+      }
+    }
+  })().finally(() => {
+    activeGmailLabelSync = null;
+  });
+  activeGmailLabelSync = run;
+  return run;
 }
 
 
@@ -1546,12 +1630,14 @@ async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
 
 
 async function checkAllConnections(): Promise<void> {
-  await Promise.allSettled(store.connections.map((connection) => checkConnection(connection.id)));
+  const active = store.connections.filter((connection) => !connection.disconnectPending);
+  await Promise.allSettled(active.map((connection) => checkConnection(connection.id)));
 }
 
 async function checkDueConnections(): Promise<void> {
   const now = Date.now();
   const due = store.connections.filter((connection) => {
+    if (connection.disconnectPending) return false;
     if (!connection.lastCheckedAt) return true;
     const lastCheckedAt = Date.parse(connection.lastCheckedAt);
     return !Number.isFinite(lastCheckedAt) || now - lastCheckedAt >= healthCheckIntervalMs;
@@ -1591,11 +1677,12 @@ app.post('/api/connections/gmail/authorize', (req, res, next) => {
     const state = randomBytes(32).toString('base64url');
     const codeVerifier = randomBytes(48).toString('base64url');
     const redirectUri = callbackUri(req);
-    pendingAuthorizations.set(state, {
-      codeVerifier,
-      redirectUri,
-      expiresAt: Date.now() + 10 * 60_000,
-    });
+    pendingAuthorizations.begin(
+      state,
+      gmailConnectionId,
+      Date.now() + 10 * 60_000,
+      { codeVerifier, redirectUri },
+    );
     const authorizationUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authorizationUrl.search = new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID ?? '',
@@ -1618,8 +1705,7 @@ app.post('/api/connections/gmail/authorize', (req, res, next) => {
 
 app.get('/api/oauth/google/callback', async (req, res) => {
   const state = typeof req.query.state === 'string' ? req.query.state : '';
-  const pending = state ? pendingAuthorizations.get(state) : undefined;
-  if (state) pendingAuthorizations.delete(state);
+  const pending = state ? pendingAuthorizations.consume(state) : undefined;
 
   const oauthError = typeof req.query.error === 'string' ? req.query.error : null;
   if (oauthError) {
@@ -1636,10 +1722,12 @@ app.get('/api/oauth/google/callback', async (req, res) => {
     return;
   }
 
+  let tokenToRevokeOnCancellation: string | null = null;
   try {
     requireGmailConfigured();
     const tokens = await exchangeAuthorizationCode(code, pending);
     if (!tokens.access_token) throw new Error('Google did not return an access token');
+    tokenToRevokeOnCancellation = tokens.refresh_token ?? tokens.access_token;
     const scopes = googleScopes(tokens.scope);
     if (!scopes.includes(GMAIL_MODIFY_SCOPE)) {
       const tokenToRevoke = tokens.refresh_token ?? tokens.access_token;
@@ -1655,37 +1743,50 @@ app.get('/api/oauth/google/callback', async (req, res) => {
       throw new Error(`Please sign in as ${intendedEmail}; Google returned ${email}`);
     }
 
-    const existing = store.connections.find(
-      (connection): connection is StoredGmailConnection => connection.provider === 'gmail' && connection.email.toLowerCase() === email,
-    );
-    const refreshToken = tokens.refresh_token ??
-      (existing ? decryptToken(existing.encryptedRefreshToken) : null);
-    if (!refreshToken) {
-      throw new Error('Google did not issue offline access. Remove Fluid from Google account access and try again.');
-    }
-    const now = new Date().toISOString();
-    const connection: StoredGmailConnection = {
-      id: `gmail:${email}`,
-      provider: 'gmail',
-      email,
-      scopes,
-      status: 'connected',
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      lastCheckedAt: now,
-      lastHealthyAt: now,
-      error: null,
-      encryptedRefreshToken: encryptToken(refreshToken),
-    };
-    if (existing) Object.assign(existing, connection);
-    else store.connections.push(connection);
-    await saveStore();
+    await connectionMutationQueue.run(async () => {
+      // A disconnect or newer authorization may have happened while Google
+      // exchanged the code and loaded the profile. Check the claimed
+      // generation under the same queue used by connection removal before
+      // committing any credential.
+      pendingAuthorizations.assertCurrent(pending);
+      const existing = store.connections.find(
+        (connection): connection is StoredGmailConnection => (
+          connection.provider === 'gmail' && connection.email.toLowerCase() === email
+        ),
+      );
+      const refreshToken = tokens.refresh_token ??
+        (existing ? decryptToken(existing.encryptedRefreshToken) : null);
+      if (!refreshToken) {
+        throw new Error('Google did not issue offline access. Remove Fluid from Google account access and try again.');
+      }
+      const now = new Date().toISOString();
+      const connection: StoredGmailConnection = {
+        id: gmailConnectionId,
+        provider: 'gmail',
+        email,
+        scopes,
+        status: 'connected',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        lastCheckedAt: now,
+        lastHealthyAt: now,
+        error: null,
+        disconnectPending: false,
+        encryptedRefreshToken: encryptToken(refreshToken),
+      };
+      if (existing) Object.assign(existing, connection);
+      else store.connections.push(connection);
+      await saveStore();
+    });
     res.redirect(callbackRedirect(
       req,
       'connected',
       `${email} passed its first health check. Fluid labels are enabled for new inbound mail.`,
     ));
   } catch (error) {
+    if (error instanceof StaleOAuthAuthorizationError && tokenToRevokeOnCancellation) {
+      await revokeGoogleToken(tokenToRevokeOnCancellation).catch(() => undefined);
+    }
     res.redirect(callbackRedirect(req, 'error', publicGoogleError(error)));
   }
 });
@@ -1701,30 +1802,39 @@ app.post('/api/connections/quo/connect', async (req, res, next) => {
     }
     const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
     if (!apiKey || apiKey.length > 2_048) throw new HttpError(400, 'Paste a valid Quo API key');
-    const phoneNumbers = await getQuoPhoneNumbers(apiKey).catch((error: unknown) => {
-      throw new HttpError(400, publicQuoError(error));
+    const result = await connectionMutationQueue.run(async () => {
+      const phoneNumbers = await getQuoPhoneNumbers(apiKey).catch((error: unknown) => {
+        throw new HttpError(400, publicQuoError(error));
+      });
+      const existing = store.connections.find(
+        (item): item is StoredQuoConnection => item.provider === 'quo',
+      );
+      const now = new Date().toISOString();
+      const connection: StoredQuoConnection = {
+        id: existing?.id ?? 'quo:workspace',
+        provider: 'quo',
+        phoneNumbers,
+        selectedPhoneNumberIds: (existing?.selectedPhoneNumberIds ?? [])
+          .filter((id) => phoneNumbers.some((number) => number.id === id)),
+        status: 'connected',
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        lastCheckedAt: now,
+        lastHealthyAt: now,
+        error: null,
+        disconnectPending: false,
+        encryptedApiKey: encryptToken(apiKey),
+      };
+      await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
+      if (existing) Object.assign(existing, connection);
+      else store.connections.push(connection);
+      await saveStore();
+      return {
+        created: !existing,
+        connection: await toPublicConnection(connection),
+      };
     });
-    const existing = store.connections.find((item): item is StoredQuoConnection => item.provider === 'quo');
-    const now = new Date().toISOString();
-    const connection: StoredQuoConnection = {
-      id: existing?.id ?? 'quo:workspace',
-      provider: 'quo',
-      phoneNumbers,
-      selectedPhoneNumberIds: (existing?.selectedPhoneNumberIds ?? [])
-        .filter((id) => phoneNumbers.some((number) => number.id === id)),
-      status: 'connected',
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      lastCheckedAt: now,
-      lastHealthyAt: now,
-      error: null,
-      encryptedApiKey: encryptToken(apiKey),
-    };
-    await syncQuoScope(connection, selectedQuoPhoneNumbers(connection));
-    if (existing) Object.assign(existing, connection);
-    else store.connections.push(connection);
-    await saveStore();
-    res.status(existing ? 200 : 201).json({ connection: await toPublicConnection(connection) });
+    res.status(result.created ? 201 : 200).json({ connection: result.connection });
   } catch (error) {
     next(error);
   }
@@ -1732,25 +1842,33 @@ app.post('/api/connections/quo/connect', async (req, res, next) => {
 
 app.put('/api/connections/quo/:id/scope', async (req, res, next) => {
   try {
-    const connection = store.connections.find(
-      (item): item is StoredQuoConnection => item.provider === 'quo' && item.id === req.params.id,
-    );
-    if (!connection) throw new HttpError(404, 'Quo connection not found');
-    const rawIds = req.body?.phoneNumberIds;
-    if (!Array.isArray(rawIds) || rawIds.length > connection.phoneNumbers.length) {
-      throw new HttpError(400, 'Choose valid Quo phone lines');
-    }
-    const selectedIds = [...new Set(rawIds.filter((id): id is string => typeof id === 'string' && id.trim() !== ''))];
-    const availableIds = new Set(connection.phoneNumbers.map((number) => number.id));
-    if (selectedIds.some((id) => !availableIds.has(id))) {
-      throw new HttpError(400, 'One or more selected Quo phone lines are unavailable');
-    }
-    const selectedNumbers = connection.phoneNumbers.filter((number) => selectedIds.includes(number.id));
-    await syncQuoScope(connection, selectedNumbers);
-    connection.selectedPhoneNumberIds = selectedIds;
-    connection.updatedAt = new Date().toISOString();
-    await saveStore();
-    res.json({ connection: await toPublicConnection(connection) });
+    const connection = await connectionMutationQueue.run(async () => {
+      const stored = store.connections.find(
+        (item): item is StoredQuoConnection => item.provider === 'quo' && item.id === req.params.id,
+      );
+      if (!stored) throw new HttpError(404, 'Quo connection not found');
+      if (stored.disconnectPending) {
+        throw new HttpError(409, 'Connection cleanup is pending; retry disconnect instead');
+      }
+      const rawIds = req.body?.phoneNumberIds;
+      if (!Array.isArray(rawIds) || rawIds.length > stored.phoneNumbers.length) {
+        throw new HttpError(400, 'Choose valid Quo phone lines');
+      }
+      const selectedIds = [...new Set(rawIds.filter(
+        (id): id is string => typeof id === 'string' && id.trim() !== '',
+      ))];
+      const availableIds = new Set(stored.phoneNumbers.map((number) => number.id));
+      if (selectedIds.some((id) => !availableIds.has(id))) {
+        throw new HttpError(400, 'One or more selected Quo phone lines are unavailable');
+      }
+      const selectedNumbers = stored.phoneNumbers.filter((number) => selectedIds.includes(number.id));
+      await syncQuoScope(stored, selectedNumbers);
+      stored.selectedPhoneNumberIds = selectedIds;
+      stored.updatedAt = new Date().toISOString();
+      await saveStore();
+      return await toPublicConnection(stored);
+    });
+    res.json({ connection });
   } catch (error) {
     next(error);
   }
@@ -1927,26 +2045,91 @@ app.post('/api/connections/:id/check', async (req, res, next) => {
   }
 });
 
-app.delete('/api/connections/:id', async (req, res, next) => {
-  try {
-    const index = store.connections.findIndex((connection) => connection.id === req.params.id);
+async function performDisconnect(connectionId: string): Promise<void> {
+  // Invalidate a callback immediately, before waiting for the mutation queue.
+  // A callback already exchanging its code will then fail its generation check
+  // instead of recreating this row after provider cleanup finishes.
+  if (connectionId === gmailConnectionId) pendingAuthorizations.cancel(connectionId);
+
+  await connectionMutationQueue.run(async () => {
+    const connection = store.connections.find((item) => item.id === connectionId);
+    if (!connection) throw new HttpError(404, 'Connection not found');
+
+    Object.assign(connection, pendingDisconnectUpdate(new Date().toISOString()));
+    await saveStore();
+
+    try {
+      if (connection.provider === 'gmail') {
+        const activeWork: Promise<unknown>[] = [];
+        const activitySync = activeActivitySyncs.get(connection.id);
+        if (activitySync) activeWork.push(activitySync);
+        if (activeGmailLabelSync) activeWork.push(activeGmailLabelSync);
+        await Promise.allSettled(activeWork);
+        // An activity sync that was already committing when disconnect began
+        // may have refreshed health fields. Restore the cleanup state before
+        // touching the provider credential.
+        Object.assign(connection, pendingDisconnectUpdate(new Date().toISOString()));
+        await saveStore();
+        await revokeGoogleToken(decryptToken(connection.encryptedRefreshToken));
+      } else {
+        await syncQuoScope(connection, []);
+      }
+    } catch (error) {
+      const detail = connection.provider === 'gmail'
+        ? publicGoogleError(error)
+        : publicQuoError(error);
+      const failure = failedDisconnectUpdate(detail, new Date().toISOString());
+      Object.assign(connection, failure);
+      await saveStore();
+      throw new HttpError(502, failure.error);
+    }
+
+    const index = store.connections.findIndex((item) => item.id === connectionId);
+    if (index !== -1) {
+      store.connections.splice(index, 1);
+      await saveStore();
+    }
+  });
+}
+
+function disconnectConnection(connectionId: string): Promise<void> {
+  const running = activeDisconnects.get(connectionId);
+  if (running) return running;
+  const disconnect = performDisconnect(connectionId).finally(() => {
+    activeDisconnects.delete(connectionId);
+  });
+  activeDisconnects.set(connectionId, disconnect);
+  return disconnect;
+}
+
+async function forceRemovePendingConnection(connectionId: string): Promise<void> {
+  if (connectionId === gmailConnectionId) pendingAuthorizations.cancel(connectionId);
+  await connectionMutationQueue.run(async () => {
+    const index = store.connections.findIndex((item) => item.id === connectionId);
     if (index === -1) throw new HttpError(404, 'Connection not found');
     const connection = store.connections[index];
-    if (!connection) throw new HttpError(404, 'Connection not found');
-    if (connection.provider === 'gmail') {
-      try {
-        requireGmailConfigured();
-        await revokeGoogleToken(decryptToken(connection.encryptedRefreshToken));
-      } catch (error) {
-        console.warn(`Gmail grant could not be revoked remotely: ${publicGoogleError(error)}`);
-      }
-    } else {
-      await syncQuoScope(connection, []).catch((error) => {
-        console.warn(`Quo capture scope could not be cleared remotely: ${publicQuoError(error)}`);
-      });
+    if (!connection || !canForceRemoveConnection(connection.disconnectPending)) {
+      throw new HttpError(409, 'Normal provider cleanup must be attempted before local force removal');
     }
+    console.warn('Forced local connection removal after provider cleanup failure', {
+      connectionId,
+      provider: connection.provider,
+      removedAt: new Date().toISOString(),
+      lastError: connection.error,
+    });
     store.connections.splice(index, 1);
     await saveStore();
+  });
+}
+
+app.delete('/api/connections/:id', async (req, res, next) => {
+  try {
+    const force = typeof req.query.force === 'string' ? req.query.force : undefined;
+    if (force !== undefined && force !== 'local') {
+      throw new HttpError(400, 'Invalid force removal mode');
+    }
+    if (force === 'local') await forceRemovePendingConnection(req.params.id);
+    else await disconnectConnection(req.params.id);
     res.status(204).end();
   } catch (error) {
     next(error);
@@ -2138,6 +2321,18 @@ app.get('/api/board/signals/:id', async (req, res, next) => {
         : item)
       : payload.history;
     res.json({ ...payload, signal, history });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/signals/:signalId/settle', async (req, res, next) => {
+  try {
+    if (!isPositiveSignalId(req.params.signalId)) throw new HttpError(400, 'Invalid Signal id');
+    res.json(await realBoardFunctionJson('settle', {}, {
+      method: 'POST',
+      body: JSON.stringify(signalSettlementPayload(req.params.signalId)),
+    }));
   } catch (error) {
     next(error);
   }
@@ -2858,55 +3053,68 @@ function errorMessage(error: unknown): string {
 }
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  const status = error instanceof HttpError ? error.status : 500;
-  const message = error instanceof HttpError ? error.message : 'Unexpected server error';
+  const parserError = bodyParserHttpError(error);
+  const status = error instanceof HttpError
+    ? error.status
+    : parserError
+      ? parserError.status
+      : 500;
+  const message = error instanceof HttpError
+    ? error.message
+    : parserError?.message ?? 'Unexpected server error';
   if (status >= 500 && !(error instanceof HttpError)) console.error(error);
   res.status(status).json({ error: message });
 });
 
-await loadStore();
+export async function bootstrap() {
+  await loadStore();
 
-const startupCheck = setTimeout(() => {
-  void checkAllConnections();
-}, 5_000);
-startupCheck.unref();
+  const startupCheck = setTimeout(() => {
+    void checkAllConnections();
+  }, 5_000);
+  startupCheck.unref();
 
-const startupActivitySync = setTimeout(() => {
-  void syncDueActivities();
-}, 10_000);
-startupActivitySync.unref();
-
-const healthTimer = setInterval(
-  () => {
-    void checkDueConnections();
-  },
-  Math.min(healthCheckIntervalMs, 30_000),
-);
-healthTimer.unref();
-
-const activitySyncTimer = setInterval(
-  () => {
+  const startupActivitySync = setTimeout(() => {
     void syncDueActivities();
-  },
-  Math.min(gmailActivitySyncIntervalMs, 30_000),
-);
-activitySyncTimer.unref();
+  }, 10_000);
+  startupActivitySync.unref();
 
+  const startupGmailLabelSync = setTimeout(() => {
+    void syncDueGmailLabels();
+  }, 12_500);
+  startupGmailLabelSync.unref();
 
-const pendingCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [state, pending] of pendingAuthorizations) {
-    if (pending.expiresAt < now) pendingAuthorizations.delete(state);
-  }
-}, 60_000);
-pendingCleanupTimer.unref();
+  const healthTimer = setInterval(() => {
+    void checkDueConnections();
+  }, Math.min(healthCheckIntervalMs, 30_000));
+  healthTimer.unref();
 
-app.listen(port, () => {
-  console.log(`Fluid connections API listening on http://localhost:${port}`);
-  if (gmailConfigurationProblems().length > 0) {
-    console.log('Gmail connection is disabled until the values in .env.example are configured.');
-  }
-  if (quoConfigurationProblems().length > 0) {
-    console.log('Quo connection is disabled until token encryption is configured.');
-  }
-});
+  const activitySyncTimer = setInterval(() => {
+    void syncDueActivities();
+  }, Math.min(gmailActivitySyncIntervalMs, 30_000));
+  activitySyncTimer.unref();
+
+  const gmailLabelSyncTimer = setInterval(() => {
+    void syncDueGmailLabels();
+  }, gmailLabelSyncIntervalMs);
+  gmailLabelSyncTimer.unref();
+
+  const pendingCleanupTimer = setInterval(() => {
+    pendingAuthorizations.pruneExpired(Date.now());
+  }, 60_000);
+  pendingCleanupTimer.unref();
+
+  return app.listen(port, '127.0.0.1', () => {
+    console.log(`Fluid connections API listening on http://127.0.0.1:${port}`);
+    if (gmailConfigurationProblems().length > 0) {
+      console.log('Gmail connection is disabled until the values in .env.example are configured.');
+    }
+    if (quoConfigurationProblems().length > 0) {
+      console.log('Quo connection is disabled until token encryption is configured.');
+    }
+  });
+}
+
+const isMainModule = process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (isMainModule) await bootstrap();

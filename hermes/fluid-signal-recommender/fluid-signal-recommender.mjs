@@ -3,8 +3,8 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const baseUrl = (process.env.FLUID_SIGNAL_RECOMMENDER_URL ??
-  'https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-signal-recommender').replace(/\/$/, '');
-const secret = process.env.FLUID_SIGNAL_RECOMMENDER_SECRET ?? process.env.FLUID_EMAIL_CATEGORIZER_SECRET ?? '';
+  'https://fskrxkiujtfuxntcrjam.supabase.co/functions/v1/fluid-signal-recommender').replace(/\/$/, '');
+const secret = process.env.FLUID_SIGNAL_RECOMMENDER_SECRET ?? '';
 const stateDir = process.env.FLUID_SIGNAL_RECOMMENDER_STATE_DIR ?? '/opt/data/fluid/signal-recommender';
 const promptVersion = 'signal-recommender-v2';
 const model = process.env.FLUID_SIGNAL_RECOMMENDER_MODEL ?? 'hermes';

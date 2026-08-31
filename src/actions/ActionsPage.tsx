@@ -1,5 +1,6 @@
 import { ReactNode, useCallback, useEffect, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
+import { apiJson as api } from '../lib/api';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './actions.css';
@@ -20,21 +21,6 @@ interface ActionDefinition {
   updatedAt: string;
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}) },
-  });
-  const payload = await response.json().catch(() => null) as T | { error?: string } | null;
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-      ? payload.error
-      : `Actions request returned ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
-}
-
 export function ActionsPage({ onNavigate, header }: { onNavigate: (label: string) => void; header: ReactNode }) {
   const [definitions, setDefinitions] = useState<ActionDefinition[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -49,8 +35,11 @@ export function ActionsPage({ onNavigate, header }: { onNavigate: (label: string
     setLoading(true);
     try {
       const payload = await api<{ definitions: ActionDefinition[] }>('/api/action-definitions');
-      const order = ['draft-email-to-customer', 'draft-sms-reply', 'create-follow-up-reminder', 'create-internal-task'];
-      setDefinitions(payload.definitions.slice().sort((left, right) => order.indexOf(left.key) - order.indexOf(right.key)));
+      setDefinitions(payload.definitions.filter((definition) =>
+        definition.key === 'draft-email-to-customer'
+        && definition.handler === 'draft-email-reply'
+        && definition.executable,
+      ));
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not load Actions');
@@ -106,10 +95,19 @@ export function ActionsPage({ onNavigate, header }: { onNavigate: (label: string
                 <section className="al-list" aria-label="Built-in Actions">
                   {definitions.map((definition) => {
                     const editing = editingId === definition.id;
+                    const nextName = draftName.trim();
+                    const nextDescription = draftDescription.trim();
+                    const nextTone = draftTone.trim();
+                    const currentTone = typeof definition.configuration.tone === 'string'
+                      ? definition.configuration.tone.trim()
+                      : '';
+                    const hasChanges = nextName !== definition.name.trim()
+                      || nextDescription !== definition.description.trim()
+                      || nextTone !== currentTone;
                     return (
                       <article key={definition.id} className={`al-row${definition.enabled ? ' is-enabled' : ''}`}>
                         <div className="al-icon" aria-hidden="true">
-                          {definition.handler === 'draft-email-reply' ? '✉' : definition.handler === 'draft-sms-reply' ? '◌' : definition.handler === 'create-reminder' ? '◷' : '✓'}
+                          ✉
                         </div>
                         <div className="al-copy">
                           {editing ? (
@@ -121,9 +119,9 @@ export function ActionsPage({ onNavigate, header }: { onNavigate: (label: string
                               )}
                               <div className="al-edit-actions">
                                 <button type="button" onClick={() => setEditingId(null)}>Cancel</button>
-                                <button type="button" className="is-primary" disabled={busyId === definition.id || !draftName.trim() || !draftDescription.trim()} onClick={() => void patchDefinition(definition, {
-                                  name: draftName, description: draftDescription,
-                                  configuration: { ...definition.configuration, ...(definition.handler === 'draft-email-reply' ? { tone: draftTone.trim() } : {}) },
+                                <button type="button" className="is-primary" disabled={busyId === definition.id || !nextName || !nextDescription || !hasChanges} onClick={() => void patchDefinition(definition, {
+                                  name: nextName, description: nextDescription,
+                                  configuration: { ...definition.configuration, ...(definition.handler === 'draft-email-reply' ? { tone: nextTone } : {}) },
                                 })}>{busyId === definition.id ? 'Saving…' : 'Save'}</button>
                               </div>
                             </div>
@@ -131,7 +129,7 @@ export function ActionsPage({ onNavigate, header }: { onNavigate: (label: string
                             <>
                               <div className="al-title-line">
                                 <h2>{definition.name}</h2>
-                                <span>{definition.enabled ? 'Enabled' : definition.executable ? 'Disabled' : 'Coming next'}</span>
+                                <span>{definition.enabled ? 'Enabled' : 'Disabled'}</span>
                               </div>
                               <p>{definition.description}</p>
                               <small>{definition.executionMode} · confirmation required · v{definition.version}</small>

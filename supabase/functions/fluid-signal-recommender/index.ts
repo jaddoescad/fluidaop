@@ -1,13 +1,8 @@
-import { createClient } from 'npm:@supabase/supabase-js@2.95.0';
+import { createAdminClient, jsonResponse as response, validSecret } from '../_shared/runtime.ts';
 
 const AGENT_KEY = 'signal-recommender';
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
 
 type JsonRecord = Record<string, unknown>;
-
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
 
 function object(value: unknown): value is JsonRecord {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -30,40 +25,11 @@ function uuid(value: unknown): value is string {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = new TextEncoder().encode(left);
-  const b = new TextEncoder().encode(right);
-  let different = a.length ^ b.length;
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
-}
-
 function authorized(req: Request): boolean {
   const supplied = req.headers.get('x-fluid-agent-secret')?.trim() ?? '';
-  if (supplied.length < 43) return false;
-  const expected = [
+  return validSecret(supplied, [
     Deno.env.get('FLUID_SIGNAL_RECOMMENDER_SECRET'),
-    Deno.env.get('FLUID_SIGNAL_TRIAGE_SECRET'),
-    Deno.env.get('FLUID_EMAIL_CATEGORIZER_SECRET'),
-    Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET'),
-  ].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
-  return expected.some((value) => value.length >= 43 && safeEqual(value, supplied));
+  ]);
 }
 
 function errorMessage(error: unknown): string {
@@ -82,11 +48,7 @@ async function bodyOf(req: Request): Promise<JsonRecord | null> {
 Deno.serve(async (req: Request) => {
   if (!authorized(req)) return response({ error: 'Unauthorized' }, 401);
   try {
-    const url = Deno.env.get('SUPABASE_URL');
-    if (!url) throw new Error('Supabase URL is unavailable');
-    const client = createClient(url, databaseSecret(), {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const client = createAdminClient();
     const action = new URL(req.url).searchParams.get('action') ?? 'status';
     if (req.method === 'GET' && action === 'status') {
       const statuses = ['pending', 'leased', 'succeeded', 'failed'] as const;

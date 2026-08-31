@@ -1,4 +1,10 @@
-import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import {
+  createAdminClient,
+  jsonResponse as response,
+  safeEqual,
+  validSecret,
+} from '../_shared/runtime.ts';
 
 type ActivityInput = {
   source: 'quo';
@@ -124,13 +130,8 @@ type CallContentState = {
   nextRetryAt: string | null;
 };
 
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
 const encoder = new TextEncoder();
 const WORKSPACE_KEY = 'ottawa-painters';
-
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -140,40 +141,12 @@ function errorMessage(error: unknown): string {
   return 'Unexpected function error';
 }
 
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let different = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
-}
-
 function authorizedInternal(req: Request): boolean {
   const supplied = req.headers.get('x-fluid-activity-secret') ?? '';
-  if (!supplied) return false;
-  const expected = [
+  return validSecret(supplied, [
     Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET'),
     Deno.env.get('FLUID_QUO_MAINTENANCE_SECRET'),
-    Deno.env.get('FLUID_EMAIL_CATEGORIZER_SECRET'),
-  ].filter((value): value is string => Boolean(value));
-  return expected.some((value) => safeEqual(value, supplied));
+  ]);
 }
 
 function cleanString(value: unknown, maximum: number): string | null {
@@ -1347,11 +1320,7 @@ function webhookActivity(payload: Record<string, unknown>, scope: ActiveScope): 
 
 export async function handleRequest(req: Request): Promise<Response> {
   try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    if (!supabaseUrl) throw new Error('Supabase URL is unavailable');
-    const supabase = createClient(supabaseUrl, databaseSecret(), {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = createAdminClient();
     const url = new URL(req.url);
     const action = url.searchParams.get('action');
     if (action) return await handleInternal(req, supabase, action);

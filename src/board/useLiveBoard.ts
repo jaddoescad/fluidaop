@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Act } from './contract';
+import { apiJson as json, isRecord } from '../lib/api';
 import {
   ActionCard,
   ActionDetail,
-  AgentRun,
   Person,
   PersonRole,
   PipelineDeal,
@@ -23,12 +23,6 @@ import {
   SignalTranscript,
   State,
 } from '../types';
-
-interface BoardSummaryResponse {
-  signalsToday: number;
-  actionsOpen: number;
-  remindersDue: number;
-}
 
 interface ApiPerson {
   id: string;
@@ -254,6 +248,29 @@ interface CursorPage<T> {
   count?: number;
 }
 
+function isCursorPage(value: unknown): value is CursorPage<unknown> {
+  return isRecord(value)
+    && Array.isArray(value.items)
+    && (value.nextCursor === null || typeof value.nextCursor === 'string')
+    && (value.count === undefined || typeof value.count === 'number');
+}
+
+async function loadAllCursorItems<T>(path: string): Promise<T[]> {
+  const items: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const search = new URLSearchParams({ limit: '100' });
+    if (cursor) search.set('cursor', cursor);
+    const page = await json<CursorPage<T>>(`${path}?${search}`, undefined, isCursorPage as (value: unknown) => value is CursorPage<T>);
+    items.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor && seenCursors.has(cursor)) throw new Error('the server returned a repeated pagination cursor');
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor !== null);
+  return items;
+}
+
 interface ApiSignalDetail {
   signal: ApiSignal;
   recommendations: SignalRecommendation[];
@@ -326,23 +343,9 @@ interface ApiAction {
 interface ApiActionDetail { action: ApiAction; events: ActionDetail['events'] }
 
 function roleOf(roles: string[]): PersonRole {
-  const order: PersonRole[] = ['customer', 'lead', 'applicant', 'contractor', 'supplier', 'employee', 'painter', 'other'];
-  return order.find((role) => roles.includes(role)) ?? 'other';
-}
-
-async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}) },
-  });
-  const payload = await response.json().catch(() => null) as T | { error?: string } | null;
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
-      ? payload.error
-      : `Board request returned ${response.status}`;
-    throw new Error(message);
-  }
-  return payload as T;
+  const normalized = new Set(roles.map((role) => role === 'customer' ? 'lead' : role));
+  const order: PersonRole[] = ['lead', 'applicant', 'contractor', 'supplier', 'employee', 'painter', 'client', 'vendor', 'other'];
+  return order.find((role) => normalized.has(role)) ?? 'other';
 }
 
 function safeLabelColor(color: string | null | undefined): string | null {
@@ -591,7 +594,7 @@ function actionPerson(action: ApiAction): Person {
   return {
     id: action.personId ?? `signal:${action.sourceSignalId}`,
     name: action.contact?.displayName ?? action.recipient,
-    role: 'customer',
+    role: 'lead',
     kind: 'residential',
     note: action.recipient,
     tags: [],
@@ -607,7 +610,6 @@ function apiActionToAction(action: ApiAction): ActionCard {
     personId: action.personId ?? `signal:${action.sourceSignalId}`,
     sourceSignalId: action.sourceSignalId,
     reminderId: null,
-    kind: 'reply',
     title: action.title,
     createdAt: Date.parse(action.createdAt),
     snoozedUntil: 0,
@@ -620,26 +622,6 @@ function apiActionToAction(action: ApiAction): ActionCard {
     lastError: action.lastError,
     simulatedAt: action.simulatedAt ? Date.parse(action.simulatedAt) : null,
     actionDefinitionKey: action.actionDefinitionKey,
-  };
-}
-
-function actionRun(action: ApiAction): AgentRun {
-  const startedAt = Date.parse(action.createdAt);
-  if (action.status === 'drafting') return {
-    agent: 'Hermes', status: 'running', startedAt, resolveAt: Date.now() + 60_000,
-    outcome: 'review', note: '', rec: null, recTaken: false,
-  };
-  if (action.status === 'failed') return {
-    agent: 'Hermes', status: 'fail', startedAt, resolveAt: Date.parse(action.updatedAt),
-    outcome: 'fail', note: action.lastError ?? 'Drafting failed', rec: null, recTaken: false,
-  };
-  return {
-    agent: 'Hermes', status: 'review', startedAt, resolveAt: Date.parse(action.updatedAt),
-    outcome: 'review',
-    note: action.status === 'simulated'
-      ? 'Sent (simulation) — no customer message was sent.'
-      : 'Draft ready for your review.',
-    rec: null, recTaken: false,
   };
 }
 
@@ -657,8 +639,6 @@ function apiWorkToReminder(work: ApiWorkItem): Reminder {
     bornLive: false,
   };
 }
-
-const noOp = () => undefined;
 
 export interface LiveBoardController {
   s: State;
@@ -688,14 +668,13 @@ export interface LiveBoardController {
   openAction: (id: string) => Promise<void>;
   openPipelineHistory: (dealId: string) => Promise<void>;
   loadMoreHistory: (id: string) => Promise<void>;
+  retry: () => Promise<void>;
 }
 
 export function useLiveBoard(): LiveBoardController {
   const [booted, setBooted] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [paused, setPaused] = useState(false);
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [summary, setSummary] = useState<BoardSummaryResponse>({ signalsToday: 0, actionsOpen: 0, remindersDue: 0 });
   const [apiPeople, setApiPeople] = useState<ApiPerson[]>([]);
   const [peopleCount, setPeopleCount] = useState(0);
   const [apiSignals, setApiSignals] = useState<ApiSignal[]>([]);
@@ -733,10 +712,6 @@ export function useLiveBoard(): LiveBoardController {
   const [error, setError] = useState<string | null>(null);
   const requestRevision = useRef(0);
 
-  const loadSummary = useCallback(async () => {
-    setSummary(await json<BoardSummaryResponse>('/api/board/summary'));
-  }, []);
-
   const loadLabels = useCallback(async () => {
     const payload = await json<{ labels: ApiCatalogLabel[] }>('/api/labels');
     setApiLabels(payload.labels);
@@ -744,11 +719,11 @@ export function useLiveBoard(): LiveBoardController {
 
   const loadCreatedWork = useCallback(async () => {
     const [actions, reminders] = await Promise.all([
-      json<CursorPage<ApiAction>>('/api/board/actions?limit=100'),
-      json<CursorPage<ApiWorkItem>>('/api/board/reminders?limit=100'),
+      loadAllCursorItems<ApiAction>('/api/board/actions'),
+      loadAllCursorItems<ApiWorkItem>('/api/board/reminders'),
     ]);
-    setApiActions(actions.items);
-    setApiReminders(reminders.items);
+    setApiActions(actions);
+    setApiReminders(reminders);
   }, []);
 
   const loadPipeline = useCallback(async () => {
@@ -860,15 +835,23 @@ export function useLiveBoard(): LiveBoardController {
 
   useEffect(() => {
     let active = true;
-    Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
-      .catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Could not load the Board'))
-      .finally(() => {
-        if (!active) return;
-        setBooted(true);
-        void loadArchivedPipeline(false).catch((cause) => {
-          if (active) setError(cause instanceof Error ? cause.message : 'Could not load archived leads');
-        });
-      });
+    void Promise.allSettled([
+      loadCreatedWork(),
+      loadPeople(false),
+      loadSignals(false),
+      loadLabels(),
+      loadPipeline(),
+      loadArchivedPipeline(false),
+    ]).then((results) => {
+      if (!active) return;
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failure) {
+        setError(failure.reason instanceof Error ? failure.reason.message : 'Could not load the Board');
+      }
+      // Do not start focus-refresh or polling effects until every initial
+      // loader has either completed or reported its own failure.
+      setBooted(true);
+    });
     return () => { active = false; };
     // Initial request only; focus and view have their own bounded effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -885,13 +868,13 @@ export function useLiveBoard(): LiveBoardController {
   }, [focusId]);
 
   useEffect(() => {
-    if (!booted || paused) return;
+    if (!booted) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadSummary(), loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
+      void Promise.all([loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
         .catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not refresh the Board'));
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [booted, paused, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals, loadSummary]);
+  }, [booted, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals]);
 
   const openSignal = useCallback(async (id: string, personIdHint?: string) => {
     setDetails((current) => ({
@@ -1048,9 +1031,45 @@ export function useLiveBoard(): LiveBoardController {
     setApiSignals((current) => current.map((signal) => String(signal.id) === signalId
       ? { ...signal, review: { status: 'action_open', resolution: 'action_created', pendingRecommendationCount: 0 } }
       : signal));
-    await Promise.all([loadCreatedWork(), loadSummary(), loadPeople(false), loadSignals(false)]);
+    await Promise.all([loadCreatedWork(), loadPeople(false), loadSignals(false)]);
     return result.action.id;
-  }, [loadCreatedWork, loadPeople, loadSignals, loadSummary]);
+  }, [loadCreatedWork, loadPeople, loadSignals]);
+
+  const settleSignal = useCallback(async (signalId: string) => {
+    await json(`/api/board/signals/${encodeURIComponent(signalId)}/settle`, {
+      method: 'POST',
+      body: '{}',
+    });
+    const reviewedAt = Date.now();
+    setDetails((current) => current[signalId] ? {
+      ...current,
+      [signalId]: {
+        ...current[signalId],
+        signal: current[signalId].signal ? {
+          ...current[signalId].signal,
+          reviewStatus: 'settled',
+          reviewResolution: 'no_action',
+          reviewedBy: 'manager',
+          reviewedAt,
+          requiresReply: false,
+        } : null,
+        recommendations: [],
+      },
+    } : current);
+    setApiSignals((current) => current.map((signal) => String(signal.id) === signalId
+      ? {
+        ...signal,
+        review: {
+          status: 'settled',
+          resolution: 'no_action',
+          pendingRecommendationCount: 0,
+          reviewedBy: 'manager',
+          reviewedAt: new Date(reviewedAt).toISOString(),
+        },
+      }
+      : signal));
+    await Promise.all([loadPeople(false), loadSignals(false)]);
+  }, [loadPeople, loadSignals]);
 
   const updateActionDraft = useCallback(async (actionId: string, revision: number, draftBody: string) => {
     await json(`/api/board/actions/${actionId}/draft`, {
@@ -1063,8 +1082,8 @@ export function useLiveBoard(): LiveBoardController {
     await json(`/api/board/actions/${actionId}/simulate-send`, {
       method: 'POST', body: JSON.stringify({ revision }),
     });
-    await Promise.all([openAction(actionId), loadCreatedWork(), loadSummary()]);
-  }, [loadCreatedWork, loadSummary, openAction]);
+    await Promise.all([openAction(actionId), loadCreatedWork()]);
+  }, [loadCreatedWork, openAction]);
 
   const retryAction = useCallback(async (actionId: string) => {
     await json(`/api/board/actions/${actionId}/retry`, { method: 'POST', body: '{}' });
@@ -1078,8 +1097,26 @@ export function useLiveBoard(): LiveBoardController {
       delete next[actionId];
       return next;
     });
-    await Promise.all([loadCreatedWork(), loadSummary(), loadPeople(false), loadSignals(false)]);
-  }, [loadCreatedWork, loadPeople, loadSignals, loadSummary]);
+    await Promise.all([loadCreatedWork(), loadPeople(false), loadSignals(false)]);
+  }, [loadCreatedWork, loadPeople, loadSignals]);
+
+  const retry = useCallback(async () => {
+    setError(null);
+    const results = await Promise.allSettled([
+      loadCreatedWork(),
+      loadPeople(false),
+      loadSignals(false),
+      loadLabels(),
+      loadPipeline(),
+      loadArchivedPipeline(false),
+    ]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) {
+      const message = failure.reason instanceof Error ? failure.reason.message : 'Could not refresh the Board';
+      setError(message);
+      throw new Error(message);
+    }
+  }, [loadArchivedPipeline, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals]);
 
   const urgencyLabelByName = useMemo(() => new Map(
     apiLabels
@@ -1119,7 +1156,6 @@ export function useLiveBoard(): LiveBoardController {
   }, [apiActions, apiPeople, apiReminders, apiSignals, people]);
 
   const actions = useMemo(() => apiActions.map(apiActionToAction), [apiActions]);
-  const runs = useMemo(() => Object.fromEntries(apiActions.map((action) => [action.id, actionRun(action)])), [apiActions]);
   const reminders = useMemo(() => apiReminders.map(apiWorkToReminder), [apiReminders]);
   const pipelineDeals = useMemo(
     () => [...apiPipelineDeals, ...apiArchivedPipelineDeals].map(apiPipelineDealToDeal),
@@ -1129,60 +1165,24 @@ export function useLiveBoard(): LiveBoardController {
   const s = useMemo<State>(() => ({
     booted,
     now,
-    startedAt: now,
-    paused,
     focusId,
     people: allPeople,
     signals,
     reminders,
     actions,
-    runs,
-    completed: {},
-    handled: [],
-    log: [],
-    script: [],
-    nextRandomAt: Number.MAX_SAFE_INTEGER,
-    autoEnabled: { reply: false, reminder: false, stale: false, capture: false },
-    autoRuns: { reply: 0, reminder: 0, stale: 0, capture: 0 },
-    autoTrace: [],
-    sequences: [],
-    seqInstances: [],
-    boardSummary: {
-      signalsToday: summary.signalsToday,
-      openActions: summary.actionsOpen,
-      remindersDue: summary.remindersDue,
-    },
     signalDetails: details,
     actionDetails,
-  }), [actionDetails, actions, allPeople, booted, details, focusId, now, paused, reminders, runs, signals, summary]);
+  }), [actionDetails, actions, allPeople, booted, details, focusId, now, reminders, signals]);
 
   const act = useMemo<Act>(() => ({
     focus: setFocusId,
-    togglePause: () => setPaused((value) => !value),
+    settleSignal,
     acceptRecommendation,
     updateActionDraft,
     simulateActionSend,
     retryAction,
     dismissAction,
-    done: noOp,
-    snooze: noOp,
-    remDone: noOp,
-    remSnooze: noOp,
-    acceptTag: noOp,
-    runNba: noOp,
-    toggleAuto: noOp,
-    toggleSeq: noOp,
-    createReminder: noOp,
-    createAction: noOp,
-    enrollSeq: noOp,
-    undoAction: noOp,
-    undoReminder: noOp,
-    retryRun: noOp,
-    takeRec: noOp,
-    triggerReminder: noOp,
-    cancelReminder: noOp,
-    stopSeq: noOp,
-  }), [acceptRecommendation, dismissAction, retryAction, simulateActionSend, updateActionDraft]);
+  }), [acceptRecommendation, dismissAction, retryAction, settleSignal, simulateActionSend, updateActionDraft]);
 
   return {
     s,
@@ -1212,5 +1212,6 @@ export function useLiveBoard(): LiveBoardController {
     openAction,
     openPipelineHistory,
     loadMoreHistory,
+    retry,
   };
 }

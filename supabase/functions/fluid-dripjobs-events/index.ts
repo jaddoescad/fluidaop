@@ -1,38 +1,10 @@
-import { createClient } from 'npm:@supabase/supabase-js@2.95.0';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import { createAdminClient, jsonResponse as response, safeEqual } from '../_shared/runtime.ts';
 
 const MAX_BODY_BYTES = 128 * 1024;
 const encoder = new TextEncoder();
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
 
 type EventBody = Record<string, unknown>;
-
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
-
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let different = a.length ^ b.length;
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
-}
 
 export async function handleRequest(req: Request): Promise<Response> {
   if (req.method !== 'POST') return response({ error: 'Method not allowed' }, 405);
@@ -60,9 +32,12 @@ export async function handleRequest(req: Request): Promise<Response> {
     return response({ error: error instanceof Error ? error.message : 'Invalid request' }, 400);
   }
 
-  const url = Deno.env.get('SUPABASE_URL');
-  if (!url) return response({ error: 'DripJobs ingestion is not configured' }, 500);
-  const supabase = createClient(url, databaseSecret(), { auth: { persistSession: false } });
+  let supabase: SupabaseClient;
+  try {
+    supabase = createAdminClient();
+  } catch {
+    return response({ error: 'DripJobs ingestion is not configured' }, 500);
+  }
   const payloadSha256 = await sha256(rawBody);
   const eventKey = normalized.providerEventId
     ? `zapier:stage:${normalized.providerEventId}`

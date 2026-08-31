@@ -1,5 +1,6 @@
-import { ReactNode, useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SideNav } from '../components/AppChrome';
+import { apiJson as api } from '../lib/api';
 import '../variants/flow.css';
 import '../variants/zen.css';
 import './people.css';
@@ -43,20 +44,6 @@ interface ContactActivity {
   classifications?: Array<{ label_kind: 'topic' | 'urgency'; label: { key: string; name: string; color: string } | null }>;
 }
 interface ContactActivitiesPayload { signals: ContactActivity[]; nextCursor: ActivityCursor | null }
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...(init?.headers ?? {}) },
-  });
-  const payload: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const detail = payload !== null && typeof payload === 'object' && 'error' in payload &&
-      typeof (payload as { error: unknown }).error === 'string'
-      ? (payload as { error: string }).error : `the server answered HTTP ${response.status}`;
-    throw new Error(detail);
-  }
-  return payload as T;
-}
 
 function initials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
@@ -99,6 +86,12 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
   const loadActivities = useCallback(async (cursor: ActivityCursor | null, append: boolean) => {
     if (append) setLoadingMore(true);
     const payload = await api<ContactActivitiesPayload>(`/api/contacts/${contactId}/activities?limit=${PAGE_SIZE}${cursorQuery(cursor)}`);
@@ -123,8 +116,8 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
   }, [contactId]);
 
   return (
-    <aside className="pp-detail" aria-label="Contact details">
-      <button type="button" className="pp-detail-close" onClick={onClose} aria-label="Close Contact details">×</button>
+    <aside className="pp-detail" role="dialog" aria-modal="true" aria-label="Contact details">
+      <button type="button" className="pp-detail-close" onClick={onClose} aria-label="Close Contact details" autoFocus>×</button>
       {loading ? <div className="pp-state">Loading Contact…</div> : error ? (
         <div className="pp-state pp-state-error"><strong>Couldn’t load Contact</strong><p>{error}</p></div>
       ) : detail ? <>
@@ -180,23 +173,43 @@ export function PeoplePage({ onNavigate, header, view = 'contacts' }: {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const deferredSearch = useDeferredValue(search.trim());
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const requestRevision = useRef(0);
+  const contactRequest = useRef<AbortController | null>(null);
   const roleName = useMemo(() => new Map(roles.map((item) => [item.key, item.name])), [roles]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
+
   const loadContacts = useCallback(async (cursor: ContactCursor | null, append: boolean, selectedRole = role) => {
+    const revision = append ? requestRevision.current : ++requestRevision.current;
+    if (!append) contactRequest.current?.abort();
+    const controller = new AbortController();
+    contactRequest.current = controller;
     if (append) setLoadingMore(true); else setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
       if (selectedRole) params.set('role', selectedRole);
-      if (deferredSearch) params.set('q', deferredSearch);
+      if (debouncedSearch) params.set('q', debouncedSearch);
       if (cursor) { params.set('cursorAt', cursor.createdAt); params.set('cursorId', cursor.id); }
-      const payload = await api<ContactsPayload>(`/api/contacts?${params.toString()}`);
+      const payload = await api<ContactsPayload>(`/api/contacts?${params.toString()}`, { signal: controller.signal });
+      if (revision !== requestRevision.current) return;
       setContacts((current) => append ? [...current, ...payload.contacts] : payload.contacts);
       setContactCount(payload.count); setContactCursor(payload.nextCursor);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { if (append) setLoadingMore(false); else setLoading(false); }
-  }, [deferredSearch, role]);
+    } catch (cause) {
+      if (!(cause instanceof DOMException && cause.name === 'AbortError') && revision === requestRevision.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      if (revision === requestRevision.current) {
+        if (append) setLoadingMore(false); else setLoading(false);
+      }
+      if (contactRequest.current === controller) contactRequest.current = null;
+    }
+  }, [debouncedSearch, role]);
 
 
   useEffect(() => {
@@ -213,7 +226,7 @@ export function PeoplePage({ onNavigate, header, view = 'contacts' }: {
       <header className="pp-head"><div><h1>{navLabel}</h1><p>{employees
         ? 'People who work here, and the calls and messages they appear in.'
         : 'People and businesses connected across Gmail, Quo messages, and calls.'}</p></div><div className="pp-counts"><span><strong>{contactCount.toLocaleString()}</strong> {navLabel}</span></div></header>
-      <div className="pp-toolbar"><label className="pp-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${navLabel}`} aria-label={`Search ${navLabel}`} /></label></div>
+      <div className="pp-toolbar"><label className="pp-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => { setSearch(event.target.value); setSelectedContactId(null); }} placeholder={`Search ${navLabel}`} aria-label={`Search ${navLabel}`} /></label></div>
       {error ? <div className="pp-state pp-state-error" role="alert"><strong>Couldn’t complete that request</strong><p>{error}</p><button type="button" onClick={() => void loadContacts(null, false)}>Try again</button></div>
         : loading ? <div className="pp-state" role="status">Loading contacts…</div>
         : contacts.length === 0 ? <div className="pp-state"><strong>No {navLabel.toLowerCase()} yet</strong><p>Unmatched identities stay hidden until they are safely resolved.</p></div> : <section className="pp-directory" aria-label="Contact directory">

@@ -3,8 +3,8 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const baseUrl = (process.env.FLUID_ACTION_RUNNER_URL ??
-  'https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-action-runner').replace(/\/$/, '');
-const secret = process.env.FLUID_ACTION_RUNNER_SECRET ?? process.env.FLUID_SIGNAL_RECOMMENDER_SECRET ?? process.env.FLUID_EMAIL_CATEGORIZER_SECRET ?? '';
+  'https://fskrxkiujtfuxntcrjam.supabase.co/functions/v1/fluid-action-runner').replace(/\/$/, '');
+const secret = process.env.FLUID_ACTION_RUNNER_SECRET ?? '';
 const stateDir = process.env.FLUID_ACTION_RUNNER_STATE_DIR ?? '/opt/data/fluid/action-runner';
 const promptVersion = 'action-runner-v1';
 const model = process.env.FLUID_ACTION_RUNNER_MODEL ?? 'hermes';

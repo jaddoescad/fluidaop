@@ -1,53 +1,18 @@
-import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import { createAdminClient, jsonResponse as response, validSecret } from '../_shared/runtime.ts';
 
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
-const encoder = new TextEncoder();
 const WORKSPACE_KEY = 'ottawa-painters';
 
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
-
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
 function db(): SupabaseClient {
-  const url = Deno.env.get('SUPABASE_URL');
-  if (!url) throw new Error('SUPABASE_URL is unavailable');
-  return createClient(url, databaseSecret(), { auth: { persistSession: false } });
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let different = a.length ^ b.length;
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
+  return createAdminClient();
 }
 
 function authorized(req: Request): boolean {
   const supplied = req.headers.get('x-fluid-activity-secret')?.trim() ?? '';
-  if (!supplied) return false;
-  const expected = [
+  return validSecret(supplied, [
     Deno.env.get('FLUID_REAL_BOARD_SECRET'),
-    Deno.env.get('FLUID_OPERATIONAL_CONTEXT_SECRET'),
     Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET'),
-    Deno.env.get('FLUID_EMAIL_CATEGORIZER_SECRET'),
-  ].filter((value): value is string => Boolean(value));
-  return expected.some((value) => safeEqual(value, supplied));
+  ]);
 }
 
 function positiveInt(value: string | null, fallback: number, maximum: number): number {
@@ -73,6 +38,43 @@ function boundedText(value: unknown, maximum: number, required = false): string 
   const cleaned = value.trim();
   if ((required && cleaned.length === 0) || cleaned.length > maximum) return null;
   return cleaned;
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key, index) => (
+      key === rightKeys[index] && jsonValuesEqual(leftRecord[key], rightRecord[key])
+    ));
+}
+
+function actionDefinitionPayload(item: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: item.id,
+    key: item.key,
+    name: item.name,
+    description: item.description,
+    handler: item.handler_key,
+    enabled: item.enabled,
+    executionMode: item.execution_mode,
+    requiresConfirmation: item.requires_confirmation,
+    configuration: item.configuration,
+    version: item.version,
+    builtIn: item.built_in,
+    executable: item.handler_key === 'draft-email-reply',
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
 }
 
 type Cursor = { at: string; id: string | number; attention?: boolean; actionOpen?: boolean };
@@ -321,24 +323,6 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
   const recommendations = Array.isArray(result.recommendations)
     ? result.recommendations.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     : [];
-  const recommendationIds = recommendations.map((item) => item.id).filter(uuid);
-  const availability = new Map<string, { definitionKey: string; definitionVersion: number; enabled: boolean }>();
-  if (recommendationIds.length > 0) {
-    const { data, error } = await client.from('signal_recommendations')
-      .select('id,action_definition_version,action_definitions!inner(key,enabled,handler_key)')
-      .in('id', recommendationIds);
-    if (error) throw error;
-    for (const row of data ?? []) {
-      const definition = Array.isArray(row.action_definitions) ? row.action_definitions[0] : row.action_definitions;
-      if (!definition || typeof definition !== 'object') continue;
-      const handler = String((definition as Record<string, unknown>).handler_key ?? '');
-      availability.set(String(row.id), {
-        definitionKey: String((definition as Record<string, unknown>).key ?? ''),
-        definitionVersion: Number(row.action_definition_version ?? 0),
-        enabled: Boolean((definition as Record<string, unknown>).enabled) && handler === 'draft-email-reply',
-      });
-    }
-  }
   return response({
     ...result,
     signal: {
@@ -353,16 +337,14 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
       contentParsedAt: content?.content_parsed_at ?? null,
       threadMessageCount,
     },
-    recommendations: recommendations.map((item) => {
-      const definition = availability.get(String(item.id));
-      return {
-        ...item,
-        actionDefinitionKey: definition?.definitionKey ?? null,
-        actionDefinitionVersion: definition?.definitionVersion ?? null,
-        available: definition?.enabled ?? false,
-        locked: !(definition?.enabled ?? false),
-      };
-    }),
+    // The RPC owns Action availability because it evaluates the stored
+    // recommendation version and current definition in one database snapshot.
+    // Keep its reason/version fields intact and fail closed on older payloads.
+    recommendations: recommendations.map((item) => ({
+      ...item,
+      available: item.available === true,
+      locked: item.available !== true,
+    })),
     recordings: recordingResult.data ? {
       status: recordingResult.data.status,
       items: Array.isArray(recordingResult.data.recordings) ? recordingResult.data.recordings : [],
@@ -388,22 +370,7 @@ async function actionDefinitions(client: SupabaseClient): Promise<Response> {
     .order('created_at', { ascending: true });
   if (error) throw error;
   return response({
-    definitions: (data ?? []).map((item) => ({
-      id: item.id,
-      key: item.key,
-      name: item.name,
-      description: item.description,
-      handler: item.handler_key,
-      enabled: item.enabled,
-      executionMode: item.execution_mode,
-      requiresConfirmation: item.requires_confirmation,
-      configuration: item.configuration,
-      version: item.version,
-      builtIn: item.built_in,
-      executable: item.handler_key === 'draft-email-reply',
-      createdAt: item.created_at,
-      updatedAt: item.updated_at,
-    })),
+    definitions: (data ?? []).map(actionDefinitionPayload),
   });
 }
 
@@ -433,6 +400,14 @@ async function updateActionDefinition(
   if (enabled && current.handler_key !== 'draft-email-reply') {
     return response({ error: 'This built-in Action is a placeholder and cannot be enabled yet' }, 409);
   }
+  if (
+    name === current.name &&
+    description === current.description &&
+    enabled === current.enabled &&
+    jsonValuesEqual(configuration, current.configuration)
+  ) {
+    return response({ definition: actionDefinitionPayload(current) });
+  }
   const { data, error } = await client.from('action_definitions').update({
     name,
     description,
@@ -442,14 +417,7 @@ async function updateActionDefinition(
     updated_at: new Date().toISOString(),
   }).eq('workspace_key', WORKSPACE_KEY).eq('id', current.id).eq('version', current.version).select().single();
   if (error || !data) return response({ error: 'Action definition changed; refresh before saving' }, 409);
-  return response({ definition: {
-    id: data.id, key: data.key, name: data.name, description: data.description,
-    handler: data.handler_key, enabled: data.enabled, executionMode: data.execution_mode,
-    requiresConfirmation: data.requires_confirmation, configuration: data.configuration,
-    version: data.version, builtIn: data.built_in,
-    executable: data.handler_key === 'draft-email-reply',
-    createdAt: data.created_at, updatedAt: data.updated_at,
-  } });
+  return response({ definition: actionDefinitionPayload(data) });
 }
 
 interface ActionRow {
@@ -711,6 +679,19 @@ Deno.serve(async (req: Request) => {
       return response({ personId, imported });
     }
     if (action === 'update-action-definition') return await updateActionDefinition(client, body);
+    if (action === 'settle') {
+      const activityId = String(body.activityId ?? '');
+      const reviewer = boundedText(body.reviewer, 200, true);
+      if (!integerId(activityId) || body.resolution !== 'no_action' || !reviewer) {
+        return response({ error: 'Invalid Signal settlement' }, 400);
+      }
+      return response(await rpc(client, 'settle_signal_recommendations', {
+        p_workspace_key: WORKSPACE_KEY,
+        p_activity_id: activityId,
+        p_resolution: 'no_action',
+        p_reviewer: reviewer,
+      }));
+    }
     if (action === 'accept-recommendation') {
       if (!integerId(String(body.activityId)) || !uuid(body.recommendationId)) {
         return response({ error: 'Invalid recommendation acceptance' }, 400);

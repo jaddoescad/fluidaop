@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
 const DEFAULT_EDGE_URL =
-  'https://bwbckdkouqghdadpkjvn.supabase.co/functions/v1/fluid-quo-events';
+  'https://fskrxkiujtfuxntcrjam.supabase.co/functions/v1/fluid-quo-events';
 const EDGE_URL = (process.env.FLUID_QUO_EVENTS_URL || DEFAULT_EDGE_URL).replace(/\/$/, '');
+const FLUID_API_URL = (process.env.FLUID_API_URL || 'http://127.0.0.1:8787').replace(/\/$/, '');
 const SECRET = (
   process.env.FLUID_QUO_MAINTENANCE_SECRET ||
-  process.env.FLUID_EMAIL_CATEGORIZER_SECRET ||
   ''
 ).trim();
 const QUO_API_KEY = (process.env.QUO_API_KEY || process.env.OPENPHONE_API_KEY || '').trim();
-const QUO_API = 'https://api.openphone.com/v1';
+const QUO_API = 'https://api.quo.com/v1';
 
 function requireConfiguration({ quo = false } = {}) {
   if (!/^https:\/\//.test(EDGE_URL)) throw new Error('FLUID_QUO_EVENTS_URL must be HTTPS');
@@ -37,6 +37,27 @@ async function edge(action, { method = 'GET', body, timeout = 60_000 } = {}) {
     throw new Error(`Fluid Quo service: ${detail}`);
   }
   return payload;
+}
+
+async function fluidApi(path, { body, timeout = 15 * 60_000 } = {}) {
+  requireConfiguration();
+  if (!/^https?:\/\//.test(FLUID_API_URL)) throw new Error('FLUID_API_URL must be HTTP(S)');
+  const response = await fetch(`${FLUID_API_URL}${path}`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'x-fluid-agent-secret': SECRET,
+    },
+    body: JSON.stringify(body || {}),
+    signal: AbortSignal.timeout(timeout),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = payload && typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`;
+    throw new Error(`Fluid API: ${detail}`);
+  }
+  return payload?.result || {};
 }
 
 async function quo(path) {
@@ -127,6 +148,10 @@ async function backfillTranscripts() {
 const command = process.argv[2] || '';
 let result;
 if (command === 'enrich-contacts') result = await enrichContacts();
-else if (command === 'backfill-transcripts') result = await backfillTranscripts();
-else throw new Error('usage: fluid-quo-maintenance.mjs enrich-contacts|backfill-transcripts');
+else if (command === 'backfill-call-content') result = await fluidApi('/api/internal/quo/call-content-backfill');
+else if (command === 'backfill-recordings') result = await fluidApi('/api/internal/quo/call-content-backfill', {
+  body: { kind: 'recording' },
+});
+else if (command === 'backfill-transcripts') result = await fluidApi('/api/internal/quo/transcript-backfill');
+else throw new Error('usage: fluid-quo-maintenance.mjs enrich-contacts|backfill-call-content|backfill-recordings|backfill-transcripts');
 console.log(JSON.stringify({ ok: true, command, ...result }));

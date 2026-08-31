@@ -133,7 +133,7 @@ after insert or update of person_id, relationship, matched_by, confidence
 on public.activity_people
 for each row execute function private.link_activity_person_case();
 
-create temporary table fluid_case_activity_backfill on commit drop as
+create temporary table fluid_case_activity_backfill as
 with unique_activity_person as (
   select link.activity_id, (array_agg(link.person_id order by link.person_id))[1] as person_id
   from public.activity_people link
@@ -183,6 +183,8 @@ begin
   end loop;
 end;
 $$;
+
+drop table fluid_case_activity_backfill;
 
 revoke all on function private.resolve_operational_case_person() from public, anon, authenticated;
 revoke all on function private.link_activity_case() from public, anon, authenticated;

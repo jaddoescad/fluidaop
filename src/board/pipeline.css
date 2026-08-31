@@ -218,6 +218,23 @@
   line-height: 1.35;
 }
 
+.pipeline-card-open {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pipeline-card-open:focus-visible {
+  outline: 2px solid var(--accent, #9d97f5);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
 .pipeline-card-top .fl-role {
   flex: none;
   padding: 1px 6px;
@@ -328,7 +345,8 @@
   line-height: 1.35;
 }
 
-.pipeline-next-work button {
+.pipeline-next-work button,
+.pipeline-next-work span {
   color: inherit;
   font-size: inherit;
   line-height: inherit;

@@ -1,4 +1,5 @@
 import { parseEmailContent } from './emailContent.js';
+import { fetchWithTimeoutAndRetry } from './httpClient.js';
 
 export interface GmailActivityRow {
   source: 'gmail';
@@ -100,7 +101,9 @@ export class GmailApiError extends Error {
 }
 
 async function gmailJson<T>(url: URL, accessToken: string): Promise<T> {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const response = await fetchWithTimeoutAndRetry(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
   const raw = await response.text();
   let payload: unknown = null;
   if (raw) {

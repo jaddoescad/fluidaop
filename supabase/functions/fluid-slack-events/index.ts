@@ -1,6 +1,11 @@
-import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.95.0';
+import {
+  createAdminClient,
+  jsonResponse as response,
+  safeEqual,
+  validSecret,
+} from '../_shared/runtime.ts';
 
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
 const encoder = new TextEncoder();
 const WORKSPACE_KEY = 'ottawa-painters';
 
@@ -31,38 +36,8 @@ type SlackMessageInput = {
   deleted?: boolean;
 };
 
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
-
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
 function supabase(): SupabaseClient {
-  const url = Deno.env.get('SUPABASE_URL');
-  if (!url) throw new Error('SUPABASE_URL is unavailable');
-  return createClient(url, databaseSecret(), { auth: { persistSession: false } });
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let different = a.length ^ b.length;
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
+  return createAdminClient();
 }
 
 function hex(bytes: ArrayBuffer): string {
@@ -85,13 +60,10 @@ async function validSlackSignature(req: Request, rawBody: string): Promise<boole
 
 function validInternalSecret(req: Request): boolean {
   const supplied = req.headers.get('x-fluid-activity-secret')?.trim() ?? '';
-  if (!supplied) return false;
-  const expected = [
+  return validSecret(supplied, [
     Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET'),
     Deno.env.get('FLUID_SLACK_SYNC_SECRET'),
-    Deno.env.get('FLUID_EMAIL_CATEGORIZER_SECRET'),
-  ].filter((value): value is string => Boolean(value));
-  return expected.some((value) => safeEqual(value, supplied));
+  ]);
 }
 
 function cleanString(value: unknown, maximum: number): string | null {

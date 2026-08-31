@@ -212,7 +212,7 @@ values
   ('info@paintersottawa.com', 'email', 'finance-customer-payments', 'Finance/Customer payments', 'Customer deposits, balance payments, remittances, and payment confirmations.', '#d3a24b', 70),
   ('info@paintersottawa.com', 'email', 'finance-banking-statements', 'Finance/Banking & statements', 'Bank notices, statements, card activity, and other banking correspondence.', '#d3a24b', 80),
   ('info@paintersottawa.com', 'email', 'finance-general-receipts', 'Finance/General receipts', 'Receipts for general business expenses and purchases.', '#d3a24b', 90),
-  ('info@paintersottawa.com', 'email', 'finance-compliance-insurance', 'Insurance, tax, compliance, certificates, and related financial records.', '#d3a24b', 100),
+  ('info@paintersottawa.com', 'email', 'finance-compliance-insurance', 'Finance/Compliance & insurance', 'Insurance, tax, compliance, certificates, and related financial records.', '#d3a24b', 100),
   ('info@paintersottawa.com', 'email', 'systems-dripjobs', 'Systems/DripJobs', 'DripJobs notifications, workflow updates, and automated system messages.', '#4cc4b8', 110),
   ('info@paintersottawa.com', 'email', 'systems-technical-alerts', 'Systems/Technical alerts', 'Errors, security notices, outages, and other technical alerts.', '#4cc4b8', 120),
   ('info@paintersottawa.com', 'email', 'marketing-reviews', 'Marketing/Reviews', 'Customer reviews, review requests, and reputation-management notices.', '#e07bb4', 130),

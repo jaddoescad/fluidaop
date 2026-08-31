@@ -200,7 +200,6 @@ export function LeadWorkspace({
   onClose,
   onLoadSignal,
   onOpenAction,
-  onOpenReminder,
 }: {
   s: State;
   deal: PipelineDeal;
@@ -212,7 +211,6 @@ export function LeadWorkspace({
   onClose: () => void;
   onLoadSignal: (signalId: string) => void;
   onOpenAction: (actionId: string) => void;
-  onOpenReminder: (reminderId: string) => void;
 }) {
   const stage = stageMetaOf(deal);
   const person = s.people.find((candidate) => candidate.id === personId);
@@ -567,7 +565,7 @@ export function LeadWorkspace({
 
   return (
     <div className="fl-scrim" onClick={onClose}>
-      <div className="fc lw" onClick={(event) => event.stopPropagation()}>
+      <div className="fc lw" role="dialog" aria-modal="true" aria-label={`${displayName} deal workspace`} onClick={(event) => event.stopPropagation()}>
         <header className="fc-head lw-head">
           <div className="lw-contact-avatar" aria-hidden="true">{displayName.trim().charAt(0).toUpperCase()}</div>
           <div className="fc-head-main">
@@ -592,7 +590,7 @@ export function LeadWorkspace({
               {latestAt ? `Last activity ${fmtAge(latestAt, s.now)}` : 'No activity yet'}
             </span>
           </div>
-          <button className="fl-x" onClick={onClose} title="Close (Esc)">✕</button>
+          <button className="fl-x" onClick={onClose} title="Close (Esc)" aria-label="Close deal workspace">✕</button>
         </header>
 
         <div className="lw-layout">
@@ -650,7 +648,7 @@ export function LeadWorkspace({
                   <button className="fc-chip fc-chip-primary" key={action.id} onClick={() => onOpenAction(action.id)}>✦ {action.title}</button>
                 ))}
                 {openReminders.map((reminder) => (
-                  <button className="fc-chip" key={reminder.id} onClick={() => onOpenReminder(reminder.id)}>⏰ {reminder.note} · {fmtDue(reminder.dueAt, s.now)}</button>
+                  <span className="fc-chip" key={reminder.id}>⏰ {reminder.note} · {fmtDue(reminder.dueAt, s.now)}</span>
                 ))}
               </div>}
               {chatError && <div className="lw-chat-error" role="alert">{chatError}</div>}

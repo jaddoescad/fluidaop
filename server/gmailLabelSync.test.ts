@@ -5,6 +5,7 @@ import {
   canonicalGmailTopicLabel,
   GmailLabelApiError,
   GmailLabelClient,
+  GmailRestLabelClient,
   GmailUserLabel,
   planManagedLabelMutation,
   projectTopicToGmail,
@@ -37,10 +38,14 @@ class FakeClient implements GmailLabelClient {
   }
 }
 
-test('uses the existing Gmail label namespace', () => {
-  assert.equal(canonicalGmailTopicLabel('  New   Lead  '), 'New Lead');
-  assert.equal(canonicalGmailTopicLabel(' Finance/Contractor   invoices '), 'Finance/Contractor invoices');
-  assert.equal(canonicalGmailSupplementalLabel('  Employee  '), 'Employee');
+test('canonicalizes all managed labels into the dedicated Fluid namespace', () => {
+  assert.equal(canonicalGmailTopicLabel('  New   Lead  '), 'Fluid/New Lead');
+  assert.equal(
+    canonicalGmailTopicLabel(' Finance/Contractor   invoices '),
+    'Fluid/Finance/Contractor invoices',
+  );
+  assert.equal(canonicalGmailTopicLabel('Fluid/New Lead'), 'Fluid/New Lead');
+  assert.equal(canonicalGmailSupplementalLabel('  Employee  '), 'Fluid/Employee');
 });
 
 test('mutation plan preserves personal and system labels', () => {
@@ -99,8 +104,11 @@ test('projects Employee as an additive managed role label', async () => {
 
 test('removes a stale managed Employee label from non-employee mail', async () => {
   const client = new FakeClient();
-  client.labels.push({ id: 'employee', name: 'Employee', type: 'user' });
-  client.messageLabels.push('employee');
+  client.labels.push(
+    { id: 'employee', name: 'Fluid/Employee', type: 'user' },
+    { id: 'personal-employee', name: 'Employee', type: 'user' },
+  );
+  client.messageLabels.push('employee', 'personal-employee');
   const topics = [{ id: 1, key: 'old', name: 'Old topic' }];
   const mappings = [{ fluidLabelId: 1, gmailLabelId: 'topic-old', gmailLabelName: 'Fluid/Old topic' }];
 
@@ -115,6 +123,7 @@ test('removes a stale managed Employee label from non-employee mail', async () =
   assert.equal(result.outcome, 'applied');
   assert.deepEqual(client.mutations, [{ add: [], remove: ['employee'] }]);
   assert.ok(client.messageLabels.includes('personal'));
+  assert.ok(client.messageLabels.includes('personal-employee'));
 });
 
 test('adopts a concurrently created Gmail label instead of duplicating it', async () => {
@@ -124,7 +133,7 @@ test('adopts a concurrently created Gmail label instead of duplicating it', asyn
     override async listLabels(refresh = false) {
       if (refresh) {
         this.refreshes += 1;
-        this.labels.push({ id: 'concurrent', name: 'New lead', type: 'user' });
+        this.labels.push({ id: 'concurrent', name: 'Fluid/New lead', type: 'user' });
       }
       return this.labels;
     }
@@ -142,7 +151,7 @@ test('adopts a concurrently created Gmail label instead of duplicating it', asyn
   assert.deepEqual(client.mutations, [{ add: ['concurrent'], remove: [] }]);
 });
 
-test('reuses an exact existing Gmail label instead of creating a prefixed duplicate', async () => {
+test('preserves a same-named personal label and renames only the mapped Fluid label', async () => {
   const client = new FakeClient();
   client.labels.push({ id: 'existing', name: 'Finance/Contractor invoices', type: 'user' });
   const topics = [{ id: 6, key: 'finance-contractor-invoices', name: 'Finance/Contractor invoices' }];
@@ -154,8 +163,64 @@ test('reuses an exact existing Gmail label instead of creating a prefixed duplic
 
   const result = await projectTopicToGmail(client, 'message-1', topics[0]!, topics, mappings);
 
-  assert.equal(result.gmailLabelId, 'existing');
-  assert.equal(result.gmailLabelName, 'Finance/Contractor invoices');
-  assert.deepEqual(client.mutations, [{ add: ['existing'], remove: ['topic-old'] }]);
-  assert.equal(client.labels.filter((label) => label.name.includes('Contractor invoices')).length, 1);
+  assert.equal(result.gmailLabelId, 'topic-old');
+  assert.equal(result.gmailLabelName, 'Fluid/Finance/Contractor invoices');
+  assert.deepEqual(client.mutations, []);
+  assert.ok(client.labels.some((label) => (
+    label.id === 'existing' && label.name === 'Finance/Contractor invoices'
+  )));
+  assert.ok(client.labels.some((label) => (
+    label.id === 'topic-old' && label.name === 'Fluid/Finance/Contractor invoices'
+  )));
+});
+
+test('classifies Gmail transport failures as retryable', async () => {
+  const client = new GmailRestLabelClient('access-token', async () => {
+    throw new DOMException('The operation timed out', 'TimeoutError');
+  });
+
+  await assert.rejects(client.listLabels(), (error: unknown) => {
+    assert.ok(error instanceof GmailLabelApiError);
+    assert.equal(error.status, 503);
+    assert.equal(error.retryable, true);
+    assert.match(error.message, /before receiving a response/);
+    return true;
+  });
+});
+
+test('classifies Gmail 403 user quota responses as retryable', async () => {
+  const client = new GmailRestLabelClient('access-token', async () => new Response(JSON.stringify({
+    error: {
+      message: 'User-rate limit exceeded. Retry later.',
+      errors: [{ reason: 'userRateLimitExceeded' }],
+    },
+  }), {
+    status: 403,
+    headers: { 'Content-Type': 'application/json', 'Retry-After': '12' },
+  }));
+
+  await assert.rejects(client.listLabels(), (error: unknown) => {
+    assert.ok(error instanceof GmailLabelApiError);
+    assert.equal(error.status, 403);
+    assert.equal(error.reason, 'userRateLimitExceeded');
+    assert.equal(error.retryAfterSeconds, 12);
+    assert.equal(error.retryable, true);
+    return true;
+  });
+});
+
+test('keeps ordinary Gmail 403 permission failures terminal', async () => {
+  const client = new GmailRestLabelClient('access-token', async () => new Response(JSON.stringify({
+    error: {
+      message: 'Insufficient Permission',
+      errors: [{ reason: 'insufficientPermissions' }],
+    },
+  }), { status: 403, headers: { 'Content-Type': 'application/json' } }));
+
+  await assert.rejects(client.listLabels(), (error: unknown) => {
+    assert.ok(error instanceof GmailLabelApiError);
+    assert.equal(error.reason, 'insufficientPermissions');
+    assert.equal(error.retryable, false);
+    return true;
+  });
 });

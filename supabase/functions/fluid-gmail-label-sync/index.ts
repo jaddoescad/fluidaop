@@ -1,42 +1,10 @@
-import { createClient } from 'npm:@supabase/supabase-js@2.95.0';
-
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
+import { createAdminClient, jsonResponse as response, validSecret } from '../_shared/runtime.ts';
 
 type JsonRecord = Record<string, unknown>;
 
-function response(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
-}
-
-function databaseSecret(): string {
-  const current = Deno.env.get('SUPABASE_SECRET_KEYS');
-  if (current) {
-    const parsed = JSON.parse(current) as Record<string, unknown>;
-    const preferred = parsed.default;
-    if (typeof preferred === 'string' && preferred) return preferred;
-    const fallback = Object.values(parsed).find((value) => typeof value === 'string' && value);
-    if (typeof fallback === 'string') return fallback;
-  }
-  const legacy = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!legacy) throw new Error('Supabase database secret is unavailable');
-  return legacy;
-}
-
-function safeEqual(left: string, right: string): boolean {
-  const a = new TextEncoder().encode(left);
-  const b = new TextEncoder().encode(right);
-  let different = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let index = 0; index < length; index += 1) {
-    different |= (a[index] ?? 0) ^ (b[index] ?? 0);
-  }
-  return different === 0;
-}
-
 function authorized(req: Request): boolean {
-  const expected = Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET')?.trim() ?? '';
   const supplied = req.headers.get('x-fluid-gmail-label-sync-secret')?.trim() ?? '';
-  return Boolean(expected && supplied && safeEqual(expected, supplied));
+  return validSecret(supplied, [Deno.env.get('FLUID_ACTIVITY_SYNC_SECRET')]);
 }
 
 function object(value: unknown): value is JsonRecord {
@@ -75,11 +43,7 @@ Deno.serve(async (req: Request) => {
   if (!authorized(req)) return response({ error: 'Unauthorized' }, 401);
 
   try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    if (!supabaseUrl) throw new Error('Supabase URL is unavailable');
-    const supabase = createClient(supabaseUrl, databaseSecret(), {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = createAdminClient();
     const url = new URL(req.url);
     const action = url.searchParams.get('action') ?? 'status';
 

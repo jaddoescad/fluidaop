@@ -1,677 +1,123 @@
-import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { CHANNEL_LABEL } from '../channels';
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import { type Act } from '../board/contract';
 import { ConversationSkeleton, ConversationTurn } from '../components/Conversation';
-import { agentFor } from '../engine';
-import { HermesStatus } from '../agents/hermes';
-import { DAY, dayLabel, fmtAge, fmtClock, fmtDue, MIN } from '../time';
-import { ActionCard, AgentRun, Person, Signal, State } from '../types';
-import { Act } from '../board/contract';
+import { DAY, fmtAge, MIN } from '../time';
+import { type Person, type Signal, type SignalDetail, type State } from '../types';
 import {
   Avatar,
   Burst,
   classifyIntent,
-  Derived,
+  type Derived,
   DirectionTag,
-  DueChip,
   Empty,
   firstNameOf,
   groupStreamByDay,
   INTENT_META,
-  KIND_LABEL,
   PaneHead,
-  Prov,
-  RemProv,
   RoleTag,
   SourceTag,
 } from './shared';
 
-// =======================================================================
-// Shared machinery for the board: plays, settled states, thread view,
-// and the columns Zen composes.
-// =======================================================================
-
-export const SHORT_CHANNEL: Record<Signal['channel'], string> = {
-  sms: 'Text',
-  email: 'Email',
-  call: 'Call',
-  form: 'Website',
+export type SigStatus = {
+  key: 'open' | 'action' | 'quiet';
+  icon: string;
+  label: string;
 };
 
-// ---------- plays: what the app suggests for a signal ----------
-
-export type PlaySpec =
-  | { key: string; icon: string; kind: 'reminder'; label: string; detail: string; configurable: boolean; note: string; dueInMs: number }
-  | { key: string; icon: string; kind: 'action'; label: string; detail: string; configurable: boolean; title: string }
-  | { key: string; icon: string; kind: 'automation'; label: string; detail: string; configurable: boolean; seqId: string };
-
-function futureMonths(text: string): number {
-  const digit = /(\d+)\s*month/.exec(text);
-  if (digit) return parseInt(digit[1] ?? '2', 10);
-  if (/three\s*month/i.test(text)) return 3;
-  return 2;
-}
-
-/** Suggested next steps for a signal, derived from what the message says. */
-export function playsFor(sig: Signal, s: State): PlaySpec[] {
-  const intent = classifyIntent(sig);
-  const first = firstNameOf(s.people.find((x) => x.id === sig.personId)?.name ?? 'them');
-  const rem = (key: string, label: string, note: string, dueInMs: number): PlaySpec => ({
-    key,
-    icon: '⏰',
-    kind: 'reminder',
-    label,
-    detail: `reminder · due ${fmtDue(s.now + dueInMs, s.now)} · nothing to set up`,
-    configurable: false,
-    note,
-    dueInMs,
-  });
-  const act = (key: string, icon: string, label: string, title: string, detail: string): PlaySpec => ({
-    key,
-    icon,
-    kind: 'action',
-    label,
-    detail,
-    configurable: true,
-    title,
-  });
-
-  switch (intent) {
-    case 'future': {
-      const n = futureMonths(sig.text);
-      return [
-        rem('rem:future', `Reach out in about ${n} months`, `Reach out to ${first} — they said check back in ~${n} months`, n * 30 * DAY),
-        act('act:keep-warm', '✉️', 'Reply — “no problem, we’ll circle back”', `Reply to ${first} — keep-warm note`, 'creates an action · the message template can be preconfigured'),
-        act('act:crm-not-ready', '📇', 'Update CRM — mark “not ready yet”', `Update CRM — mark ${first} “not ready yet”`, 'creates a task · configure it to run on its own next time'),
-      ];
-    }
-    case 'ready':
-      return [
-        act('act:confirm-start', '✉️', 'Reply — confirm start date & crew', `Reply to ${first} — confirm start date`, 'creates an action · the confirmation template can be preconfigured'),
-        act('act:contract', '📄', 'Prepare contract & deposit invoice', `Prepare contract & deposit invoice — ${first}`, 'creates a task · configure to auto-attach your standard terms'),
-        rem('rem:kickoff', 'Pre-start check-in — 2 days', `Pre-start check-in with ${first}`, 2 * DAY),
-      ];
-    case 'bill':
-      return [
-        act('act:pay', '💵', 'Pay the invoice', `Pay ${first}’s invoice`, 'creates a task · configure to send it through your accounting app'),
-        rem('rem:pay-due', 'Pay before it’s due — 7 days', `Pay ${first}’s invoice before the due date`, 7 * DAY),
-        act('act:job-cost', '📇', 'File it under job costs', `File ${first}’s invoice under job costs`, 'creates a task · configure it to file these automatically'),
-      ];
-    case 'paid':
-      return [
-        act('act:receipt', '🧾', 'Send receipt + thank-you', `Send ${first} a receipt + thank-you`, 'creates an action · the receipt message can be preconfigured'),
-        { key: 'auto:care', icon: '🤖', kind: 'automation', label: 'Enroll in “Post-job care”', detail: 'runs the existing automation for this client', configurable: false, seqId: 'seq_care' },
-        rem('rem:week-check', 'Check how it’s going — 1 week', `Check in with ${first} — how is everything holding up`, 7 * DAY),
-      ];
-    case 'lead':
-      return [
-        act('act:intro', '✉️', 'Reply — intro + portfolio', `Reply to ${first} — intro + portfolio`, 'creates an action · the intro template can be preconfigured'),
-        { key: 'auto:lead', icon: '🤖', kind: 'automation', label: 'Enroll in “New lead nurture”', detail: 'runs the existing automation for this lead', configurable: false, seqId: 'seq_lead' },
-        rem('rem:lead-3d', 'Follow up if quiet — 3 days', `Follow up with ${first} on their quote request`, 3 * DAY),
-      ];
-    case 'urgent':
-      return [
-        act('act:call-now', '📞', `Call ${first} back right away`, `Call ${first} back — time-sensitive`, 'creates an action at the top of the pile'),
-        rem('rem:resolved', 'Confirm it’s resolved — tomorrow', `Confirm ${first}’s issue is resolved`, 1 * DAY),
-      ];
-    case 'love':
-      return [
-        act('act:review', '⭐', 'Ask for a review / referral', `Ask ${first} for a review`, 'creates an action · the ask can be preconfigured'),
-        act('act:thanks', '💚', 'Send a thank-you note', `Send ${first} a thank-you note`, 'creates an action · the note template can be preconfigured'),
-      ];
-    case 'sched':
-      return [
-        act('act:crew', '🛠️', 'Pass details to the crew', `Pass ${first}’s details to the crew`, 'creates a task · configure to notify the crew chat automatically'),
-        rem('rem:day-before', 'Re-confirm the day before', `Re-confirm logistics with ${first}`, 1 * DAY),
-      ];
-    case 'ask':
-      return [
-        act('act:answer', '✉️', 'Reply — answer the question', `Reply to ${first} — answer their question`, 'creates an action · common answers can be preconfigured'),
-        rem('rem:no-resp', 'Follow up if no response — 2 days', `Follow up with ${first} — still no response`, 2 * DAY),
-      ];
-    default:
-      return [
-        act('act:log-crm', '📇', 'Log this in the CRM', `Log ${first}’s update in the CRM`, 'creates a task · configure it to file these automatically'),
-        rem('rem:touch-base', 'Touch base next week', `Touch base with ${first}`, 7 * DAY),
-      ];
+export function statusOf(state: State, signal: Signal): SigStatus {
+  if (signal.reviewStatus === 'pending') {
+    return { key: 'open', icon: '●', label: 'needs you' };
   }
-}
-
-// ---------- settled state: every signal declares whether it still needs
-// you, and if not, exactly HOW it was handled ----------
-
-export type SigStatus = { key: 'open' | 'action' | 'rem' | 'auto' | 'done' | 'quiet'; icon: string; label: string };
-
-export function statusOf(s: State, sig: Signal): SigStatus {
-  if (sig.reviewStatus === 'pending') return { key: 'open', icon: '●', label: 'needs you' };
-  if (sig.reviewStatus === 'action_open') return { key: 'action', icon: '✦', label: 'action open' };
-  if (sig.reviewStatus === 'settled') {
-    return { key: 'quiet', icon: '✓', label: 'manually settled' };
-  }
-  if (s.actions.some((a) => a.sourceSignalId === sig.id)) {
+  if (
+    signal.reviewStatus === 'action_open' ||
+    state.actions.some((action) => action.sourceSignalId === signal.id)
+  ) {
     return { key: 'action', icon: '✦', label: 'action open' };
   }
-  const rem = s.reminders.find((r) => r.sourceSignalId === sig.id);
-  if (rem && rem.doneAt === null) return { key: 'rem', icon: '⏰', label: 'reminder set' };
-  if (
-    s.seqInstances.some(
-      (i) => i.personId === sig.personId && i.triggerText === sig.text && i.doneAt === null,
-    )
-  ) {
-    return { key: 'auto', icon: '🤖', label: 'automation running' };
+  if (signal.reviewStatus === 'settled') {
+    return { key: 'quiet', icon: '✓', label: 'manually settled' };
   }
-  const done = s.handled.find((h) => h.a.sourceSignalId === sig.id);
-  if (done) {
-    const verb =
-      done.a.kind === 'reply'
-        ? sig.channel === 'call'
-          ? 'called back'
-          : 'replied'
-        : done.a.kind === 'reminder'
-          ? 'reminder done'
-          : done.a.kind === 'task'
-            ? 'task done'
-            : 'nudged';
-    return { key: 'done', icon: '✓', label: verb };
-  }
-  if ((rem && rem.doneAt !== null) || Object.keys(s.completed).some((id) => id.includes(sig.id))) {
-    return { key: 'done', icon: '✓', label: 'handled' };
+  if (signal.requiresReply) {
+    return { key: 'open', icon: '●', label: 'needs you' };
   }
   return { key: 'quiet', icon: '·', label: 'no action needed' };
 }
 
-/** Urgency lives outside lead temperature — a client with a time-sensitive
- *  issue outranks any warmth scale. */
-export function isUrgent(s: State, personId: string): boolean {
-  return s.actions.some((a) => {
-    if (a.personId !== personId || !a.sourceSignalId) return false;
-    const src = s.signals.find((x) => x.id === a.sourceSignalId);
-    return src ? classifyIntent(src) === 'urgent' : false;
-  });
-}
-
-// ---------- one label per person, ranked purely by urgency ----------
-
-export type PersonLabel = {
-  text: string;
-  tone: 'danger' | 'gold' | 'warn' | 'ok' | 'lead' | 'quiet';
-  color?: string | null;
-};
-
-export function urgencyLabel(p: Person): PersonLabel | null {
-  if (!p.urgency) return null;
-  return { text: p.urgency, tone: 'quiet', color: p.urgencyColor };
-}
-
-function canonicalLabelStyle(color: string | null | undefined): CSSProperties | undefined {
-  return color ? ({ ['--label-color' as string]: color } as CSSProperties) : undefined;
-}
-
-// ---------- the action catalog: company actions are precreated, not authored ad hoc ----------
-
-export const ACTION_CATALOG: { icon: string; label: string }[] = [
-  { icon: '✉️', label: 'Send intro + portfolio' },
-  { icon: '📞', label: 'Call back' },
-  { icon: '📄', label: 'Prepare estimate / quote' },
-  { icon: '📄', label: 'Prepare contract & deposit invoice' },
-  { icon: '🗓️', label: 'Schedule a walkthrough' },
-  { icon: '🛠️', label: 'Pass details to the crew' },
-  { icon: '🎨', label: 'Drop off paint samples' },
-  { icon: '🧾', label: 'Send invoice' },
-  { icon: '🧾', label: 'Send receipt + thank-you' },
-  { icon: '💵', label: 'Pay an invoice / bill' },
-  { icon: '📤', label: 'Send W-9' },
-  { icon: '⭐', label: 'Ask for a review / referral' },
-  { icon: '📇', label: 'Update CRM record' },
-];
-
-// ---------- the customer's story: raw messages digested into a lifecycle ----------
-
-export interface StoryBeat {
-  icon: string;
-  text: string;
-  at: number;
-  tone: PersonLabel['tone'];
-  count: number;
-}
-
-const CHAN_PHRASE: Record<Signal['channel'], string> = {
-  form: 'the website',
-  email: 'email',
-  sms: 'text',
-  call: 'a phone call',
-};
-
-/** The person's history as plain-language milestones, oldest → newest. */
-export function personStory(s: State, p: Person): StoryBeat[] {
-  const sigs = s.signals.filter((x) => x.personId === p.id);
-  const beats: StoryBeat[] = [];
-  sigs.forEach((sig, idx) => {
-    const intent = sig.source ? null : classifyIntent(sig);
-    let icon = '💬';
-    let text = 'Shared an update';
-    let tone: PersonLabel['tone'] = 'quiet';
-    switch (intent) {
-      case 'lead':
-        icon = '✨';
-        text = 'Asked for a quote — new inquiry';
-        tone = 'lead';
-        break;
-      case 'ready':
-        icon = '💰';
-        text = 'Gave the go-ahead — ready to start';
-        tone = 'gold';
-        break;
-      case 'paid':
-        icon = '💸';
-        text = 'Paid — invoice settled';
-        tone = 'gold';
-        break;
-      case 'bill':
-        icon = '🧾';
-        text = 'Sent an invoice to pay';
-        tone = 'warn';
-        break;
-      case 'love':
-        icon = '💚';
-        text = 'Happy with the work';
-        tone = 'ok';
-        break;
-      case 'future':
-        icon = '⏳';
-        text = 'Wants future work — check back later';
-        tone = 'lead';
-        break;
-      case 'urgent':
-        icon = '🚨';
-        text = 'Raised a time-sensitive issue';
-        tone = 'danger';
-        break;
-      case 'sched':
-        icon = '📋';
-        text = 'Sorted job logistics';
-        tone = 'quiet';
-        break;
-      case 'ask':
-        icon = '❓';
-        text = 'Asked a question';
-        tone = 'warn';
-        break;
-      default:
-        if (sig.requiresReply) {
-          text = 'Checked in — wants to hear back';
-          tone = 'warn';
-        }
-    }
-    if (idx === 0) {
-      text = `Came in via ${CHAN_PHRASE[sig.channel]} — ${text.charAt(0).toLowerCase()}${text.slice(1)}`;
-    }
-    const last = beats[beats.length - 1];
-    if (last && last.icon === icon && last.text.endsWith(text)) {
-      last.count += 1;
-      last.at = sig.at;
-    } else {
-      beats.push({ icon, text, at: sig.at, tone, count: 1 });
-    }
-  });
-  return beats;
-}
-
-// ---------- person summary: the whole situation as bullets + numbers ----------
-
-export interface PersonSummary {
-  bullets: { icon: string; text: string; tone: PersonLabel['tone'] }[];
-  metrics: { label: string; value: string }[];
-}
-
-export function personSummary(s: State, _d: Derived, p: Person): PersonSummary {
-  const sigs = s.signals.filter((x) => x.personId === p.id);
-  const recent = sigs.filter((x) => s.now - x.at < 14 * DAY);
-  const intents = recent.map((x) => classifyIntent(x));
-  const has = (k: string) => intents.includes(k as ReturnType<typeof classifyIntent>);
-
-  const bullets: PersonSummary['bullets'] = [];
-  if (isUrgent(s, p.id)) bullets.push({ icon: '🚨', text: 'Time-sensitive issue waiting on a response', tone: 'danger' });
-  if (has('paid')) bullets.push({ icon: '💸', text: 'Payment made or scheduled', tone: 'gold' });
-  else if (has('ready')) bullets.push({ icon: '💰', text: 'Ready to start — kickoff not scheduled yet', tone: 'gold' });
-  if (has('bill')) bullets.push({ icon: '🧾', text: 'Their invoice is waiting to be paid', tone: 'warn' });
-  if (has('love')) bullets.push({ icon: '💚', text: 'Happy with the recent work', tone: 'ok' });
-  if (
-    s.actions.some((a) => a.personId === p.id && a.kind === 'reply') &&
-    recent.some((x) => x.requiresReply && classifyIntent(x) === 'ask')
-  ) {
-    bullets.push({ icon: '❓', text: 'Question waiting on an answer', tone: 'warn' });
-  }
-  if (has('future')) bullets.push({ icon: '⏳', text: 'Future work on the horizon', tone: 'lead' });
-  const inst = s.seqInstances.find((i) => i.personId === p.id && i.doneAt === null);
-  if (inst) {
-    const seq = s.sequences.find((q) => q.id === inst.seqId);
-    if (seq) bullets.push({ icon: '🤖', text: `In “${seq.name}” — step ${inst.stepIdx + 1}/${seq.steps.length}`, tone: 'ok' });
-  }
-  const openRems = s.reminders.filter((r) => r.personId === p.id && r.doneAt === null);
-  const overdue = openRems.filter((r) => r.dueAt <= s.now).length;
-  if (openRems.length > 0) {
-    bullets.push({
-      icon: '⏰',
-      text: `${openRems.length} reminder${openRems.length > 1 ? 's' : ''} open${overdue > 0 ? ` · ${overdue} overdue` : ''}`,
-      tone: overdue > 0 ? 'danger' : 'warn',
-    });
-  }
-  if (bullets.length === 0) bullets.push({ icon: '🏁', text: 'All settled — nothing outstanding', tone: 'quiet' });
-
-  const last = sigs[sigs.length - 1];
-  const week = sigs.filter((x) => s.now - x.at < 7 * DAY).length;
-  const openActs = s.actions.filter((a) => a.personId === p.id && a.snoozedUntil <= s.now).length;
-  const handledToday = s.handled.filter((h) => h.a.personId === p.id).length;
-  const metrics: PersonSummary['metrics'] = [
-    { label: 'last contact', value: last ? fmtAge(last.at, s.now) : '—' },
-    { label: 'this week', value: `${week} signal${week === 1 ? '' : 's'}` },
-    { label: 'open actions', value: String(openActs) },
-    { label: 'handled recently', value: String(handledToday) },
-  ];
-  return { bullets, metrics };
-}
-
-// ---------- play-panel state + rows ----------
-
-export interface PlayState {
-  configured: ReadonlySet<string>;
-  created: ReadonlySet<string>;
-  configure: (key: string) => void;
-  markCreated: (key: string) => void;
-  resetCreated: () => void;
-}
-
-export function usePlayState(): PlayState {
-  const [configured, setConfigured] = useState<ReadonlySet<string>>(new Set());
-  const [created, setCreated] = useState<ReadonlySet<string>>(new Set());
-  return {
-    configured,
-    created,
-    configure: (key) => setConfigured((prev) => new Set(prev).add(key)),
-    markCreated: (key) => setCreated((prev) => new Set(prev).add(key)),
-    resetCreated: () => setCreated(new Set()),
-  };
-}
-
-/** The suggested-next-steps rows: click to create, ⚙ to save as a standing play. */
-export function PlayRows({ s, act, sig, play }: { s: State; act: Act; sig: Signal; play: PlayState }) {
-  const runPlay = (p: PlaySpec) => {
-    if (play.created.has(p.key)) return;
-    if (p.kind === 'reminder') act.createReminder(sig.id, p.note, p.dueInMs);
-    else if (p.kind === 'action') act.createAction(sig.id, p.title);
-    else act.enrollSeq(sig.id, p.seqId);
-    play.markCreated(p.key);
-  };
-  return (
-    <div className="fl-plays">
-      {playsFor(sig, s)
-        .slice()
-        .sort((a, b) => Number(play.configured.has(b.key)) - Number(play.configured.has(a.key)))
-        .map((p) => {
-          const isCreated = play.created.has(p.key);
-          const isSaved = play.configured.has(p.key);
-          const alreadyRunning =
-            p.kind === 'automation' &&
-            s.seqInstances.some(
-              (i) => p.kind === 'automation' && i.seqId === p.seqId && i.personId === sig.personId && i.doneAt === null,
-            );
-          return (
-            <div
-              key={p.key}
-              role="button"
-              tabIndex={0}
-              className={`fl-play${isCreated ? ' done' : ''}${alreadyRunning ? ' inert' : ''}`}
-              onClick={() => !alreadyRunning && runPlay(p)}
-            >
-              <span className="fl-play-icon">{p.icon}</span>
-              <span className="fl-play-body">
-                <span className="fl-play-label">{p.label}</span>
-                <span className="fl-play-detail">{p.detail}</span>
-              </span>
-              <span className="fl-play-side">
-                <span className={`fl-kind fl-kind-${p.kind}`}>{p.kind}</span>
-                {alreadyRunning ? (
-                  <span className="fl-chip fl-chip-running">already running</span>
-                ) : isCreated ? (
-                  <span className="fl-chip fl-chip-created">✓ created</span>
-                ) : isSaved ? (
-                  <span className="fl-chip fl-chip-saved">★ saved play</span>
-                ) : (
-                  <span className="fl-chip fl-chip-sug">suggestion</span>
-                )}
-                {p.configurable && !isSaved && !isCreated && (
-                  <button
-                    className="fl-cfg"
-                    title="Configure — save as a standing play for messages like this"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      play.configure(p.key);
-                    }}
-                  >
-                    ⚙
-                  </button>
-                )}
-              </span>
-            </div>
-          );
-        })}
-    </div>
-  );
-}
-
-// ---------- thread view: the person's full history, anchored on one message ----------
-
-export function ThreadView({
-  s,
-  personId,
-  anchorId,
-  onAnchor,
-}: {
-  s: State;
-  personId: string;
-  anchorId: string | null;
-  onAnchor: (sigId: string) => void;
-}) {
-  // newest first — the most recent message sits on top
-  const history = s.signals.filter((x) => x.personId === personId).slice().reverse();
-
-  useEffect(() => {
-    if (!anchorId) return;
-    const el = document.getElementById(`fk-msg-${anchorId}`);
-    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [anchorId, personId]);
-
-  const groups: { label: string; items: Signal[] }[] = [];
-  for (const sig of history) {
-    const label = dayLabel(sig.at, s.now);
-    const last = groups[groups.length - 1];
-    if (last && last.label === label) last.items.push(sig);
-    else groups.push({ label, items: [sig] });
-  }
-
-  return (
-    <div className="fk-thread">
-      {groups.map((g) => (
-        <div key={g.label} className="fk-day">
-          <div className="fk-day-label">{g.label}</div>
-          {g.items.map((sig) => {
-            const intent = classifyIntent(sig);
-            const meta = intent ? INTENT_META[intent] : null;
-            const st = statusOf(s, sig);
-            return (
-              <button
-                key={sig.id}
-                id={`fk-msg-${sig.id}`}
-                className={`fk-msg${sig.id === anchorId ? ' anchor' : ''}`}
-                onClick={() => onAnchor(sig.id)}
-              >
-                <span className="fk-msg-meta">
-                  <span className="fk-msg-time">{fmtClock(sig.at)}</span>
-                  <SourceTag channel={sig.channel} />
-                  {meta && (
-                    <span className={`fl-tag int-${intent}`}>
-                      {meta.emoji} {meta.label}
-                    </span>
-                  )}
-                  <span className={`fl-st fl-st-${st.key}`}>
-                    {st.icon} {st.label}
-                  </span>
-                </span>
-                <p className="fk-msg-text">{sig.text}</p>
-              </button>
-            );
-          })}
-        </div>
-      ))}
-      {history.length === 0 && <Empty>No history yet.</Empty>}
-    </div>
-  );
-}
-
-// ---------- board columns ----------
-
-export function PeopleCol({
-  s,
-  act,
-  d,
-  onPick,
-  onLoadMore,
-  totalCount,
-  hasMore = false,
-  loading = false,
-}: {
-  s: State;
-  act: Act;
-  d: Derived;
-  onPick?: (p: Person) => void;
-  onLoadMore?: () => void;
-  totalCount?: number;
-  hasMore?: boolean;
-  loading?: boolean;
-}) {
-  const brightPersonIds = new Set(
-    s.signals
-      .filter((signal) => ['open', 'action'].includes(statusOf(s, signal).key))
-      .map((signal) => signal.personId),
-  );
-  const rankedPeople = d.ranked.slice().sort((a, b) =>
-    Number(brightPersonIds.has(b.p.id)) - Number(brightPersonIds.has(a.p.id))
-  );
-
-  return (
-    <section className="pane fl-people">
-      <PaneHead title="People" count={totalCount ?? d.ranked.length} />
-      {s.focusId && (
-        <button className="fl-clear" onClick={() => act.focus(null)}>
-          ✕ Show everyone
-        </button>
-      )}
-      <div
-        className="pane-scroll"
-        onScroll={(event) => {
-          const node = event.currentTarget;
-          if (hasMore && !loading && node.scrollHeight - node.scrollTop - node.clientHeight < 180) onLoadMore?.();
-        }}
-      >
-        {rankedPeople.map(({ p }) => {
-          const focused = s.focusId === p.id;
-          const first = s.signals.find((x) => x.personId === p.id);
-          const origin = first ? SHORT_CHANNEL[first.channel] : p.kind;
-          const label = urgencyLabel(p);
-          const hasBrightSignal = brightPersonIds.has(p.id);
-          return (
-            <button
-              key={p.id}
-              className={`fl-person ${hasBrightSignal ? 'signal-bright' : 'signal-dim'}${focused ? ' focused' : ''}${d.waiting.has(p.id) ? ' owed' : ''}`}
-              onClick={() => (onPick ? onPick(p) : act.focus(focused ? null : p.id))}
-              title={d.waiting.has(p.id) ? 'waiting on us' : undefined}
-            >
-              <span className="fl-pcol">
-                <span className="fl-prow1">
-                  <span className="fl-pname">{p.name}</span>
-                  <span className="fl-porigin">{origin}</span>
-                </span>
-                <span className="fl-plabels">
-                  <RoleTag role={p.role} />
-                  {label && (
-                    <em className="fl-plabel canonical-label" style={canonicalLabelStyle(label.color)}>
-                      {label.text}
-                    </em>
-                  )}
-                </span>
-              </span>
-            </button>
-          );
-        })}
-        {loading && <Empty>Loading Contacts…</Empty>}
-      </div>
-    </section>
-  );
-}
-
-/** A short SUMMARY of what the signal is about — not the message re-worded. */
-export function signalTitle(sig: Signal): string {
-  if (sig.title && sig.title.trim() && sig.title !== '(no subject)') return sig.title;
-  const t = sig.text;
-  const intent = classifyIntent(sig);
-  const amt = /\$[\d,]+(?:\.\d+)?/.exec(t)?.[0];
-  const date = /the (\d{1,2})(?:st|nd|rd|th)?\b/i.exec(t)?.[0];
-  const day = /before (friday|monday|tuesday|wednesday|thursday|saturday|sunday)/i.exec(t)?.[1];
-  const quoteNo = /quote #(\d+)/i.exec(t)?.[0];
-  const months = /((?:three|two|3|2|\d+)\s*months)/i.exec(t)?.[1];
+function signalTitle(signal: Signal): string {
+  if (signal.title?.trim() && signal.title !== '(no subject)') return signal.title;
+  const text = signal.text;
+  const intent = classifyIntent(signal);
+  const amount = /\$[\d,]+(?:\.\d+)?/.exec(text)?.[0];
+  const date = /the (\d{1,2})(?:st|nd|rd|th)?\b/i.exec(text)?.[0];
+  const weekday = /before (friday|monday|tuesday|wednesday|thursday|saturday|sunday)/i
+    .exec(text)?.[1];
+  const quoteNumber = /quote #(\d+)/i.exec(text)?.[0];
+  const months = /((?:three|two|3|2|\d+)\s*months)/i.exec(text)?.[1];
 
   switch (intent) {
     case 'bill':
-      return `Invoice to pay${amt ? ` — ${amt}` : ''}`;
+      return `Invoice to pay${amount ? ` — ${amount}` : ''}`;
     case 'paid':
-      return `Payment received${amt ? ` — ${amt}` : ''}`;
+      return `Payment received${amount ? ` — ${amount}` : ''}`;
     case 'ready':
-      if (quoteNo) return `${quoteNo.charAt(0).toUpperCase()}${quoteNo.slice(1)} accepted`;
+      if (quoteNumber) {
+        return `${quoteNumber.charAt(0).toUpperCase()}${quoteNumber.slice(1)} accepted`;
+      }
       return date ? `Green light — confirms ${date}` : 'Green light to start';
     case 'lead': {
-      const about = /cabinet/i.test(t)
+      const subject = /cabinet/i.test(text)
         ? 'cabinet work'
-        : /exterior/i.test(t)
+        : /exterior/i.test(text)
           ? 'exterior repaint'
-          : /interior/i.test(t)
+          : /interior/i.test(text)
             ? 'interior repaint'
-            : /deck/i.test(t)
+            : /deck/i.test(text)
               ? 'deck staining'
-              : /colonial|ranch|story|house|home/i.test(t)
+              : /colonial|ranch|story|house|home/i.test(text)
                 ? 'a house repaint'
                 : null;
-      return about ? `New inquiry — ${about}` : 'New inquiry';
+      return subject ? `New inquiry — ${subject}` : 'New inquiry';
     }
     case 'urgent':
-      return day ? `Urgent — needed before ${day.charAt(0).toUpperCase()}${day.slice(1)}` : 'Urgent request';
+      return weekday
+        ? `Urgent — needed before ${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}`
+        : 'Urgent request';
     case 'love':
-      return /number|referr|neighbor/i.test(t) ? 'Referred you to someone' : 'Happy with the work';
-    case 'sched': {
-      if (/gate code/i.test(t)) return 'New gate code shared';
-      if (/keys/i.test(t)) return 'Keys ready for the crew';
-      if (/hour later|start.*later/i.test(t)) return 'Wants a later start time';
-      if (/unlocked/i.test(t)) return 'Gate left open for the crew';
-      if (/parking|access/i.test(t)) return 'Site access sorted';
+      return /number|referr|neighbor/i.test(text)
+        ? 'Referred you to someone'
+        : 'Happy with the work';
+    case 'sched':
+      if (/gate code/i.test(text)) return 'New gate code shared';
+      if (/keys/i.test(text)) return 'Keys ready for the crew';
+      if (/hour later|start.*later/i.test(text)) return 'Wants a later start time';
+      if (/unlocked/i.test(text)) return 'Gate left open for the crew';
+      if (/parking|access/i.test(text)) return 'Site access sorted';
       return 'Job logistics update';
-    }
     case 'future':
       return `Future work — check back in ${months ?? 'a few months'}`;
-    case 'ask': {
-      if (/color code/i.test(t)) return 'Wants the old color code';
-      if (/garage/i.test(t)) return 'Wants to add the garage door';
-      if (/estimate|quote/i.test(t)) return 'Chasing the estimate';
-      if (/do you handle|refinishing/i.test(t)) return 'Asking what you handle';
-      if (/warehouse/i.test(t)) return 'Warehouse job question';
+    case 'ask':
+      if (/color code/i.test(text)) return 'Wants the old color code';
+      if (/garage/i.test(text)) return 'Wants to add the garage door';
+      if (/estimate|quote/i.test(text)) return 'Chasing the estimate';
+      if (/do you handle|refinishing/i.test(text)) return 'Asking what you handle';
+      if (/warehouse/i.test(text)) return 'Warehouse job question';
       return 'Waiting on your answer';
-    }
-    default: {
-      if (/wrapped|patched|sanded|prep/i.test(t)) return 'Prep work finished';
-      if (/confirmed for|both days|day rate/i.test(t)) return 'Sub confirmed for the job';
-      if (/po attached|approval form|w-9|signed/i.test(t)) return 'Paperwork received';
-      if (/walkthrough notes|satin|trim color|listing|turnover|eggshell/i.test(t)) return 'Job specs shared';
-      if (/final walkthrough|accounting/i.test(t)) return 'Job wrap-up note';
+    default:
+      if (/wrapped|patched|sanded|prep/i.test(text)) return 'Prep work finished';
+      if (/confirmed for|both days|day rate/i.test(text)) return 'Sub confirmed for the job';
+      if (/po attached|approval form|w-9|signed/i.test(text)) return 'Paperwork received';
+      if (/walkthrough notes|satin|trim color|listing|turnover|eggshell/i.test(text)) {
+        return 'Job specs shared';
+      }
+      if (/final walkthrough|accounting/i.test(text)) return 'Job wrap-up note';
       return 'General update';
-    }
   }
 }
 
@@ -714,48 +160,65 @@ export function SignalsCol({
   s: State;
   act: Act;
   d: Derived;
-  onOpen: (sig: Signal) => void;
+  onOpen: (signal: Signal) => void;
   selId?: string | null;
   onLoadMore?: () => void;
   hasMore?: boolean;
   loading?: boolean;
 }) {
-  const fname = d.focusPerson?.name ?? null;
-  const clear = () => act.focus(null);
-  const stById = new Map(d.streams.map((sig) => [sig.id, statusOf(s, sig)]));
-  const openSigs = d.streams.filter((sig) => ['open', 'action'].includes(stById.get(sig.id)?.key ?? ''));
-  const settledSigs = d.streams.filter((sig) => !['open', 'action'].includes(stById.get(sig.id)?.key ?? ''));
+  const focusName = d.focusPerson?.name ?? null;
+  const statuses = new Map(d.streams.map((signal) => [signal.id, statusOf(s, signal)]));
+  const openSignals = d.streams.filter((signal) => (
+    ['open', 'action'].includes(statuses.get(signal.id)?.key ?? '')
+  ));
+  const settledSignals = d.streams.filter((signal) => (
+    !['open', 'action'].includes(statuses.get(signal.id)?.key ?? '')
+  ));
 
-  const renderCard = (sig: Signal) => {
-    const p = s.people.find((x) => x.id === sig.personId);
-    const fresh = s.now - sig.at < 4000;
-    const intent = sig.source ? null : classifyIntent(sig);
-    const meta = intent ? INTENT_META[intent] : null;
+  const renderCard = (signal: Signal) => {
+    const person = s.people.find((candidate) => candidate.id === signal.personId);
+    const fresh = s.now - signal.at < 4_000;
+    const intent = signal.source ? null : classifyIntent(signal);
+    const intentMeta = intent ? INTENT_META[intent] : null;
     const money = intent === 'ready' || intent === 'paid';
-    const st = stById.get(sig.id) ?? statusOf(s, sig);
-    const settled = !['open', 'action'].includes(st.key);
+    const status = statuses.get(signal.id) ?? statusOf(s, signal);
+    const settled = !['open', 'action'].includes(status.key);
     return (
       <article
-        key={sig.id}
-        className={`card fl-sig st-${st.key}${settled ? ' settled' : ''}${fresh ? ' fresh' : ''}${intent ? ` int-${intent}` : ''}${selId === sig.id ? ' selected' : ''}`}
-        onClick={() => onOpen(sig)}
+        key={signal.id}
+        className={`card fl-sig st-${status.key}${settled ? ' settled' : ''}${fresh ? ' fresh' : ''}${intent ? ` int-${intent}` : ''}${selId === signal.id ? ' selected' : ''}`}
+        onClick={() => onOpen(signal)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onOpen(signal);
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-label={`Open Signal from ${person?.name ?? 'unknown contact'}: ${signalTitle(signal)}`}
       >
         {money && fresh && <Burst emojis={['💰', '✨', '🎉']} />}
         <div className="fl-sig-head">
           <span className="fl-sig-identity">
-            <span className="fl-sig-name">{p?.name ?? 'Unknown'}</span>
-            {sig.actorPhone ? <span className="fl-sig-phone">{formatSignalPhone(sig.actorPhone)}</span> : null}
+            <span className="fl-sig-name">{person?.name ?? 'Unknown'}</span>
+            {signal.actorPhone ? (
+              <span className="fl-sig-phone">{formatSignalPhone(signal.actorPhone)}</span>
+            ) : null}
           </span>
-          <SignalContactTag signal={sig} person={p} />
-          {st.key === 'action' && <span className="fl-sig-status">Draft in Actions</span>}
+          <SignalContactTag signal={signal} person={person} />
+          {status.key === 'action' && <span className="fl-sig-status">Draft in Actions</span>}
         </div>
         <h3 className="fl-act-title">
-          {meta?.emoji ?? (sig.channel === 'call' ? '📞' : sig.channel === 'form' ? '🌐' : '💬')} {signalTitle(sig)}
+          {intentMeta?.emoji ?? (
+            signal.channel === 'call' ? '📞' : signal.channel === 'form' ? '🌐' : '💬'
+          )}{' '}
+          {signalTitle(signal)}
         </h3>
-        <p className="card-text">{sig.text}</p>
+        <p className="card-text">{signal.text}</p>
         <div className="card-sub">
-          <SourceTag channel={sig.channel} />
-          <span className="card-age">{fmtAge(sig.at, s.now)}</span>
+          <SourceTag channel={signal.channel} />
+          <span className="card-age">{fmtAge(signal.at, s.now)}</span>
         </div>
       </article>
     );
@@ -766,33 +229,40 @@ export function SignalsCol({
       <PaneHead
         title="Signals"
         count={d.streams.length}
-        focusName={fname}
-        onClear={clear}
+        focusName={focusName}
+        onClear={() => act.focus(null)}
       />
       <div
         className="pane-scroll"
         onScroll={(event) => {
-          const node = event.currentTarget;
-          if (hasMore && !loading && node.scrollHeight - node.scrollTop - node.clientHeight < 240) onLoadMore?.();
+          const element = event.currentTarget;
+          if (
+            hasMore &&
+            !loading &&
+            element.scrollHeight - element.scrollTop - element.clientHeight < 240
+          ) {
+            onLoadMore?.();
+          }
         }}
       >
-        {/* unsettled on top — never buried under settled cards */}
-        {groupStreamByDay(openSigs, s.now).map((g) => (
-          <div key={g.label} className="sday">
-            <div className="sday-label">{g.label}</div>
-            {g.items.map(renderCard)}
+        {groupStreamByDay(openSignals, s.now).map((group) => (
+          <div key={group.label} className="sday">
+            <div className="sday-label">{group.label}</div>
+            {group.items.map(renderCard)}
           </div>
         ))}
-        {openSigs.length === 0 && (
-          <Empty>Nothing needs you right now{fname ? ` from ${fname}` : ''} — all settled. 🏁</Empty>
+        {openSignals.length === 0 && (
+          <Empty>
+            Nothing needs you right now{focusName ? ` from ${focusName}` : ''} — all settled. 🏁
+          </Empty>
         )}
-        {settledSigs.length > 0 && (
+        {settledSignals.length > 0 && (
           <>
             <h4 className="autos-h">Settled</h4>
-            {groupStreamByDay(settledSigs, s.now).map((g) => (
-              <div key={g.label} className="sday">
-                <div className="sday-label">{g.label}</div>
-                {g.items.map(renderCard)}
+            {groupStreamByDay(settledSignals, s.now).map((group) => (
+              <div key={group.label} className="sday">
+                <div className="sday-label">{group.label}</div>
+                {group.items.map(renderCard)}
               </div>
             ))}
           </>
@@ -803,947 +273,135 @@ export function SignalsCol({
   );
 }
 
-export function ActionsCol({
-  s,
-  act,
-  d,
-  onOpen,
-}: {
-  s: State;
-  act: Act;
-  d: Derived;
-  onOpen?: (a: ActionCard) => void;
-}) {
-  const fname = d.focusPerson?.name ?? null;
-  // one list, original order — completing a card flips it in place, it never moves
-  const rows: { a: ActionCard; doneAt: number | null }[] = [
-    ...d.actions.map((a) => ({ a, doneAt: null as number | null })),
-    ...s.handled
-      .filter((h) => !s.focusId || h.a.personId === s.focusId)
-      .map((h) => ({ a: h.a, doneAt: h.at as number | null })),
-  ].sort((x, y) => y.a.createdAt - x.a.createdAt || x.a.id.localeCompare(y.a.id));
-
-  return (
-    <section className="pane fl-actions">
-      <PaneHead title="Actions" count={d.actions.length} focusName={fname} onClear={() => act.focus(null)} />
-      <div className="pane-scroll">
-        {d.actions.length === 0 && (
-          <div className="fl-zero">All clear — nothing waiting on us{fname ? ` for ${fname}` : ''}.</div>
-        )}
-        {rows.map(({ a, doneAt }) => {
-          const p = s.people.find((x) => x.id === a.personId);
-          if (doneAt !== null) {
-            return (
-              <article key={a.id} className="card fl-done-card">
-                <div className="card-top">
-                  <span className={`kind-chip kind-chip-${a.kind}`}>{KIND_LABEL[a.kind]}</span>
-                  <span className="fl-doneat">✓ done · {fmtAge(doneAt, s.now)}</span>
-                  <button className="fl-undo" title="Undo — put it back" onClick={() => act.undoAction(a.id)}>
-                    ↩ undo
-                  </button>
-                </div>
-                <h3 className="fl-done-title">{a.title}</h3>
-                <div className="fl-act-person">{p?.name ?? '—'}</div>
-              </article>
-            );
-          }
-          const fresh = s.now - a.createdAt < 5000;
-          return (
-            <article
-              key={a.id}
-              className={`card fl-act kind-${a.kind}${fresh ? ' fresh' : ''}`}
-              onClick={onOpen ? () => onOpen(a) : undefined}
-            >
-              <div className="card-top">
-                <span className={`kind-chip kind-chip-${a.kind}`}>{KIND_LABEL[a.kind]}</span>
-                <span className="card-age">{fmtAge(a.createdAt, s.now)}</span>
-              </div>
-              <h3 className="fl-act-title">{a.title}</h3>
-              <div className="fl-act-person">
-                {p?.name ?? '—'}
-                {p && <RoleTag role={p.role} />}
-              </div>
-              <Prov s={s} a={a} />
-              <div className="fl-btns">
-                <button
-                  className="fl-btn fl-btn-done"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    act.done(a.id);
-                  }}
-                >
-                  Done ✓
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
+function canonicalLabelStyle(color: string | null | undefined): CSSProperties | undefined {
+  return color ? ({ ['--label-color' as string]: color } as CSSProperties) : undefined;
 }
 
-export function RemindersCol({
-  s,
-  act,
-  d,
-  R,
-}: {
-  s: State;
-  act: Act;
-  d: Derived;
-  R: { leaving: ReadonlySet<string>; depart: (id: string, fn: (id: string) => void) => void };
-}) {
-  const fname = d.focusPerson?.name ?? null;
-  const doneRems = s.reminders
-    .filter((r) => r.doneAt !== null && (!s.focusId || r.personId === s.focusId))
-    .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
-    .slice(0, 6);
-  return (
-    <section className="pane fl-rems">
-      <PaneHead title="Reminders" count={d.reminders.length} focusName={fname} onClear={() => act.focus(null)} />
-      <div className="pane-scroll">
-        {d.reminders.map((r) => {
-          const p = s.people.find((x) => x.id === r.personId);
-          const due = r.dueAt <= s.now;
-          const born = r.bornLive && s.now - r.createdAt < 8000;
-          return (
-            <article
-              key={r.id}
-              className={`card rem-card ${due ? 'overdue due' : 'upcoming'}${born ? ' born' : ''}${R.leaving.has(r.id) ? ' leaving' : ''}`}
-            >
-              {born && <Burst emojis={['✨', '⏳']} />}
-              <div className="card-top">
-                <DueChip dueAt={r.dueAt} now={s.now} />
-                {born && <span className="chip-born">captured</span>}
-              </div>
-              <h3 className="fl-rem-note">{r.note}</h3>
-              <div className="fl-act-person">
-                {p?.name ?? '—'}
-                {p && <RoleTag role={p.role} />}
-              </div>
-              <RemProv s={s} r={r} />
-              <div className="fl-btns">
-                <button className="fl-btn fl-btn-done" onClick={() => R.depart(r.id, act.remDone)}>
-                  Done ✓
-                </button>
-              </div>
-            </article>
-          );
-        })}
-        {d.reminders.length === 0 && <Empty>No open reminders{fname ? ` for ${fname}` : ''}.</Empty>}
-        {doneRems.length > 0 && (
-          <>
-            <h4 className="autos-h">Handled</h4>
-            {doneRems.map((r) => {
-              const p = s.people.find((x) => x.id === r.personId);
-              return (
-                <article key={r.id} className="card fl-done-card">
-                  <div className="card-top">
-                    <span className="fl-doneat">✓ done · {r.doneAt !== null ? fmtAge(r.doneAt, s.now) : ''}</span>
-                    <button className="fl-undo" title="Undo — put it back" onClick={() => act.undoReminder(r.id)}>
-                      ↩ undo
-                    </button>
-                  </div>
-                  <h3 className="fl-done-title">{r.note}</h3>
-                  <div className="fl-act-person">{p?.name ?? '—'}</div>
-                </article>
-              );
-            })}
-          </>
-        )}
-      </div>
-    </section>
-  );
+function normalizeEmailText(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[ \t\u00a0]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
-export function PlaybooksCol({ s, act, onOpen }: { s: State; act: Act; onOpen?: (instId: string) => void }) {
-  const [cfg, setCfg] = useState(false);
-  const running = s.seqInstances.filter((i) => i.doneAt === null).length;
-  return (
-    <section className="pane fl-autos">
-      <PaneHead
-        title="Automations"
-        count={cfg ? 'configure' : `${running} running`}
-        extra={
-          <button
-            className={`fl-gear${cfg ? ' on' : ''}`}
-            onClick={() => setCfg(!cfg)}
-            disabled={s.sequences.length === 0}
-            title={s.sequences.length === 0 ? 'Automation creation is locked in v1' : cfg ? 'Back to what’s running' : 'Configure automations'}
-          >
-            ⚙
-          </button>
-        }
-      />
-      <div className="pane-scroll">
-        {cfg ? (
-          <>
-            <div className="fl-cfg-note">
-              These run on their own when a trigger matches. Toggle one off to pause it for everyone enrolled.
-            </div>
-            {s.sequences.map((seq) => {
-              const count = s.seqInstances.filter((i) => i.seqId === seq.id && i.doneAt === null).length;
-              return (
-                <div key={seq.id} className={`card seq-card${seq.enabled ? '' : ' auto-off'}`}>
-                  <div className="auto-top">
-                    <span className="seq-name">{seq.name}</span>
-                    <button
-                      className={`auto-toggle${seq.enabled ? ' on' : ''}`}
-                      onClick={() => act.toggleSeq(seq.id)}
-                      title={seq.enabled ? 'Pause this automation' : 'Resume this automation'}
-                    >
-                      <i />
-                    </button>
-                  </div>
-                  <p className="auto-desc">when {seq.trigger}</p>
-                  <div className="seq-steps">
-                    {seq.steps.map((st, i) => (
-                      <div key={i} className="seq-step">
-                        <span className={`seq-step-kind step-${st.kind}`}>{st.kind}</span>
-                        <span className="seq-step-day">{st.day === 0 ? 'right away' : `day ${st.day}`}</span>
-                        <span className="seq-step-label">{st.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="auto-stats">
-                    <span>{count} running</span>
-                    {!seq.enabled && <span className="auto-paused">paused</span>}
-                  </div>
-                </div>
-              );
-            })}
-          </>
-        ) : (
-          <>
-            {running === 0 && (
-              <Empty>No user-created automations yet.</Empty>
-            )}
-            {s.seqInstances
-              .filter((i) => i.doneAt === null)
-              .sort((a, b) => a.nextAt - b.nextAt)
-              .map((inst) => {
-                const seq = s.sequences.find((q) => q.id === inst.seqId);
-                if (!seq) return null;
-                const p = s.people.find((x) => x.id === inst.personId);
-                const next = seq.steps[inst.stepIdx];
-                const fresh = s.now - inst.startedAt < 6000;
-                const stepFresh = inst.lastStep !== null && s.now - inst.lastStep.at < 6000;
-                return (
-                  <div
-                    key={inst.id}
-                    className={`card seqi-card${fresh || stepFresh ? ' fresh' : ''}${seq.enabled ? '' : ' auto-off'}${onOpen ? ' fs-click' : ''}`}
-                    onClick={onOpen ? () => onOpen(inst.id) : undefined}
-                    title={onOpen ? 'Open the chat' : undefined}
-                  >
-                    <div className="auto-top">
-                      <span className="seqi-person">{p?.name ?? '—'}</span>
-                      <span className="seqi-prog">
-                        {inst.stepIdx}/{seq.steps.length}
-                      </span>
-                    </div>
-                    <div className="seqi-seq">
-                      {seq.name}
-                      {!seq.enabled && <span className="auto-paused"> · paused</span>}
-                    </div>
-                    <div className="seqi-dots">
-                      {seq.steps.map((st, i) => (
-                        <i
-                          key={i}
-                          className={`sdot${i < inst.stepIdx ? ' sdot-done' : i === inst.stepIdx ? ' sdot-next' : ''}`}
-                          title={`Day ${st.day} — ${st.label}`}
-                        />
-                      ))}
-                    </div>
-                    {next && (
-                      <div className="seqi-next">
-                        Next: {next.label} · <b>{fmtDue(inst.nextAt, s.now)}</b>
-                      </div>
-                    )}
-                    {inst.lastStep && (
-                      <div className="seqi-last">
-                        Last: {inst.lastStep.label} · {fmtAge(inst.lastStep.at, s.now)}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            {s.seqInstances.filter((i) => i.doneAt !== null).length > 0 && (
-              <>
-                <h4 className="autos-h">Finished</h4>
-                {s.seqInstances
-                  .filter((i) => i.doneAt !== null)
-                  .map((inst) => {
-                    const seq = s.sequences.find((q) => q.id === inst.seqId);
-                    const p = s.people.find((x) => x.id === inst.personId);
-                    return (
-                      <div
-                        key={inst.id}
-                        className={`card seqi-card seqi-done${onOpen ? ' fs-click' : ''}`}
-                        onClick={onOpen ? () => onOpen(inst.id) : undefined}
-                      >
-                        <div className="auto-top">
-                          <span className="seqi-person">{p?.name ?? '—'}</span>
-                          <span className="seqi-endtag">done</span>
-                        </div>
-                        <div className="seqi-seq">
-                          {seq?.name ?? ''} · completed {inst.doneAt !== null ? fmtAge(inst.doneAt, s.now) : ''}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  );
+function splitSelectedEmailBody(signal: Signal): { reply: string; quoted: string | null } {
+  const reply = signal.channel === 'email' ? normalizeEmailText(signal.text) : signal.text;
+  const quoted = signal.quotedText?.trim()
+    ? signal.channel === 'email'
+      ? normalizeEmailText(signal.quotedText)
+      : signal.quotedText.trim()
+    : null;
+  return { reply, quoted };
 }
 
-// ---------- app chrome: side nav + header bar ----------
-
-// The product is an agent-orchestration platform for small businesses —
-// Hermes runs the agents in the back; the human steers from the Board.
-const NAV_MAIN: { icon: string; label: string }[] = [
-  { icon: '📡', label: 'Board' },
-  { icon: '🤖', label: 'Agents' },
-  { icon: '🧩', label: 'Skills' },
-  { icon: '✓', label: 'Actions' },
-  { icon: '⚡', label: 'Activity' },
-  { icon: '🏷️', label: 'Labels' },
-  { icon: '◷', label: 'Schedules' },
-  { icon: '🔌', label: 'Connections' },
-  { icon: '👥', label: 'Contacts' },
-  { icon: '📊', label: 'Insights' },
-];
-
-const NAV_FOOT: { icon: string; label: string }[] = [
-  { icon: '⚙️', label: 'Settings' },
-  { icon: '💬', label: 'Help & feedback' },
-];
-
-/** An agent's live status, shown in the side nav roster. */
-export interface AgentInfo {
-  id: string;
-  emoji: string;
-  name: string;
-  duty: string;
-  status: 'online' | 'offline' | 'checking';
-  line: string;
+function evidenceStatus(status: string | null | undefined): string {
+  if (status === 'available') return 'Available';
+  if (status === 'unavailable') return 'Unavailable';
+  if (status === 'failed') return 'Retry scheduled';
+  return 'Pending';
 }
 
-export function SideNav({
-  d,
-  roster,
-  active = 'Board',
-  onNav,
-}: {
-  d: Derived;
-  roster?: AgentInfo[];
-  active?: string;
-  onNav?: (label: string) => void;
-}) {
-  const LIVE = ['Board', 'Agents', 'Skills', 'Actions', 'Activity', 'Labels', 'Schedules', 'Connections', 'Contacts'];
-  const item = (n: { icon: string; label: string }) => {
-    const on = n.label === active;
-    const live = onNav !== undefined && LIVE.includes(n.label);
-    return (
-      <button
-        key={n.label}
-        className={`fl-nav-item${on ? ' on' : ''}`}
-        onClick={live ? () => onNav(n.label) : undefined}
-        title={live || on ? undefined : `${n.label} — not part of this concept build yet`}
-      >
-        <span className="fl-nav-ico">{n.icon}</span>
-        {n.label}
-        {n.label === 'Board' && d.c.openActions > 0 && <span className="fl-nav-count">{d.c.openActions}</span>}
-      </button>
-    );
-  };
+function SignalEvidence({ signal, detail }: { signal: Signal; detail?: SignalDetail }) {
+  const isCall = signal.channel === 'call';
+  if (!isCall && (detail?.attachments.length ?? 0) === 0) return null;
+
   return (
-    <nav className="fl-nav">
-      <div className="fl-nav-brand">
-        <span className="fl-mark" />
-        <div className="fl-nav-names">
-          <b className="fl-nav-logo">FLUID</b>
-          <span className="fl-nav-co">Ottawa Painters</span>
+    <div className="fd-sel-evidence">
+      {detail?.attachments.map((attachment) => (
+        <div className="fd-sel-evidence-row" key={attachment.attachmentKey}>
+          <span>Attachment: <b>{attachment.filename}</b> · {attachment.status}</span>
+          {attachment.extractedText ? <span>{attachment.extractedText.slice(0, 800)}</span> : null}
         </div>
-      </div>
-      {NAV_MAIN.map(item)}
-      {roster && (
-        <div className="fl-nav-agents">
-          <div className="fl-nav-label">Agents</div>
-          {roster.map((ag) => (
-            <div key={ag.id} className="fl-nav-agent" title={`${ag.name} — ${ag.duty}`}>
-              <span className="fl-nav-agent-top">
-                <span className="fl-nav-ico">{ag.emoji}</span>
-                <b className="fl-nav-agent-name">{ag.name}</b>
-                <span className={`fs-dot fs-dot-${ag.status}`} title={ag.status} />
-              </span>
-              <span className="fl-nav-agent-line">{ag.line}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="fl-nav-gap" />
-      <div className="fl-nav-foot">{NAV_FOOT.map(item)}</div>
-    </nav>
-  );
-}
-
-export function KitHeader({
-  s,
-  act,
-  d,
-  hermesStatus,
-  hermesError,
-}: {
-  s: State;
-  act: Act;
-  d: Derived;
-  hermesStatus: HermesStatus | null;
-  hermesError: string | null;
-}) {
-  const hermesState = hermesError !== null
-    ? hermesStatus === null ? 'unavailable' : 'degraded'
-    : hermesStatus === null
-      ? 'checking'
-      : hermesStatus.connected
-        ? 'online'
-        : hermesStatus.gatewayState === 'running'
-          ? 'degraded'
-          : 'offline';
-  const hermesTitle = hermesError !== null
-    ? `Hermes is ${hermesState}: ${hermesError}`
-    : hermesStatus === null
-      ? 'Checking the Hermes gateway and scheduler'
-      : hermesState === 'online'
-        ? 'Hermes gateway and scheduler are available'
-        : `Hermes gateway is ${hermesStatus.gatewayState}`;
-
-  return (
-    <header className="fl-top">
-      <label className="fl-search" title="Search — not wired up in this concept build">
-        <span className="fl-search-ico">🔍</span>
-        <input placeholder="Search people, agents, activity…" />
-      </label>
-      <span className="fl-hspace" />
-      <div className="fl-counters">
-        <span className="fl-stat">
-          <b>{d.c.signalsToday}</b> <em>signals today</em>
-        </span>
-        <span className="fl-stat">
-          <b>{d.c.openActions}</b> <em>actions open</em>
-        </span>
-        <span className={`fl-stat${d.c.remindersDue > 0 ? ' hot' : ''}`}>
-          <b>{d.c.remindersDue}</b> <em>due now</em>
-        </span>
-      </div>
-      <div className="fl-ctl">
-        <span
-          className="fl-hermes"
-          title={hermesTitle}
-        >
-          <span className={`sim-dot hermes-dot-${hermesState}`} />
-          Hermes · {hermesState}
-        </span>
-        <button
-          className="fl-pause"
-          onClick={act.togglePause}
-          title="Pause or resume the local board feed; Hermes schedules are not changed"
-        >
-          {s.paused ? '▶ Resume board' : '⏸ Pause board'}
-        </button>
-      </div>
-      <button
-        className="fl-bell"
-        title={d.c.remindersDue > 0 ? `${d.c.remindersDue} reminder${d.c.remindersDue > 1 ? 's' : ''} due now` : 'Notifications'}
-      >
-        🔔
-        {d.c.remindersDue > 0 && <i className="fl-bell-dot" />}
-      </button>
-      <div className="fl-user" title="Jad — Ottawa Painters">
-        <Avatar name="Jad" />
-        <span className="fl-user-name">Jad</span>
-      </div>
-    </header>
-  );
-}
-
-// ---------- the decide popup: dossier + full thread + plays — shared by every view ----------
-
-export type DecideSel = { personId: string; sigId: string | null } | null;
-
-export function DecidePopup({
-  s,
-  act,
-  d,
-  sel,
-  onSel,
-}: {
-  s: State;
-  act: Act;
-  d: Derived;
-  sel: DecideSel;
-  onSel: (next: DecideSel) => void;
-}) {
-  const play = usePlayState();
-  const [pendingAct, setPendingAct] = useState('');
-  const [pendingSeq, setPendingSeq] = useState<string | null>(null);
-
-  // fresh decision state whenever the anchor moves
-  useEffect(() => {
-    play.resetCreated();
-    setPendingAct('');
-    setPendingSeq(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel?.personId, sel?.sigId]);
-
-  const open = (personId: string, sigId: string | null) => onSel({ personId, sigId });
-  const close = () => onSel(null);
-
-  // ----- the triage queue: every unsettled signal, in stream order -----
-  const needsIds = d.streams.filter((sig) => statusOf(s, sig).key === 'open').map((x) => x.id);
-
-  const goNext = () => {
-    if (needsIds.length === 0) {
-      close();
-      return;
-    }
-    const cur = sel?.sigId ? needsIds.indexOf(sel.sigId) : -1;
-    const nextId =
-      cur === -1 ? needsIds.find((id) => id !== sel?.sigId) ?? needsIds[0] : needsIds[(cur + 1) % needsIds.length];
-    if (!nextId || nextId === sel?.sigId) return;
-    const sig = s.signals.find((x) => x.id === nextId);
-    if (sig) open(sig.personId, sig.id);
-  };
-  const goNextRef = useRef(goNext);
-  goNextRef.current = goNext;
-
-  useEffect(() => {
-    if (!sel) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onSel(null);
-      if (
-        (e.key === 'ArrowRight' || e.key === 'j') &&
-        !(e.target instanceof HTMLInputElement) &&
-        !(e.target instanceof HTMLSelectElement)
-      ) {
-        goNextRef.current();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel]);
-
-  const person = sel ? s.people.find((x) => x.id === sel.personId) : undefined;
-  const anchor = person
-    ? (sel?.sigId ? s.signals.find((x) => x.id === sel.sigId) : undefined) ??
-      s.signals.filter((x) => x.personId === person.id).slice(-1)[0]
-    : undefined;
-
-  if (!person || !anchor) return null;
-
-  const label = urgencyLabel(person);
-  const summary = personSummary(s, d, person);
-  // obligations merge open + recently completed so nothing vanishes on Done
-  const personActRows: { a: ActionCard; doneAt: number | null }[] = [
-    ...d.actions.filter((a) => a.personId === person.id).map((a) => ({ a, doneAt: null as number | null })),
-    ...s.handled
-      .filter((h) => h.a.personId === person.id)
-      .slice(0, 5)
-      .map((h) => ({ a: h.a, doneAt: h.at as number | null })),
-  ].sort((x, y) => y.a.createdAt - x.a.createdAt || x.a.id.localeCompare(y.a.id));
-  const personDoneRems = s.reminders
-    .filter((r) => r.doneAt !== null && r.personId === person.id)
-    .sort((a, b) => (b.doneAt ?? 0) - (a.doneAt ?? 0))
-    .slice(0, 3);
-  const story = personStory(s, person);
-  const beatWhen = (at: number) => {
-    const dl = dayLabel(at, s.now);
-    return dl === 'Today' ? fmtAge(at, s.now) : dl;
-  };
-  const personActions = d.actions.filter((a) => a.personId === person.id);
-  const personRems = d.reminders.filter((r) => r.personId === person.id);
-  const anchorSt = statusOf(s, anchor);
-
-  return (
-    <div className="fl-scrim" onClick={close}>
-      <div className="fl-mega" onClick={(e) => e.stopPropagation()}>
-        <header className="fl-mega-head">
-          <Avatar name={person.name} />
-          <div className="fl-mega-main">
-            <div className="fl-mega-row">
-              <h2 className="fl-mega-name">{person.name}</h2>
-              <SignalContactTag signal={anchor} person={person} />
-              {label && (
-                <em className="fl-plabel canonical-label" style={canonicalLabelStyle(label.color)}>
-                  {label.text}
-                </em>
-              )}
-            </div>
-            <div className="fl-mega-kind">
-              {person.company ? `${person.company} · ` : ''}
-              {person.kind} · {person.note}
-            </div>
-          </div>
-          <div className="fl-mega-side">
-            <span className="chip-row">
-              {person.tags.map((t) => (
-                <span key={t} className="tag">
-                  {t}
-                </span>
-              ))}
-              {person.suggestedTags.map((t) => (
-                <button key={t} className="tag tag-sug" onClick={() => act.acceptTag(person.id, t)}>
-                  + {t}
-                </button>
-              ))}
-            </span>
-          </div>
-          {needsIds.length > 0 && (
-            <button className="fl-next" onClick={goNext} title="Jump to the next signal that needs you (→ or j)">
-              next needs you · {needsIds.length} →
-            </button>
-          )}
-          <button className="fl-x" onClick={close} title="Close (Esc)">
-            ✕
-          </button>
-        </header>
-        <div className="fl-mega-body">
-          <section className="fl-mega-thread">
-            <h4 className="fk-h">Full history — click any message to decide on it</h4>
-            <div className="fl-mega-scroll">
-              <ThreadView s={s} personId={person.id} anchorId={anchor.id} onAnchor={(id) => open(person.id, id)} />
-            </div>
-          </section>
-          <aside className="fl-mega-decide">
-            <div className="fl-mega-scroll">
-              {anchorSt.key !== 'open' && (
-                <div className="fl-settled-banner">
-                  {needsIds.length > 0 ? (
-                    <>
-                      <span>✓ This one's settled.</span>
-                      <button className="fl-btn fl-btn-done" onClick={goNext}>
-                        Next needs you →
-                      </button>
-                    </>
-                  ) : (
+      ))}
+      {isCall && (
+        <>
+          <div className="fd-sel-evidence-row fd-sel-recordings">
+            <span><b>Call recording</b> · {evidenceStatus(detail?.recordings?.status)}</span>
+            {detail?.recordings?.status === 'available' && detail.recordings.items.length > 0 ? (
+              <div className="fd-call-recording-list">
+                {detail.recordings.items.map((recording, index) => (
+                  <div className="fd-call-recording" key={recording.id ?? `${recording.url}:${index}`}>
                     <span>
-                      🏁 <b>All caught up</b> — nothing needs you right now.
+                      Recording {index + 1}
+                      {recording.duration === null ? '' : ` · ${Math.round(recording.duration)} seconds`}
                     </span>
-                  )}
-                </div>
-              )}
-              <h4 className="fk-h">Suggested next steps</h4>
-              <PlayRows s={s} act={act} sig={anchor} play={play} />
-              {person.nbas.length > 0 && (
-                <div className="fl-plays">
-                  {person.nbas.map((n) => (
-                    <div
-                      key={n.id}
-                      role="button"
-                      tabIndex={0}
-                      className="fl-play"
-                      onClick={() => act.runNba(person.id, n.id)}
-                    >
-                      <span className="fl-play-icon">📌</span>
-                      <span className="fl-play-body">
-                        <span className="fl-play-label">{n.label}</span>
-                        <span className="fl-play-detail">for this client specifically — runs now and logs it</span>
-                      </span>
-                      <span className="fl-play-side">
-                        <span className="fl-kind fl-kind-action">action</span>
-                        <span className="fl-chip fl-chip-sug">suggestion</span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(() => {
-                const first = firstNameOf(person.name);
-                const titleOf = (label: string) => `${label} — ${first}`;
-                const actExists = (label: string) =>
-                  d.actions.some((a) => a.personId === person.id && a.title === titleOf(label));
-                return (
-                  <div className="fl-custom">
-                    <div className="fl-custom-hint">More actions:</div>
-                    <div className="fl-auto-row">
-                      <select
-                        className="fl-auto-select"
-                        value={pendingAct}
-                        onChange={(e) => setPendingAct(e.target.value)}
-                      >
-                        <option value="">Choose an action…</option>
-                        {ACTION_CATALOG.map((c) => (
-                          <option key={c.label} value={c.label} disabled={actExists(c.label)}>
-                            {c.icon} {c.label}
-                            {actExists(c.label) ? ' — created ✓' : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="fl-btn fl-btn-done"
-                        disabled={!pendingAct}
-                        onClick={() => {
-                          if (!pendingAct) return;
-                          act.createAction(anchor.id, titleOf(pendingAct));
-                          setPendingAct('');
-                        }}
-                      >
-                        Add ✓
-                      </button>
-                    </div>
-                    <div className="fl-custom-autos">
-                      <div className="fl-custom-hint">…or enroll {first} in an automation:</div>
-                      {(() => {
-                        const isRunning = (seqId: string) =>
-                          s.seqInstances.some(
-                            (i) => i.seqId === seqId && i.personId === person.id && i.doneAt === null,
-                          );
-                        return (
-                          <div className="fl-auto-row">
-                            <select
-                              className="fl-auto-select"
-                              value={pendingSeq ?? ''}
-                              onChange={(e) => setPendingSeq(e.target.value || null)}
-                            >
-                              <option value="">Choose an automation…</option>
-                              {s.sequences.map((seq) => (
-                                <option key={seq.id} value={seq.id} disabled={isRunning(seq.id)}>
-                                  {seq.name}
-                                  {isRunning(seq.id) ? ' — running ✓' : seq.enabled ? '' : ' — paused'}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              className="fl-btn fl-btn-done"
-                              disabled={!pendingSeq}
-                              onClick={() => {
-                                if (!pendingSeq) return;
-                                act.enrollSeq(anchor.id, pendingSeq);
-                                setPendingSeq(null);
-                              }}
-                            >
-                              Enroll ✓
-                            </button>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                );
-              })()}
-              <h4 className="fk-h">Open for {firstNameOf(person.name)}</h4>
-              {personActRows.length === 0 && personRems.length === 0 && personDoneRems.length === 0 && (
-                <Empty>Nothing open — all settled. 🏁</Empty>
-              )}
-              {personActRows.map(({ a, doneAt }) =>
-                doneAt !== null ? (
-                  <div key={a.id} className="fk-oblig done">
-                    <span className={`kind-chip kind-chip-${a.kind}`}>{KIND_LABEL[a.kind]}</span>
-                    <span className="fk-oblig-title">{a.title}</span>
-                    <span className="fl-doneat">✓ done · {fmtAge(doneAt, s.now)}</span>
-                    <button className="fl-undo" title="Undo — put it back" onClick={() => act.undoAction(a.id)}>
-                      ↩
-                    </button>
-                  </div>
-                ) : (
-                  <div key={a.id} className="fk-oblig">
-                    <span className={`kind-chip kind-chip-${a.kind}`}>{KIND_LABEL[a.kind]}</span>
-                    <span className="fk-oblig-title">{a.title}</span>
-                    {(() => {
-                      const run = s.runs[a.id];
-                      if (!run) return null;
-                      const key = run.status === 'running' ? 'run' : run.status;
-                      const label =
-                        run.status === 'running'
-                          ? `⟳ ${run.agent}`
-                          : run.status === 'review'
-                            ? `◔ review · ${run.agent}`
-                            : run.status === 'fail'
-                              ? `✗ failed · ${run.agent}`
-                              : `✓ ${run.agent}`;
-                      return (
-                        <span className={`fs-st fs-st-${key}`} title={run.note || undefined}>
-                          {label}
-                        </span>
-                      );
-                    })()}
-                    <button
-                      className="fl-btn fl-btn-done fk-oblig-btn"
-                      title="Mark done"
-                      onClick={() => act.done(a.id)}
-                    >
-                      ✓
-                    </button>
-                  </div>
-                ),
-              )}
-              {personRems.map((r) => (
-                <div key={r.id} className="fk-oblig">
-                  <DueChip dueAt={r.dueAt} now={s.now} />
-                  <span className="fk-oblig-title">{r.note}</span>
-                  <button
-                    className="fl-btn fl-btn-done fk-oblig-btn"
-                    title="Mark done"
-                    onClick={() => act.remDone(r.id)}
-                  >
-                    ✓
-                  </button>
-                </div>
-              ))}
-              {personDoneRems.map((r) => (
-                <div key={r.id} className="fk-oblig done">
-                  <span className="fk-oblig-title">{r.note}</span>
-                  <span className="fl-doneat">✓ done · {r.doneAt !== null ? fmtAge(r.doneAt, s.now) : ''}</span>
-                  <button className="fl-undo" title="Undo — put it back" onClick={() => act.undoReminder(r.id)}>
-                    ↩
-                  </button>
-                </div>
-              ))}
-            </div>
-          </aside>
-          <aside className="fl-mega-summary">
-            <div className="fl-mega-scroll">
-              <h4 className="fk-h">The story so far</h4>
-              <div className="fk-story">
-                {story.map((b, i) => (
-                  <div key={`${b.at}-${i}`} className={`fk-beat tone-${b.tone}`}>
-                    <span className="fk-beat-node">{b.icon}</span>
-                    <div className="fk-beat-body">
-                      <span className="fk-beat-text">
-                        {b.text}
-                        {b.count > 1 ? ` · ×${b.count}` : ''}
-                      </span>
-                      <span className="fk-beat-when">{beatWhen(b.at)}</span>
-                    </div>
+                    <audio controls preload="none" src={recording.url}>
+                      Your browser cannot play this call recording.
+                    </audio>
                   </div>
                 ))}
-                {label && (
-                  <div className={`fk-beat fk-beat-now tone-${label.tone}`}>
-                    <span className="fk-beat-node">◉</span>
-                    <div className="fk-beat-body">
-                      <span className="fk-beat-text">
-                        <b>Now</b> — {label.text}
-                        {personActions[0] ? `: ${personActions[0].title}` : ''}
-                      </span>
-                    </div>
+              </div>
+            ) : detail?.recordings?.status === 'unavailable' ? (
+              <span>Quo did not retain a recording for this call.</span>
+            ) : detail?.recordings?.status === 'failed' ? (
+              <span>Fluid will retry the recording automatically.</span>
+            ) : (
+              <span>Waiting for Quo to make the recording available.</span>
+            )}
+          </div>
+
+          <div className="fd-sel-evidence-row fd-sel-call-summary">
+            <span><b>Call summary</b> · {evidenceStatus(detail?.callSummary?.status)}</span>
+            {detail?.callSummary?.status === 'available' ? (
+              <div className="fd-call-summary-content">
+                {detail.callSummary.summary.length > 0 && (
+                  <ul>
+                    {detail.callSummary.summary.map((item, index) => (
+                      <li key={`summary:${index}`}>{item}</li>
+                    ))}
+                  </ul>
+                )}
+                {detail.callSummary.nextSteps.length > 0 && (
+                  <div>
+                    <strong>Next steps</strong>
+                    <ul>
+                      {detail.callSummary.nextSteps.map((item, index) => (
+                        <li key={`next:${index}`}>{item}</li>
+                      ))}
+                    </ul>
                   </div>
                 )}
+                {detail.callSummary.summary.length === 0 &&
+                  detail.callSummary.nextSteps.length === 0 && (
+                    <span>Quo completed the summary without any notes.</span>
+                  )}
               </div>
-              <h4 className="fk-h">Numbers</h4>
-              {summary.metrics.map((m) => (
-                <div key={m.label} className="fk-metric">
-                  <span className="fk-metric-label">{m.label}</span>
-                  <b className="fk-metric-value">{m.value}</b>
-                </div>
-              ))}
-            </div>
-          </aside>
-        </div>
-        <footer className="fl-mega-foot">
-          Click a step to create it now · ⚙ saves it as a standing play, offered whenever a similar message arrives ·
-          Esc closes
-        </footer>
-      </div>
+            ) : detail?.callSummary?.status === 'unavailable' ? (
+              <span>Quo did not create a summary for this call.</span>
+            ) : detail?.callSummary?.status === 'failed' ? (
+              <span>Fluid will retry the summary automatically.</span>
+            ) : (
+              <span>Waiting for Quo to create the summary.</span>
+            )}
+          </div>
+
+          <div className="fd-sel-evidence-row fd-sel-transcript">
+            <span><b>Call transcript</b> · {evidenceStatus(detail?.transcript?.status)}</span>
+            {detail?.transcript?.status === 'available' && detail.transcript.text ? (
+              <details>
+                <summary>Read full transcript</summary>
+                <pre>{detail.transcript.text}</pre>
+              </details>
+            ) : detail?.transcript?.status === 'unavailable' ? (
+              <span>Quo did not create a transcript for this call.</span>
+            ) : detail?.transcript?.status === 'failed' ? (
+              <span>Fluid will retry the transcript automatically.</span>
+            ) : (
+              <span>Waiting for Quo to create the transcript.</span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-// ---------- the run inspector: what the agent is doing with an action ----------
+export type RunSubject = { type: 'signal'; id: string };
 
-export const AGENT_EMOJI: Record<string, string> = {
-  Hermes: '✦',
-  Scout: '📡',
-  Scribe: '✉️',
-  Chaser: '⏰',
-  Ledger: '🧾',
-  Runner: '🧭',
-};
-
-export const AGENT_DUTY: Record<string, string> = {
-  Scout: 'Intake & CRM',
-  Scribe: 'Replies & drafts',
-  Chaser: 'Follow-ups & nudges',
-  Ledger: 'Invoices & payments',
-  Runner: 'Automation runs',
-};
-
-export const AGENT_STEPS: Record<string, string[]> = {
-  Scribe: ['Reading the thread', 'Drafting the reply', 'Sending it'],
-  Chaser: ['Checking the history', 'Drafting the nudge', 'Sending it'],
-  Ledger: ['Pulling the invoice', 'Preparing the payment', 'Executing it'],
-  Scout: ['Gathering details', 'Updating the record', 'Filing it'],
-};
-
-/** How far a running agent has gotten, derived from elapsed time. */
-export function runStepIdx(run: AgentRun, now: number): number {
-  const steps = AGENT_STEPS[run.agent] ?? [];
-  if (steps.length === 0) return 0;
-  if (run.status !== 'running') return steps.length - 1;
-  const frac = Math.max(0, Math.min(1, (now - run.startedAt) / (run.resolveAt - run.startedAt)));
-  return Math.min(steps.length - 1, Math.floor(frac * steps.length));
-}
-
-function hashPick<T>(key: string, arr: T[]): T {
-  let h = 0;
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 9973;
-  return arr[h % arr.length]!;
-}
-
-/** The work product the agent produced — what you're approving or what went out. */
-function draftFor(run: AgentRun, a: ActionCard, s: State): { label: string; text: string } | null {
-  const p = s.people.find((x) => x.id === a.personId);
-  const first = firstNameOf(p?.name ?? 'there');
-  const src = a.sourceSignalId ? s.signals.find((x) => x.id === a.sourceSignalId) : undefined;
-  switch (run.agent) {
-    case 'Scribe':
-      return {
-        label: run.status === 'ok' ? 'What went out' : 'The draft',
-        text: `Hi ${first} — ${hashPick(a.id, [
-          'thanks for the note! I’ll have an update for you by tomorrow morning.',
-          'got it — I’ll confirm the details and get right back to you today.',
-          'appreciate the nudge. It’s at the top of my list — expect word shortly.',
-        ])}`,
-      };
-    case 'Chaser':
-      return {
-        label: run.status === 'ok' ? 'What went out' : 'The draft',
-        text: `Hi ${first} — just checking in on this. Want me to pencil you in for next week?`,
-      };
-    case 'Ledger': {
-      const amt = src ? /\$[\d,]+/.exec(src.text)?.[0] : undefined;
-      return {
-        label: run.status === 'ok' ? 'What was executed' : 'The prepared payment',
-        text: `${amt ?? 'Payment'} to ${p?.name ?? 'payee'} · ACH · memo “${a.title}” — ${
-          run.status === 'ok' ? 'executed.' : 'executes on approval.'
-        }`,
-      };
-    }
-    case 'Scout':
-      return {
-        label: run.status === 'ok' ? 'What was filed' : 'The prepared update',
-        text: `${p?.name ?? 'Record'}: stage refreshed · last-contact updated · note appended — “${a.title}”.`,
-      };
-    default:
-      return null;
-  }
-}
-
-
-// The chat. One clean design for everything that can be talked about:
-// an action (the agent working it), a reminder (Chaser holding it — trigger
-// it onto Actions or cancel it), an automation (Runner executing it —
-// pause, resume, or stop it). Context first, then the conversation.
-
-export type RunSubject = { type: 'action' | 'reminder' | 'auto' | 'signal'; id: string };
-
-function splitSelectedEmailBody(signal: Signal): { reply: string; quoted: string | null } {
-  return { reply: signal.text, quoted: signal.quotedText?.trim() || null };
-}
+type PopupNotice = { tone: 'status' | 'error'; text: string };
 
 export function RunPopup({
   s,
@@ -1760,46 +418,11 @@ export function RunPopup({
   onClose: () => void;
   onLoadMoreHistory?: (signalId: string) => void;
   onOpenAction?: (actionId: string) => void;
-  /** Keep a deal conversation visible while inspecting one of its communications. */
   sideBySide?: boolean;
 }) {
-  const [text, setText] = useState('');
-  const [notes, setNotes] = useState<{ who: 'you' | 'agent' | 'sys'; text: string }[]>([]);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
-  useEffect(() => {
-    setNotes([]);
-    setText('');
-    setAcceptingId(null);
-  }, [subject.type, subject.id]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  // resolve the subject
-  const a =
-    subject.type === 'action'
-      ? s.actions.find((x) => x.id === subject.id) ?? s.handled.find((h) => h.a.id === subject.id)?.a
-      : undefined;
-  const r = subject.type === 'reminder' ? s.reminders.find((x) => x.id === subject.id) : undefined;
-  const inst = subject.type === 'auto' ? s.seqInstances.find((i) => i.id === subject.id) : undefined;
-  const seq = inst ? s.sequences.find((q) => q.id === inst.seqId) : undefined;
-  const sg = subject.type === 'signal' ? s.signals.find((x) => x.id === subject.id) : undefined;
-  const personId = a?.personId ?? r?.personId ?? inst?.personId ?? sg?.personId ?? null;
-
-  const doneAt = a ? s.completed[subject.id] ?? null : null;
-  const run = a ? s.runs[subject.id] : undefined;
-  const signalDetail = sg ? s.signalDetails?.[sg.id] : undefined;
-  const selectedSignal = signalDetail?.signal ?? sg;
-  const ctx = subject.type === 'signal' && sg
-    ? [...new Map((signalDetail?.history ?? []).map((item) => [item.id, item])).values()]
-      .sort((left, right) => left.at - right.at || left.id.localeCompare(right.id))
-    : personId ? s.signals.filter((x) => x.personId === personId) : [];
-
+  const [settling, setSettling] = useState(false);
+  const [notice, setNotice] = useState<PopupNotice | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const historyScrollAnchorRef = useRef<{
     historyId: string | null;
@@ -1808,86 +431,89 @@ export function RunPopup({
   } | null>(null);
   const previousHistoryLengthRef = useRef(0);
   const previousSubjectRef = useRef('');
-  const subjectKey = `${subject.type}:${subject.id}`;
+
+  const signal = s.signals.find((candidate) => candidate.id === subject.id);
+  const detail = signal ? s.signalDetails?.[signal.id] : undefined;
+  const selectedSignal = detail?.signal ?? signal;
+  const history = [...new Map((detail?.history ?? []).map((item) => [item.id, item])).values()]
+    .sort((left, right) => left.at - right.at || left.id.localeCompare(right.id));
+  const subjectKey = `signal:${subject.id}`;
+
+  useEffect(() => {
+    setAcceptingId(null);
+    setSettling(false);
+    setNotice(null);
+  }, [subject.id]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
 
   useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
+    const element = scrollRef.current;
+    if (!element) return;
     let stabilizeLayout: (() => void) | null = null;
 
     if (previousSubjectRef.current !== subjectKey) {
       previousSubjectRef.current = subjectKey;
-      previousHistoryLengthRef.current = ctx.length;
+      previousHistoryLengthRef.current = history.length;
       historyScrollAnchorRef.current = null;
-      el.scrollTop = el.scrollHeight;
-      if (subject.type === 'signal') {
-        stabilizeLayout = () => {
-          const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
-          if (distanceFromBottom < 48) el.scrollTop = el.scrollHeight;
-        };
-      }
+      element.scrollTop = element.scrollHeight;
+      stabilizeLayout = () => {
+        const distanceFromBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
+        if (distanceFromBottom < 48) element.scrollTop = element.scrollHeight;
+      };
     } else {
       const anchor = historyScrollAnchorRef.current;
-      if (anchor && ctx.length > anchor.historyLength) {
+      if (anchor && history.length > anchor.historyLength) {
         const keepHistoryAnchor = () => {
           const anchoredMessage = anchor.historyId === null
             ? null
-            : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+            : [...element.querySelectorAll<HTMLElement>('[data-history-id]')]
               .find((item) => item.dataset.historyId === anchor.historyId);
           if (!anchoredMessage) return;
           const drift = anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
-          // A large delta after the initial correction means the user scrolled;
-          // never fight that input while waiting for a late font layout.
-          if (Math.abs(drift) < 48) el.scrollTop += drift;
+          if (Math.abs(drift) < 48) element.scrollTop += drift;
         };
-        // Earlier messages are inserted above the existing conversation. Keep
-        // the first previously loaded message at the same viewport position.
         const anchoredMessage = anchor.historyId === null
           ? null
-          : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+          : [...element.querySelectorAll<HTMLElement>('[data-history-id]')]
             .find((item) => item.dataset.historyId === anchor.historyId);
         if (anchoredMessage) {
-          el.scrollTop += anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
+          element.scrollTop += anchoredMessage.getBoundingClientRect().top - anchor.viewportTop;
           stabilizeLayout = keepHistoryAnchor;
         }
         historyScrollAnchorRef.current = null;
-      } else if (anchor && signalDetail?.loading === false) {
-        // The request completed without adding messages (for example, an error).
+      } else if (anchor && detail?.loading === false) {
         historyScrollAnchorRef.current = null;
-      } else if (
-        subject.type === 'signal' &&
-        previousHistoryLengthRef.current === 0 &&
-        ctx.length > 0
-      ) {
-        // History is inserted above the selected Signal. Pin the bottom during
-        // layout so the user never sees the primary ticket jump between frames.
-        el.scrollTop = el.scrollHeight;
+      } else if (previousHistoryLengthRef.current === 0 && history.length > 0) {
+        element.scrollTop = element.scrollHeight;
         stabilizeLayout = () => {
-          const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
-          if (distanceFromBottom < 48) el.scrollTop = el.scrollHeight;
+          const distanceFromBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
+          if (distanceFromBottom < 48) element.scrollTop = element.scrollHeight;
         };
       }
-      previousHistoryLengthRef.current = ctx.length;
+      previousHistoryLengthRef.current = history.length;
     }
 
     if (!stabilizeLayout) return;
-
-    // Font swaps and scrollbar resolution can change conversation geometry
-    // immediately after React's layout phase. Preserve the chosen bottom/anchor
-    // position across the next frames and the final web-font layout.
     let cancelled = false;
     let secondFrame = 0;
     const firstFrame = window.requestAnimationFrame(() => {
-      if (scrollRef.current !== el || previousSubjectRef.current !== subjectKey) return;
+      if (scrollRef.current !== element || previousSubjectRef.current !== subjectKey) return;
       stabilizeLayout?.();
       secondFrame = window.requestAnimationFrame(() => {
-        if (scrollRef.current === el && previousSubjectRef.current === subjectKey) {
+        if (scrollRef.current === element && previousSubjectRef.current === subjectKey) {
           stabilizeLayout?.();
         }
       });
     });
     void document.fonts?.ready.then(() => {
-      if (!cancelled && scrollRef.current === el && previousSubjectRef.current === subjectKey) {
+      if (!cancelled && scrollRef.current === element && previousSubjectRef.current === subjectKey) {
         stabilizeLayout?.();
       }
     });
@@ -1897,819 +523,330 @@ export function RunPopup({
       window.cancelAnimationFrame(firstFrame);
       if (secondFrame) window.cancelAnimationFrame(secondFrame);
     };
-  }, [ctx.length, signalDetail?.loading, subject.type, subjectKey]);
+  }, [detail?.loading, history.length, subjectKey]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [subject.id, subject.type, notes.length, run?.status, doneAt, r?.dueAt, inst?.doneAt]);
+  if (!signal || !selectedSignal) return null;
 
-  if (
-    !personId ||
-    (subject.type === 'action' && !a) ||
-    (subject.type === 'reminder' && !r) ||
-    (subject.type === 'auto' && (!inst || !seq)) ||
-    (subject.type === 'signal' && !sg)
-  )
-    return null;
+  const person = s.people.find((candidate) => candidate.id === signal.personId);
+  const firstName = firstNameOf(person?.name ?? 'them');
+  const status = statusOf(s, selectedSignal);
+  const recommendations = status.key === 'open' ? detail?.recommendations ?? [] : [];
+  const laterOutboundSignals = history.filter((item) => (
+    item.direction === 'outbound' &&
+    item.at > selectedSignal.at &&
+    item.at - selectedSignal.at <= 14 * DAY
+  ));
+  const laterOutbound = laterOutboundSignals[laterOutboundSignals.length - 1];
+  const action = s.actions.find((candidate) => candidate.sourceSignalId === signal.id);
+  const title = signalTitle(signal);
+  const selectedBody = splitSelectedEmailBody(selectedSignal);
+  const popupStatus = status.key === 'open'
+    ? { key: 'review', word: 'needs a decision' }
+    : status.key === 'action'
+      ? { key: 'run', word: 'Action open' }
+      : { key: 'queued', word: status.label };
 
-  const p = s.people.find((x) => x.id === personId);
-  const first = firstNameOf(p?.name ?? 'them');
-
-  // identity of the speaking agent
-  const agent =
-    subject.type === 'reminder'
-      ? 'Chaser'
-      : subject.type === 'auto'
-        ? 'Runner'
-        : subject.type === 'signal'
-          ? 'Hermes'
-          : a
-            ? run?.agent ?? agentFor(s, a)
-            : null;
-  const emoji = agent ? AGENT_EMOJI[agent] ?? '🤖' : '🛠️';
-
-  // trigger message in the history
-  const trigId =
-    subject.type === 'action'
-      ? a?.sourceSignalId ?? null
-      : subject.type === 'reminder'
-        ? r?.sourceSignalId ?? null
-        : subject.type === 'signal'
-          ? sg?.id ?? null
-          : inst
-            ? s.signals.find((x) => x.personId === personId && x.text === inst.triggerText)?.id ?? null
-            : null;
-
-  // ----- action-only story pieces -----
-  const steps = agent && subject.type === 'action' ? AGENT_STEPS[agent] ?? [] : [];
-  const stepIdx = run ? runStepIdx(run, s.now) : 0;
-  const src = a?.sourceSignalId ? s.signals.find((x) => x.id === a.sourceSignalId) : undefined;
-  const chan = src ? CHANNEL_LABEL[src.channel] : null;
-  const took = run
-    ? Math.max(1, Math.round(((run.status === 'running' ? s.now : run.resolveAt) - run.startedAt) / 1000))
-    : 0;
-  const draft = a && run && (run.status === 'review' || run.status === 'ok') ? draftFor(run, a, s) : null;
-  const usedComposer = notes.some((n) => n.who === 'you');
-
-  const why = a
-    ? a.id.includes(':rec:')
-      ? `I suggested this follow-up after the last run`
-      : a.id.startsWith('action:user:')
-        ? `you queued it from the decide panel`
-        : a.kind === 'reply'
-          ? `${first}’s message needed an answer`
-          : a.kind === 'reminder'
-            ? `the follow-up came due`
-            : a.kind === 'nudge'
-              ? `${first} went quiet with things pending`
-              : `it was queued as a task`
-    : '';
-
-  const doneLine = (at: number) =>
-    run
-      ? run.agent === 'Ledger'
-        ? `Executed the payment at ${fmtClock(at)} ✓ — logged it in Activity.`
-        : run.agent === 'Scout'
-          ? `Filed it in the CRM at ${fmtClock(at)} ✓ — logged in Activity.`
-          : `Sent it at ${fmtClock(at)}${chan ? ` via ${chan}` : ''} ✓ — thread settled, logged in Activity.`
-      : '';
-
-  // ----- reminder / automation state -----
-  const remDue = r ? r.dueAt <= s.now : false;
-  const remActionOpen = r ? s.actions.some((x) => x.id === `action:rem:${r.id}`) : false;
-  const nextStep = inst && seq ? seq.steps[inst.stepIdx] : undefined;
-
-  // ----- signal state: stored review state + locked Hermes recommendations -----
-  const sgStatus = selectedSignal ? statusOf(s, selectedSignal) : null;
-  const recommendations = sg && sgStatus?.key === 'open' ? signalDetail?.recommendations ?? [] : [];
-  const laterOutboundCandidates = selectedSignal
-    ? ctx.filter((item) => (
-        item.direction === 'outbound' &&
-        item.at > selectedSignal.at &&
-        item.at - selectedSignal.at <= 14 * DAY
-      ))
-    : [];
-  const laterOutbound = laterOutboundCandidates[laterOutboundCandidates.length - 1];
-  const sgReplyAction = sg ? s.actions.find((x) => x.sourceSignalId === sg.id && x.kind === 'reply') : undefined;
-  const sgReplyRun = sgReplyAction ? s.runs[sgReplyAction.id] : undefined;
-
-  // ----- header title + status -----
-  const title = a ? a.title : r ? r.note : sg ? signalTitle(sg) : seq?.name ?? '';
-  const status =
-    subject.type === 'signal'
-      ? sgStatus?.key === 'open'
-        ? { key: 'review', word: 'needs a decision' }
-        : sgStatus?.key === 'action'
-          ? { key: 'run', word: 'Action open' }
-        : sgStatus?.key === 'rem'
-          ? { key: 'run', word: 'reminder set' }
-          : sgStatus?.key === 'auto'
-            ? { key: 'run', word: 'automation running' }
-            : sgStatus?.key === 'done'
-              ? { key: 'ok', word: sgStatus.label }
-            : { key: 'queued', word: sgStatus?.label ?? 'reviewed' }
-      : subject.type === 'reminder'
-      ? r?.doneAt !== null && r?.doneAt !== undefined
-        ? { key: 'ok', word: 'done' }
-        : remDue
-          ? { key: 'review', word: 'due — on your list' }
-          : { key: 'queued', word: `scheduled · ${fmtDue(r?.dueAt ?? 0, s.now)}` }
-      : subject.type === 'auto'
-        ? inst?.doneAt
-          ? { key: 'ok', word: 'finished' }
-          : seq && !seq.enabled
-            ? { key: 'queued', word: 'paused' }
-            : { key: 'run', word: 'running' }
-        : doneAt !== null
-          ? { key: 'ok', word: 'done' }
-          : !run
-            ? agent
-              ? { key: 'queued', word: 'queued' }
-              : null
-            : run.status === 'running'
-              ? { key: 'run', word: `${run.agent} working` }
-              : run.status === 'review'
-                ? { key: 'review', word: 'needs your OK' }
-                : { key: 'fail', word: 'failed' };
-
-  const pct =
-    run && run.status === 'running'
-      ? Math.max(5, Math.min(96, Math.round(((s.now - run.startedAt) / (run.resolveAt - run.startedAt)) * 100)))
-      : 0;
-
-  // ---- message grouping: one avatar + name per run of the same speaker ----
-  let lastSpeaker: 'them' | 'agent' | 'you' | null = null;
-  let lastSigMeta: { channel: string; at: number } | null = null;
+  let lastSpeaker: 'them' | 'you' | null = null;
+  let lastSignalMeta: { channel: string; at: number } | null = null;
 
   const day = (key: string, label: string) => {
     lastSpeaker = null;
-    lastSigMeta = null;
-    return (
-      <div className="fc-day" key={key}>
-        <span>{label}</span>
-      </div>
-    );
+    lastSignalMeta = null;
+    return <div className="fc-day" key={key}><span>{label}</span></div>;
   };
 
-  const sys = (key: string, body: ReactNode) => {
+  const system = (key: string, body: ReactNode) => {
     lastSpeaker = null;
-    return (
-      <div className="fc-sys" key={key}>
-        {body}
-      </div>
-    );
+    return <div className="fc-sys" key={key}>{body}</div>;
   };
 
-  const agentTurn = (key: string, body: ReactNode) => {
-    const cont = lastSpeaker === 'agent';
-    lastSpeaker = 'agent';
-    return (
-      <div className={`fd-turn${cont ? ' fd-cont' : ''}`} key={key}>
-        <span className={`fd-avatar${cont ? '' : ' fd-avatar-agent'}`}>{cont ? null : emoji}</span>
-        <div className="fd-main">
-          {!cont && (
-            <div className="fd-name">
-              <b className="fd-name-accent">{agent ?? 'Field'}</b>
-            </div>
-          )}
-          <div className="fd-text">{body}</div>
-        </div>
+  const hermesTurn = (key: string, body: ReactNode) => (
+    <div className="fd-turn" key={key}>
+      <span className="fd-avatar fd-avatar-agent">✦</span>
+      <div className="fd-main">
+        <div className="fd-name"><b className="fd-name-accent">Hermes</b></div>
+        <div className="fd-text">{body}</div>
       </div>
-    );
-  };
+    </div>
+  );
 
-  const youTurn = (key: string, t: string, signal?: Signal) => {
-    const cont = lastSpeaker === 'you';
+  const outboundTurn = (item: Signal) => {
+    const grouped = lastSpeaker === 'you';
     lastSpeaker = 'you';
     return (
       <ConversationTurn
-        key={key}
+        key={item.id}
         side="you"
         sender="You"
         avatar={<Avatar name="Jad" />}
-        meta={signal ? (
-          <>
-            <SourceTag channel={signal.channel} />
-            <DirectionTag direction="outbound" />
-          </>
-        ) : undefined}
-        grouped={cont}
-        time={signal ? fmtAge(signal.at, s.now) : undefined}
-        historyId={signal?.id}
+        meta={<><SourceTag channel={item.channel} /><DirectionTag direction="outbound" /></>}
+        grouped={grouped}
+        time={fmtAge(item.at, s.now)}
+        historyId={item.id}
       >
-        {t}
+        {item.text}
       </ConversationTurn>
     );
   };
 
-  const themTurn = (sig: Signal) => {
-    const isTrig = sig.id === trigId;
-    const cont =
-      lastSpeaker === 'them' &&
-      lastSigMeta !== null &&
-      lastSigMeta.channel === sig.channel &&
-      sig.at - lastSigMeta.at < 5 * MIN &&
-      !isTrig;
+  const inboundTurn = (item: Signal) => {
+    const grouped = lastSpeaker === 'them' &&
+      lastSignalMeta?.channel === item.channel &&
+      item.at - lastSignalMeta.at < 5 * MIN;
     lastSpeaker = 'them';
-    lastSigMeta = { channel: sig.channel, at: sig.at };
+    lastSignalMeta = { channel: item.channel, at: item.at };
     return (
       <ConversationTurn
-        key={sig.id}
+        key={item.id}
         side="them"
-        sender={p?.name ?? '—'}
-        avatar={<Avatar name={p?.name ?? '—'} />}
-        meta={<><SourceTag channel={sig.channel} /><DirectionTag direction={sig.direction ?? 'inbound'} /></>}
-        grouped={cont}
-        time={fmtAge(sig.at, s.now)}
-        marker={isTrig ? (subject.type === 'signal' ? 'this one' : 'triggered this') : undefined}
-        highlighted={isTrig}
-        historyId={sig.id}
+        sender={person?.name ?? '—'}
+        avatar={<Avatar name={person?.name ?? '—'} />}
+        meta={<>
+          <SourceTag channel={item.channel} />
+          <DirectionTag direction={item.direction ?? 'inbound'} />
+        </>}
+        grouped={grouped}
+        time={fmtAge(item.at, s.now)}
+        historyId={item.id}
       >
-        {sig.text}
+        {item.text}
       </ConversationTurn>
     );
-  };
-
-  const send = () => {
-    const t = text.trim();
-    if (!t) return;
-    setText('');
-    if (subject.type !== 'action') {
-      setNotes((n) => [...n, { who: 'you', text: t }, { who: 'agent', text: 'Noted — I’ll keep that with it.' }]);
-      return;
-    }
-    if (doneAt !== null) {
-      setNotes((n) => [...n, { who: 'you', text: t }, { who: 'agent', text: 'Noted.' }]);
-    } else if (run?.status === 'review') {
-      setNotes((n) => [
-        ...n,
-        { who: 'you', text: t },
-        { who: 'agent', text: 'Got it — adjusted it with that in mind and sent it ✓' },
-      ]);
-      act.done(subject.id);
-    } else if (run?.status === 'fail') {
-      setNotes((n) => [
-        ...n,
-        { who: 'you', text: t },
-        { who: 'agent', text: 'Understood — trying again with that in mind.' },
-      ]);
-      act.retryRun(subject.id);
-    } else if (run?.status === 'running') {
-      setNotes((n) => [...n, { who: 'you', text: t }, { who: 'agent', text: 'On it — I’ll factor that in.' }]);
-    } else if (agent) {
-      setNotes((n) => [...n, { who: 'you', text: t }, { who: 'sys', text: `${agent} will see this when picking it up.` }]);
-    } else {
-      setNotes((n) => [...n, { who: 'you', text: t }, { who: 'sys', text: 'Noted — kept with the job.' }]);
-    }
   };
 
   const loadEarlierHistory = () => {
-    if (!sg || !onLoadMoreHistory || signalDetail?.loading) return;
-    const el = scrollRef.current;
-    if (el) {
-      const firstHistoryId = ctx[0]?.id ?? null;
+    if (!onLoadMoreHistory || detail?.loading) return;
+    const element = scrollRef.current;
+    if (element) {
+      const firstHistoryId = history[0]?.id ?? null;
       const firstHistoryMessage = firstHistoryId === null
         ? null
-        : [...el.querySelectorAll<HTMLElement>('[data-history-id]')]
+        : [...element.querySelectorAll<HTMLElement>('[data-history-id]')]
           .find((item) => item.dataset.historyId === firstHistoryId);
       historyScrollAnchorRef.current = {
         historyId: firstHistoryId,
-        historyLength: ctx.length,
-        viewportTop: firstHistoryMessage?.getBoundingClientRect().top ?? el.getBoundingClientRect().top,
+        historyLength: history.length,
+        viewportTop: firstHistoryMessage?.getBoundingClientRect().top ??
+          element.getBoundingClientRect().top,
       };
     }
-    onLoadMoreHistory(sg.id);
+    onLoadMoreHistory(signal.id);
   };
 
-  const selectedBody = selectedSignal ? splitSelectedEmailBody(selectedSignal) : null;
-  const selectedIsCall = selectedSignal?.channel === 'call';
-  const selectedHasEvidence = Boolean(
-    signalDetail?.attachments.length || selectedIsCall,
-  );
-
-  let signalDecisionSummary: ReactNode = null;
-  if (subject.type === 'signal' && sg && selectedSignal && sgStatus) {
-    signalDecisionSummary = sgStatus.key === 'open'
-      ? selectedSignal.direction === 'outbound'
-        ? <>This was sent by your team.</>
-        : laterOutbound
-          ? <>Your <span className="fd-inline-source"><SourceTag channel={laterOutbound.channel} /><DirectionTag direction="outbound" /></span> reply went out {fmtAge(laterOutbound.at, s.now)}. </>
-          : recommendations[0]?.reason ?? null
-      : sgStatus.key === 'action'
-        ? <>A reply draft is ready in Actions.</>
-        : sgStatus.key === 'rem'
-          ? <>A reminder is set for this Signal. Chaser has it.</>
-          : sgStatus.key === 'auto'
-            ? <>An automation is running for this Signal. Runner has it.</>
-            : sgStatus.key === 'done'
-              ? <>{sgStatus.label} ✓ Nothing is left here.</>
-              : selectedSignal.reviewResolution === 'no_action'
-                ? <>You manually settled this Signal{selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}.</>
-                : null;
-  }
-  const signalDecision = signalDecisionSummary ? (
-    <article className="fd-dec"><p className="fd-dec-summary">{signalDecisionSummary}</p></article>
-  ) : null;
+  const decisionSummary = status.key === 'open'
+    ? selectedSignal.direction === 'outbound'
+      ? <>This was sent by your team. Review it, then manually settle this Signal.</>
+      : laterOutbound
+        ? <>
+            Your <span className="fd-inline-source">
+              <SourceTag channel={laterOutbound.channel} />
+              <DirectionTag direction="outbound" />
+            </span>{' '}
+            reply went out {fmtAge(laterOutbound.at, s.now)}.
+          </>
+        : recommendations[0]?.reason ?? (
+          <>Hermes has no suggested action. You still need to decide whether this Signal needs one.</>
+        )
+    : status.key === 'action'
+      ? <>A reply draft is ready in Actions.</>
+      : selectedSignal.reviewResolution === 'no_action'
+        ? <>
+            You manually settled this Signal
+            {selectedSignal.reviewedAt ? ` ${fmtAge(selectedSignal.reviewedAt, s.now)}` : ''}.
+          </>
+        : <>{status.label} ✓ Nothing is left here.</>;
 
   return (
-    <div className={`fl-scrim${sideBySide ? ' fc-inspector-scrim' : ''}`} onClick={sideBySide ? undefined : onClose}>
+    <div
+      className={`fl-scrim${sideBySide ? ' fc-inspector-scrim' : ''}`}
+      onClick={sideBySide ? undefined : onClose}
+    >
       <div
         className={`fc${sideBySide ? ' fc-inspector' : ''}`}
         role={sideBySide ? 'complementary' : 'dialog'}
         aria-label={sideBySide ? `Inspect ${title}` : title}
         aria-modal={sideBySide ? undefined : true}
-        onClick={(e) => e.stopPropagation()}
+        onClick={(event) => event.stopPropagation()}
       >
         <header className="fc-head">
           <div className="fc-head-main">
             <b>{title}</b>
             <span className="fc-head-sub">
-              {sg?.identityResolution ? (
+              {signal.identityResolution ? (
                 <>
-                  for {sg.identityResolution.displayName ?? sg.identityResolution.displayValue ?? p?.name ?? 'Unknown contact'}
+                  for {signal.identityResolution.displayName ??
+                    signal.identityResolution.displayValue ??
+                    person?.name ??
+                    'Unknown contact'}
                   {' · '}
-                  <span className={`fc-status fc-status-${sg.identityResolution.status === 'conflict' ? 'fail' : 'queued'}`}>
-                    {sg.identityResolution.status === 'conflict' ? 'identity conflict' : 'unresolved contact'}
+                  <span className={`fc-status fc-status-${signal.identityResolution.status === 'conflict' ? 'fail' : 'queued'}`}>
+                    {signal.identityResolution.status === 'conflict'
+                      ? 'identity conflict'
+                      : 'unresolved contact'}
                   </span>
                 </>
               ) : (
-                <>for {p?.name ?? '—'} ({p?.role ?? '—'})</>
+                <>for {person?.name ?? '—'} ({person?.role ?? '—'})</>
               )}
-              {status && (
-                <>
-                  {' · '}
-                  <span className={`fc-status fc-status-${status.key}`}>{status.word}</span>
-                </>
-              )}
+              {' · '}
+              <span className={`fc-status fc-status-${popupStatus.key}`}>{popupStatus.word}</span>
             </span>
           </div>
-          <button className="fl-x" onClick={onClose} title="Close (Esc)">
+          <button className="fl-x" onClick={onClose} title="Close (Esc)" aria-label="Close">
             ✕
           </button>
         </header>
 
         <div
-          className={`fc-body cv-thread${subject.type === 'signal' && ctx.length === 0 ? ' fc-body-signal-pending' : ''}`}
+          className={`fc-body cv-thread${history.length === 0 ? ' fc-body-signal-pending' : ''}`}
           ref={scrollRef}
         >
-          {day('d-hist', `History with ${first}`)}
-          {subject.type === 'signal' && sg && signalDetail?.historyNextCursor &&
-            sys('history-more', (
-              <button className="fc-chip" onClick={loadEarlierHistory} disabled={signalDetail.loading}>
-                {signalDetail.loading ? 'Loading history…' : 'Load earlier history'}
-              </button>
-            ))}
-          {subject.type === 'signal' && signalDetail?.loading && ctx.length === 0 && <ConversationSkeleton />}
-          {ctx.map((item) => item.direction === 'outbound' ? youTurn(item.id, item.text, item) : themTurn(item))}
-          {subject.type === 'signal' && selectedSignal && (
-            <>
-              <ConversationTurn
-                side={selectedSignal.direction === 'outbound' ? 'you' : 'them'}
-                sender={selectedSignal.direction === 'outbound' ? 'You' : p?.name ?? '—'}
-                avatar={<Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : p?.name ?? '—'} />}
-                meta={<>
-                  <SourceTag channel={selectedSignal.channel} />
-                  <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
-                </>}
-                time={fmtAge(selectedSignal.at, s.now)}
-                marker="this one"
-                highlighted
-                historyId={selectedSignal.id}
-                subject={selectedSignal.channel === 'email'
-                  ? (selectedSignal.title?.trim() || '(no subject)')
-                  : null}
-                tags={(selectedSignal.topic || selectedSignal.urgency) ? (
-                  <div className="fd-sel-tags" aria-label="Signal labels">
-                    {selectedSignal.topic && (
-                      <span className="fl-plabel canonical-label" style={canonicalLabelStyle(selectedSignal.topicColor)}>
-                        {selectedSignal.topic}
-                      </span>
-                    )}
-                    {selectedSignal.urgency && (
-                      <span className="fl-plabel canonical-label" style={canonicalLabelStyle(selectedSignal.urgencyColor)}>
-                        {selectedSignal.urgency}
-                      </span>
-                    )}
-                  </div>
-                ) : null}
-              >
-                <div className="fd-sel-text">
-                  <p className="fd-sel-text-reply">{selectedBody?.reply ?? selectedSignal.text}</p>
-                  {selectedBody?.quoted && (
-                    <details className="fd-sel-quote">
-                      <summary><span className="fd-sel-quote-show">Show quoted history</span><span className="fd-sel-quote-hide">Hide quoted history</span></summary>
-                      <p className="fd-sel-text-quoted">{selectedBody.quoted}</p>
-                    </details>
-                  )}
-                </div>
-                {selectedHasEvidence && (
-                  <div className="fd-sel-evidence">
-                    {signalDetail?.attachments.map((attachment) => (
-                      <div className="fd-sel-evidence-row" key={attachment.attachmentKey}>
-                        <span>Attachment: <b>{attachment.filename}</b> · {attachment.status}</span>
-                        {attachment.extractedText ? <span>{attachment.extractedText.slice(0, 800)}</span> : null}
-                      </div>
-                    ))}
-                    {selectedIsCall && (
-                      <>
-                        <div className="fd-sel-evidence-row fd-sel-recordings">
-                          <span>
-                            <b>Call recording</b>
-                            {' · '}
-                            {signalDetail?.recordings?.status === 'available'
-                              ? 'Available'
-                              : signalDetail?.recordings?.status === 'unavailable'
-                                ? 'Unavailable'
-                                : signalDetail?.recordings?.status === 'failed'
-                                  ? 'Retry scheduled'
-                                  : 'Pending'}
-                          </span>
-                          {signalDetail?.recordings?.status === 'available' && signalDetail.recordings.items.length > 0 ? (
-                            <div className="fd-call-recording-list">
-                              {signalDetail.recordings.items.map((recording, index) => (
-                                <div className="fd-call-recording" key={recording.id ?? `${recording.url}:${index}`}>
-                                  <span>Recording {index + 1}{recording.duration === null ? '' : ` · ${Math.round(recording.duration)} seconds`}</span>
-                                  <audio controls preload="none" src={recording.url}>
-                                    Your browser cannot play this call recording.
-                                  </audio>
-                                </div>
-                              ))}
-                            </div>
-                          ) : signalDetail?.recordings?.status === 'unavailable' ? (
-                            <span>Quo did not retain a recording for this call.</span>
-                          ) : signalDetail?.recordings?.status === 'failed' ? (
-                            <span>Fluid will retry the recording automatically.</span>
-                          ) : (
-                            <span>Waiting for Quo to make the recording available.</span>
-                          )}
-                        </div>
-                        <div className="fd-sel-evidence-row fd-sel-call-summary">
-                          <span>
-                            <b>Call summary</b>
-                            {' · '}
-                            {signalDetail?.callSummary?.status === 'available'
-                              ? 'Available'
-                              : signalDetail?.callSummary?.status === 'unavailable'
-                                ? 'Unavailable'
-                                : signalDetail?.callSummary?.status === 'failed'
-                                  ? 'Retry scheduled'
-                                  : 'Pending'}
-                          </span>
-                          {signalDetail?.callSummary?.status === 'available' ? (
-                            <div className="fd-call-summary-content">
-                              {signalDetail.callSummary.summary.length > 0 && (
-                                <ul>{signalDetail.callSummary.summary.map((item, index) => <li key={`summary:${index}`}>{item}</li>)}</ul>
-                              )}
-                              {signalDetail.callSummary.nextSteps.length > 0 && (
-                                <div>
-                                  <strong>Next steps</strong>
-                                  <ul>{signalDetail.callSummary.nextSteps.map((item, index) => <li key={`next:${index}`}>{item}</li>)}</ul>
-                                </div>
-                              )}
-                              {signalDetail.callSummary.summary.length === 0 && signalDetail.callSummary.nextSteps.length === 0 && (
-                                <span>Quo completed the summary without any notes.</span>
-                              )}
-                            </div>
-                          ) : signalDetail?.callSummary?.status === 'unavailable' ? (
-                            <span>Quo did not create a summary for this call.</span>
-                          ) : signalDetail?.callSummary?.status === 'failed' ? (
-                            <span>Fluid will retry the summary automatically.</span>
-                          ) : (
-                            <span>Waiting for Quo to create the summary.</span>
-                          )}
-                        </div>
-                        <div className="fd-sel-evidence-row fd-sel-transcript">
-                          <span>
-                            <b>Call transcript</b>
-                            {' · '}
-                            {signalDetail?.transcript?.status === 'available'
-                              ? 'Available'
-                              : signalDetail?.transcript?.status === 'unavailable'
-                                ? 'Unavailable'
-                                : signalDetail?.transcript?.status === 'failed'
-                                  ? 'Retry scheduled'
-                                  : 'Pending'}
-                          </span>
-                          {signalDetail?.transcript?.status === 'available' && signalDetail.transcript.text ? (
-                            <details>
-                              <summary>Read full transcript</summary>
-                              <pre>{signalDetail.transcript.text}</pre>
-                            </details>
-                          ) : signalDetail?.transcript?.status === 'unavailable' ? (
-                            <span>Quo did not create a transcript for this call.</span>
-                          ) : signalDetail?.transcript?.status === 'failed' ? (
-                            <span>Fluid will retry the transcript automatically.</span>
-                          ) : (
-                            <span>Waiting for Quo to create the transcript.</span>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
+          {day('d-hist', `History with ${firstName}`)}
+          {detail?.historyNextCursor && system('history-more', (
+            <button className="fc-chip" onClick={loadEarlierHistory} disabled={detail.loading}>
+              {detail.loading ? 'Loading history…' : 'Load earlier history'}
+            </button>
+          ))}
+          {detail?.loading && history.length === 0 && <ConversationSkeleton />}
+          {history.map((item) => item.direction === 'outbound'
+            ? outboundTurn(item)
+            : inboundTurn(item))}
+
+          <ConversationTurn
+            side={selectedSignal.direction === 'outbound' ? 'you' : 'them'}
+            sender={selectedSignal.direction === 'outbound' ? 'You' : person?.name ?? '—'}
+            avatar={<Avatar name={selectedSignal.direction === 'outbound' ? 'Jad' : person?.name ?? '—'} />}
+            meta={<>
+              <SourceTag channel={selectedSignal.channel} />
+              <DirectionTag direction={selectedSignal.direction ?? 'inbound'} />
+            </>}
+            time={fmtAge(selectedSignal.at, s.now)}
+            marker="this one"
+            highlighted
+            historyId={selectedSignal.id}
+            subject={selectedSignal.channel === 'email'
+              ? selectedSignal.title?.trim() || '(no subject)'
+              : null}
+            tags={selectedSignal.topic || selectedSignal.urgency ? (
+              <div className="fd-sel-tags" aria-label="Signal labels">
+                {selectedSignal.topic && (
+                  <span
+                    className="fl-plabel canonical-label"
+                    style={canonicalLabelStyle(selectedSignal.topicColor)}
+                  >
+                    {selectedSignal.topic}
+                  </span>
                 )}
-              </ConversationTurn>
-            </>
-          )}
-          {(subject.type !== 'signal' || signalDecisionSummary) &&
-            day('d-agent', subject.type === 'signal' ? 'Summary & next step' : agent ? `${agent} on “${title}”` : 'Your move')}
-
-          {/* ================= signal: Hermes recommends; the user decides ================= */}
-          {subject.type === 'signal' && sg && selectedSignal && sgStatus && (
-            <>
-              {signalDetail?.error && agentTurn('g-error', <>I could not load trustworthy context: {signalDetail.error}</>)}
-              {sgStatus.key === 'open' && sgReplyRun && (
-                agentTurn(
-                  'g-scribe',
-                  sgReplyRun.status === 'running' ? (
-                    <>Scribe’s already drafting the reply — check Actions for it.</>
-                  ) : sgReplyRun.status === 'review' ? (
-                    <>Scribe drafted a reply — it’s waiting on your OK over in Actions.</>
-                  ) : sgReplyRun.status === 'fail' ? (
-                    <>Scribe tried the reply but hit a wall — it needs you in Actions.</>
-                  ) : (
-                    <>The reply’s handled.</>
-                  ),
-                )
-              )}
-              {signalDecision}
-            </>
-          )}
-
-          {/* ================= reminder: Chaser holds it ================= */}
-          {subject.type === 'reminder' && r && (
-            <>
-              {agentTurn(
-                'r-why',
-                <>
-                  I’m holding this follow-up — it came from {r.sourceLabel} {fmtAge(r.createdAt, s.now)} and is due{' '}
-                  <b>{fmtDue(r.dueAt, s.now)}</b>.
-                </>,
-              )}
-              {r.doneAt !== null ? (
-                agentTurn('r-done', <>Done ✓ — closed {fmtAge(r.doneAt, s.now)}.</>)
-              ) : remActionOpen ? (
-                agentTurn('r-on-list', <>Triggered — it’s on your Actions list now. Handle it there, or cancel it here.</>)
-              ) : remDue ? (
-                agentTurn('r-due', <>It just came due — triggering it onto your Actions list.</>)
-              ) : (
-                agentTurn(
-                  'r-ask',
-                  <>
-                    I’ll trigger it when it’s due. Or: <b>trigger it now</b>, tell me it’s <b>already done</b>, or
-                    cancel it if it no longer matters.
-                  </>,
-                )
-              )}
-            </>
-          )}
-
-          {/* ================= automation: Runner executes it ================= */}
-          {subject.type === 'auto' && inst && seq && (
-            <>
-              {agentTurn(
-                'i-why',
-                <>
-                  I enrolled {first} {fmtAge(inst.startedAt, s.now)} — the trigger was “{inst.triggerText}”.
-                </>,
-              )}
-              {inst.lastStep &&
-                agentTurn('i-last', <>Last step done: <b>{inst.lastStep.label}</b> · {fmtAge(inst.lastStep.at, s.now)}.</>)}
-              {inst.doneAt !== null ? (
-                agentTurn('i-done', <>Finished — I retired it {fmtAge(inst.doneAt, s.now)}.</>)
-              ) : !seq.enabled ? (
-                agentTurn(
-                  'i-paused',
-                  <>
-                    Heads up — the whole “{seq.name}” automation is <b>paused</b>, so nothing will fire until you resume
-                    it.
-                  </>,
-                )
-              ) : (
-                agentTurn(
-                  'i-next',
-                  <>
-                    We’re at step {inst.stepIdx}/{seq.steps.length}. Next up: <b>{nextStep?.label ?? '—'}</b> ·{' '}
-                    {fmtDue(inst.nextAt, s.now)}.
-                  </>,
-                )
-              )}
-            </>
-          )}
-
-          {/* ================= action: the agent works it ================= */}
-          {subject.type === 'action' && a && (
-            <>
-              {!agent && (
-                <>
-                  {sys(
-                    'you-why',
-                    <>
-                      This one stays with you — {a.kind === 'reply' ? 'phone calls are yours' : 'field work is yours'}.
-                      It came up because {why}.
-                    </>,
-                  )}
-                  {doneAt !== null && youTurn('you-done', 'Done ✓ — handled it.')}
-                </>
-              )}
-
-              {agent && !run && sys('queued', <>Queued — {agent} picks it up in a moment.</>)}
-
-              {run && agentTurn('why', <>Picked this up {fmtAge(run.startedAt, s.now)} — {why}.</>)}
-
-              {run?.status === 'running' &&
-                agentTurn(
-                  'working',
-                  <>
-                    On it — {steps[stepIdx]?.toLowerCase() ?? 'working'}…
-                    <div className="fd-prog">
-                      <span className="fs-prog">
-                        <span className="fs-prog-fill" style={{ width: `${pct}%` }} />
-                      </span>
-                    </div>
-                  </>,
+                {selectedSignal.urgency && (
+                  <span
+                    className="fl-plabel canonical-label"
+                    style={canonicalLabelStyle(selectedSignal.urgencyColor)}
+                  >
+                    {selectedSignal.urgency}
+                  </span>
                 )}
-
-              {run && draft && (
-                agentTurn(
-                  'work',
-                  <>
-                    {doneAt !== null || run.status === 'ok' ? 'Here’s what went out:' : 'Here’s my draft:'}
-                    <div className="fd-work">
-                      <div className={`fd-work-tag${doneAt !== null || run.status === 'ok' ? ' sent' : ''}`}>
-                        {doneAt !== null || run.status === 'ok' ? 'Sent ✓' : 'Draft — sends when you approve'}
-                      </div>
-                      {draft.text}
-                    </div>
-                  </>,
-                )
+              </div>
+            ) : null}
+          >
+            <div className="fd-sel-text">
+              <p className="fd-sel-text-reply">{selectedBody.reply}</p>
+              {selectedBody.quoted && (
+                <details className="fd-sel-quote">
+                  <summary>
+                    <span className="fd-sel-quote-show">Show quoted history</span>
+                    <span className="fd-sel-quote-hide">Hide quoted history</span>
+                  </summary>
+                  <p className="fd-sel-text-quoted">{selectedBody.quoted}</p>
+                </details>
               )}
+            </div>
+            <SignalEvidence signal={selectedSignal} detail={detail} />
+          </ConversationTurn>
 
-              {run?.status === 'review' &&
-                doneAt === null &&
-                agentTurn(
-                  'hold',
-                  <>
-                    I’m holding it — <b>{run.note}</b>. Nothing has gone out yet; it sends the moment you say so.
-                  </>,
-                )}
-
-              {run?.status === 'review' && doneAt !== null && (
-                <>
-                  {!usedComposer && youTurn('approved', 'Approve & send ✓')}
-                  {agentTurn('sent-after', <>{doneLine(doneAt)}</>)}
-                </>
-              )}
-
-              {run?.status === 'fail' && (
-                <>
-                  {agentTurn(
-                    'fail',
-                    <>
-                      I tried, but <b>{run.note}</b> — I stopped at “{steps[steps.length - 1]?.toLowerCase() ?? 'the last step'}”.
-                      Nothing went out. Tell me to retry, or take it over.
-                    </>,
-                  )}
-                  {doneAt !== null && !usedComposer && youTurn('manual', 'Done ✓ — handled it myself.')}
-                </>
-              )}
-
-              {run?.status === 'ok' && agentTurn('sent', <>{doneLine(run.resolveAt)} Took me {took}s.</>)}
-
-              {run?.rec &&
-                !run.recTaken &&
-                agentTurn(
-                  'rec',
-                  <>
-                    One more thing — worth doing next: <b>{run.rec}</b>. Want me to queue it?
-                  </>,
-                )}
-            </>
+          {day('d-agent', 'Summary & next step')}
+          {detail?.error && hermesTurn(
+            'detail-error',
+            <>I could not load trustworthy context: {detail.error}</>,
           )}
-
-          {notes.map((n, i) =>
-            n.who === 'you'
-              ? youTurn(`note-${i}`, n.text)
-              : n.who === 'agent'
-                ? agentTurn(`note-${i}`, n.text)
-                : sys(`note-${i}`, n.text),
+          {status.key === 'open' && action && hermesTurn(
+            'draft-status',
+            action.status === 'drafting'
+              ? <>Scribe’s already drafting the reply—check Actions for it.</>
+              : action.status === 'failed'
+                ? <>Scribe tried the reply but hit a wall—it needs you in Actions.</>
+                : <>Scribe drafted a reply—it’s waiting on your review in Actions.</>,
           )}
-
+          <article className="fd-dec">
+            <p className="fd-dec-summary">{decisionSummary}</p>
+          </article>
+          {notice && (
+            <div
+              className={notice.tone === 'error' ? 'fc-sys is-error' : 'fc-sys'}
+              role={notice.tone === 'error' ? 'alert' : 'status'}
+            >
+              {notice.text}
+            </div>
+          )}
           <div className="fc-replies">
-            {subject.type === 'signal' && sg && sgStatus?.key === 'action' && sgReplyAction && (
+            {status.key === 'action' && action && (
               <button
                 className="fc-chip fc-chip-primary"
-                onClick={() => onOpenAction?.(sgReplyAction.id)}
+                onClick={() => onOpenAction?.(action.id)}
               >
                 Open draft action
               </button>
             )}
-            {subject.type === 'signal' && sg &&
-              recommendations.map((recommendation) => (
-                <button
-                  key={recommendation.id}
-                  className={`fc-chip${recommendation.available ? ' fc-chip-primary' : ''}`}
-                  disabled={!recommendation.available || acceptingId !== null}
-                  aria-disabled={!recommendation.available}
-                  title={recommendation.available ? recommendation.reason : `${recommendation.reason} · Capability unavailable.`}
-                  onClick={() => {
-                    if (!recommendation.available) return;
-                    setAcceptingId(recommendation.id);
-                    void act.acceptRecommendation(sg.id, recommendation.id)
-                      .then(() => setNotes((current) => [...current,
-                        { who: 'you', text: recommendation.label },
-                        { who: 'agent', text: 'Action created. Hermes is drafting it now; review it in Actions.' },
-                      ]))
-                      .catch((cause) => setNotes((current) => [...current, {
-                        who: 'agent', text: cause instanceof Error ? cause.message : 'Could not create the Action',
-                      }]))
-                      .finally(() => setAcceptingId(null));
-                  }}
-                >
-                  {recommendation.available ? (acceptingId === recommendation.id ? 'Creating…' : recommendation.label) : `🔒 ${recommendation.label}`}
-                </button>
-              ))}
-            {subject.type === 'reminder' && r && r.doneAt === null && (
-              <>
-                {!remActionOpen && (
-                  <button className="fc-chip fc-chip-primary" onClick={() => act.triggerReminder(r.id)}>
-                    ⚡ Trigger now
-                  </button>
-                )}
-                <button className="fc-chip" onClick={() => act.remDone(r.id)}>
-                  ✓ {remActionOpen ? 'Mark done' : 'Already done'}
-                </button>
-                <button className="fc-chip" onClick={() => act.cancelReminder(r.id)}>
-                  Cancel it
-                </button>
-              </>
-            )}
-            {subject.type === 'reminder' && r && r.doneAt !== null && (
-              <button className="fc-chip" onClick={() => act.undoReminder(r.id)}>
-                ↩ Undo that
+            {recommendations.map((recommendation) => (
+              <button
+                key={recommendation.id}
+                className={`fc-chip${recommendation.available ? ' fc-chip-primary' : ''}`}
+                disabled={!recommendation.available || acceptingId !== null}
+                aria-disabled={!recommendation.available}
+                title={recommendation.available
+                  ? recommendation.reason
+                  : `${recommendation.reason} · Capability unavailable.`}
+                onClick={() => {
+                  if (!recommendation.available) return;
+                  setAcceptingId(recommendation.id);
+                  setNotice(null);
+                  void act.acceptRecommendation(signal.id, recommendation.id)
+                    .then(() => setNotice({
+                      tone: 'status',
+                      text: 'Action created. Hermes is drafting it now; review it in Actions.',
+                    }))
+                    .catch((cause) => setNotice({
+                      tone: 'error',
+                      text: cause instanceof Error ? cause.message : 'Could not create the Action',
+                    }))
+                    .finally(() => setAcceptingId(null));
+                }}
+              >
+                {recommendation.available
+                  ? acceptingId === recommendation.id ? 'Creating…' : recommendation.label
+                  : `🔒 ${recommendation.label}`}
+              </button>
+            ))}
+            {status.key === 'open' && (
+              <button
+                className="fc-chip"
+                disabled={settling || acceptingId !== null}
+                onClick={() => {
+                  setSettling(true);
+                  setNotice(null);
+                  void act.settleSignal(signal.id)
+                    .then(() => setNotice({ tone: 'status', text: 'Signal settled.' }))
+                    .catch((cause) => setNotice({
+                      tone: 'error',
+                      text: cause instanceof Error ? cause.message : 'Could not settle the Signal',
+                    }))
+                    .finally(() => setSettling(false));
+                }}
+              >
+                {settling ? 'Settling…' : 'Mark settled'}
               </button>
             )}
-
-            {subject.type === 'auto' && inst && seq && inst.doneAt === null && (
-              <>
-                <button className="fc-chip" onClick={() => act.toggleSeq(seq.id)}>
-                  {seq.enabled ? `⏸ Pause “${seq.name}”` : `▶ Resume “${seq.name}”`}
-                </button>
-                <button className="fc-chip" onClick={() => act.stopSeq(inst.id)}>
-                  Stop it for {first}
-                </button>
-              </>
-            )}
-
-            {subject.type === 'action' && a && (
-              <>
-                {run?.rec && !run.recTaken && (
-                  <button className="fc-chip" onClick={() => act.takeRec(a.id)}>
-                    ↪ Yes — queue it
-                  </button>
-                )}
-                {doneAt !== null ? (
-                  <button className="fc-chip" onClick={() => act.undoAction(a.id)}>
-                    ↩ Undo that
-                  </button>
-                ) : run?.status === 'review' ? (
-                  <button className="fc-chip fc-chip-primary" onClick={() => act.done(a.id)}>
-                    Approve & send
-                  </button>
-                ) : run?.status === 'fail' ? (
-                  <>
-                    <button className="fc-chip fc-chip-primary" onClick={() => act.retryRun(a.id)}>
-                      Try again
-                    </button>
-                    <button className="fc-chip" onClick={() => act.done(a.id)}>
-                      I’ll handle it
-                    </button>
-                  </>
-                ) : !agent ? (
-                  <button className="fc-chip fc-chip-primary" onClick={() => act.done(a.id)}>
-                    Mark done
-                  </button>
-                ) : null}
-              </>
-            )}
           </div>
-
         </div>
-
-        <footer className="fc-composer">
-          <input
-            className="fc-input"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') send();
-            }}
-            placeholder={agent ? `Reply to ${agent}…` : 'Add a note…'}
-          />
-          <button className="fc-send" onClick={send} disabled={!text.trim()}>
-            Send
-          </button>
-        </footer>
       </div>
     </div>
   );
