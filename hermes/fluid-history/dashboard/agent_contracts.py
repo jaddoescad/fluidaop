@@ -68,6 +68,7 @@ def _resolve_script_file(job: Dict[str, Any]) -> Optional[Path]:
     candidates = (
         workdir / script,
         Path("/opt/data") / script,
+        Path("/opt/data/bin") / script,
         Path("/opt/data/scripts") / script,
     )
     for candidate in candidates:
