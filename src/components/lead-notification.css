@@ -1,0 +1,32 @@
+/* A lead notification is a record, so it reads as fields rather than prose.
+   Labels are quiet and fixed-width; the values are what you came to read. */
+.ln-card {
+  display: grid;
+  gap: 6px 14px;
+  margin: 0;
+}
+
+.ln-row {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ln-row dt {
+  color: var(--cv-faint, #7e838f);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ln-row dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--cv-ink, #edeef2);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 520px) {
+  .ln-row { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+}

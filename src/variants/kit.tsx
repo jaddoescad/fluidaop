@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { type Act } from '../board/contract';
 import { ConversationSkeleton, ConversationTurn } from '../components/Conversation';
+import { LeadNotification, leadHeadline, parseLeadNotification } from '../components/LeadNotification';
 import { DAY, fmtAge, MIN } from '../time';
 import { type Person, type Signal, type SignalDetail, type State } from '../types';
 import {
@@ -215,7 +216,7 @@ export function SignalsCol({
           )}{' '}
           {signalTitle(signal)}
         </h3>
-        <p className="card-text">{signal.channel === 'email' ? normalizeEmailText(signal.text) : signal.text}</p>
+        <p className="card-text">{cardPreview(signal)}</p>
         <div className="card-sub">
           <SourceTag channel={signal.channel} />
           <span className="card-age">{fmtAge(signal.at, s.now)}</span>
@@ -285,6 +286,25 @@ function normalizeEmailText(value: string): string {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/** What the card shows of a signal. A lead notification is summarised as who
+ *  the lead is and where they came from, rather than the top of its form. */
+function cardPreview(signal: Signal): string {
+  if (signal.channel !== 'email') return signal.text;
+  const normalized = normalizeEmailText(signal.text);
+  const lead = parseLeadNotification(normalized);
+  if (!lead) return normalized;
+  const headline = leadHeadline(lead);
+  return headline === '' ? normalized : `New lead — ${headline}`;
+}
+
+/** Body for a history turn: a lead notification as fields, anything else as text. */
+function emailTurnBody(item: Signal) {
+  if (item.channel !== 'email') return item.text;
+  const normalized = normalizeEmailText(item.text);
+  const lead = parseLeadNotification(normalized);
+  return lead ? <LeadNotification fields={lead} /> : normalized;
 }
 
 function splitSelectedEmailBody(signal: Signal): { reply: string; quoted: string | null } {
@@ -538,6 +558,11 @@ export function RunPopup({
   const action = s.actions.find((candidate) => candidate.sourceSignalId === signal.id);
   const title = signalTitle(signal);
   const selectedBody = splitSelectedEmailBody(selectedSignal);
+  // These notifications are form submissions, not messages, so they render as
+  // the record they are rather than as a paragraph to be read.
+  const selectedLead = selectedSignal.channel === 'email'
+    ? parseLeadNotification(selectedBody.reply)
+    : null;
   const popupStatus = status.key === 'open'
     ? { key: 'review', word: 'needs a decision' }
     : status.key === 'action'
@@ -582,7 +607,7 @@ export function RunPopup({
         time={fmtAge(item.at, s.now)}
         historyId={item.id}
       >
-        {item.channel === 'email' ? normalizeEmailText(item.text) : item.text}
+        {emailTurnBody(item)}
       </ConversationTurn>
     );
   };
@@ -607,7 +632,7 @@ export function RunPopup({
         time={fmtAge(item.at, s.now)}
         historyId={item.id}
       >
-        {item.channel === 'email' ? normalizeEmailText(item.text) : item.text}
+        {emailTurnBody(item)}
       </ConversationTurn>
     );
   };
@@ -745,7 +770,9 @@ export function RunPopup({
             ) : null}
           >
             <div className="fd-sel-text">
-              <p className="fd-sel-text-reply">{selectedBody.reply}</p>
+              {selectedLead
+                ? <LeadNotification fields={selectedLead} />
+                : <p className="fd-sel-text-reply">{selectedBody.reply}</p>}
               {selectedBody.quoted && (
                 <details className="fd-sel-quote">
                   <summary>
