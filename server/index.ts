@@ -41,7 +41,6 @@ import {
   QuoPhoneNumber,
 } from './quoCsv.js';
 import { SerializedTaskQueue } from './serializedTaskQueue.js';
-import { isPositiveSignalId, signalSettlementPayload } from './settlement.js';
 
 type ConnectionStatus = 'connected' | 'error' | 'checking';
 
@@ -832,7 +831,7 @@ async function operationalFunctionJson<T>(
 }
 
 async function realBoardFunctionJson<T>(
-  action: 'summary' | 'people' | 'signals' | 'signal' | 'settle' | 'actions' | 'reminders' | 'automations' |
+  action: 'summary' | 'people' | 'signals' | 'signal' | 'actions' | 'reminders' | 'automations' |
     'action-definitions' | 'update-action-definition' | 'accept-recommendation' | 'action-detail' |
     'update-action-draft' | 'simulate-action-send' | 'retry-action' | 'dismiss-action' | 'pipeline' |
     'pipeline-history',
@@ -2326,17 +2325,6 @@ app.get('/api/board/signals/:id', async (req, res, next) => {
   }
 });
 
-app.post('/api/board/signals/:signalId/settle', async (req, res, next) => {
-  try {
-    if (!isPositiveSignalId(req.params.signalId)) throw new HttpError(400, 'Invalid Signal id');
-    res.json(await realBoardFunctionJson('settle', {}, {
-      method: 'POST',
-      body: JSON.stringify(signalSettlementPayload(req.params.signalId)),
-    }));
-  } catch (error) {
-    next(error);
-  }
-});
 
 
 app.post('/api/board/signals/:signalId/recommendations/:recommendationId/accept', async (req, res, next) => {

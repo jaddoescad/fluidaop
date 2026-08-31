@@ -215,7 +215,7 @@ export function SignalsCol({
           )}{' '}
           {signalTitle(signal)}
         </h3>
-        <p className="card-text">{signal.text}</p>
+        <p className="card-text">{signal.channel === 'email' ? normalizeEmailText(signal.text) : signal.text}</p>
         <div className="card-sub">
           <SourceTag channel={signal.channel} />
           <span className="card-age">{fmtAge(signal.at, s.now)}</span>
@@ -421,7 +421,6 @@ export function RunPopup({
   sideBySide?: boolean;
 }) {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
-  const [settling, setSettling] = useState(false);
   const [notice, setNotice] = useState<PopupNotice | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const historyScrollAnchorRef = useRef<{
@@ -441,7 +440,6 @@ export function RunPopup({
 
   useEffect(() => {
     setAcceptingId(null);
-    setSettling(false);
     setNotice(null);
   }, [subject.id]);
 
@@ -644,9 +642,7 @@ export function RunPopup({
             </span>{' '}
             reply went out {fmtAge(laterOutbound.at, s.now)}.
           </>
-        : recommendations[0]?.reason ?? (
-          <>Hermes has no suggested action. You still need to decide whether this Signal needs one.</>
-        )
+        : recommendations[0]?.reason ?? null
     : status.key === 'action'
       ? <>A reply draft is ready in Actions.</>
       : selectedSignal.reviewResolution === 'no_action'
@@ -826,25 +822,6 @@ export function RunPopup({
                   : `🔒 ${recommendation.label}`}
               </button>
             ))}
-            {status.key === 'open' && (
-              <button
-                className="fc-chip"
-                disabled={settling || acceptingId !== null}
-                onClick={() => {
-                  setSettling(true);
-                  setNotice(null);
-                  void act.settleSignal(signal.id)
-                    .then(() => setNotice({ tone: 'status', text: 'Signal settled.' }))
-                    .catch((cause) => setNotice({
-                      tone: 'error',
-                      text: cause instanceof Error ? cause.message : 'Could not settle the Signal',
-                    }))
-                    .finally(() => setSettling(false));
-                }}
-              >
-                {settling ? 'Settling…' : 'Mark settled'}
-              </button>
-            )}
           </div>
         </div>
       </div>

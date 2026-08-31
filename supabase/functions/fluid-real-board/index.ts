@@ -679,19 +679,6 @@ Deno.serve(async (req: Request) => {
       return response({ personId, imported });
     }
     if (action === 'update-action-definition') return await updateActionDefinition(client, body);
-    if (action === 'settle') {
-      const activityId = String(body.activityId ?? '');
-      const reviewer = boundedText(body.reviewer, 200, true);
-      if (!integerId(activityId) || body.resolution !== 'no_action' || !reviewer) {
-        return response({ error: 'Invalid Signal settlement' }, 400);
-      }
-      return response(await rpc(client, 'settle_signal_recommendations', {
-        p_workspace_key: WORKSPACE_KEY,
-        p_activity_id: activityId,
-        p_resolution: 'no_action',
-        p_reviewer: reviewer,
-      }));
-    }
     if (action === 'accept-recommendation') {
       if (!integerId(String(body.activityId)) || !uuid(body.recommendationId)) {
         return response({ error: 'Invalid recommendation acceptance' }, 400);

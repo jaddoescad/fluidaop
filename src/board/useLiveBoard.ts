@@ -1035,41 +1035,6 @@ export function useLiveBoard(): LiveBoardController {
     return result.action.id;
   }, [loadCreatedWork, loadPeople, loadSignals]);
 
-  const settleSignal = useCallback(async (signalId: string) => {
-    await json(`/api/board/signals/${encodeURIComponent(signalId)}/settle`, {
-      method: 'POST',
-      body: '{}',
-    });
-    const reviewedAt = Date.now();
-    setDetails((current) => current[signalId] ? {
-      ...current,
-      [signalId]: {
-        ...current[signalId],
-        signal: current[signalId].signal ? {
-          ...current[signalId].signal,
-          reviewStatus: 'settled',
-          reviewResolution: 'no_action',
-          reviewedBy: 'manager',
-          reviewedAt,
-          requiresReply: false,
-        } : null,
-        recommendations: [],
-      },
-    } : current);
-    setApiSignals((current) => current.map((signal) => String(signal.id) === signalId
-      ? {
-        ...signal,
-        review: {
-          status: 'settled',
-          resolution: 'no_action',
-          pendingRecommendationCount: 0,
-          reviewedBy: 'manager',
-          reviewedAt: new Date(reviewedAt).toISOString(),
-        },
-      }
-      : signal));
-    await Promise.all([loadPeople(false), loadSignals(false)]);
-  }, [loadPeople, loadSignals]);
 
   const updateActionDraft = useCallback(async (actionId: string, revision: number, draftBody: string) => {
     await json(`/api/board/actions/${actionId}/draft`, {
@@ -1176,13 +1141,12 @@ export function useLiveBoard(): LiveBoardController {
 
   const act = useMemo<Act>(() => ({
     focus: setFocusId,
-    settleSignal,
     acceptRecommendation,
     updateActionDraft,
     simulateActionSend,
     retryAction,
     dismissAction,
-  }), [acceptRecommendation, dismissAction, retryAction, settleSignal, simulateActionSend, updateActionDraft]);
+  }), [acceptRecommendation, dismissAction, retryAction, simulateActionSend, updateActionDraft]);
 
   return {
     s,
