@@ -237,6 +237,61 @@ export interface SignalRecommendation {
   locked: boolean;
 }
 
+/** One agent interaction with a Signal: a real run from agent_runs, or a
+ *  queue-only outcome (skip, retirement, waiting work) from agent_jobs. */
+export interface SignalAgentEvent {
+  id: string;
+  runId: string | null;
+  jobId: string;
+  agentKey: string;
+  automationName: string;
+  activityId: string | null;
+  status: 'queued' | 'claimed' | 'running' | 'completed' | 'failed' | 'skipped' | 'superseded' | 'retired' | 'orphaned';
+  at: number;
+  finishedAt: number | null;
+  model: string | null;
+  error: string | null;
+  /** Eligibility-gate reason when the agent decided not to look. */
+  skipReason: string | null;
+  /** Potential Lead Classifier verdict, when this run recorded one. */
+  verdict: string | null;
+  confidence: number | null;
+  summary: string | null;
+  runtime: {
+    provider: string;
+    profile: string;
+    jobId: string;
+    executionId: string;
+    sessionId: string;
+  } | null;
+  result: {
+    schemaVersion: number;
+    kind: string;
+    title: string;
+    summary: string;
+    payload: Record<string, unknown>;
+  } | null;
+  queue: {
+    status: string | null;
+    attempt: number;
+    availableAt: string | null;
+    claimedAt: string | null;
+    finishedAt: string | null;
+  } | null;
+  legacy: boolean;
+  orphaned: boolean;
+  warning: string | null;
+  /** Recommendation output size, when an agent run recorded one. */
+  recommendationCount: number | null;
+  /** Signal Triage identity decision linked to this run, when one exists. */
+  triage: {
+    outcome: string | null;
+    proposedDisplayName: string | null;
+    confidence: number | null;
+    reason: string | null;
+  } | null;
+}
+
 export interface SignalDetail {
   signal: Signal | null;
   recommendations: SignalRecommendation[];
@@ -246,6 +301,8 @@ export interface SignalDetail {
   transcript: SignalTranscript | null;
   recordings: SignalRecordings | null;
   callSummary: SignalCallSummary | null;
+  /** Null until the detail payload delivers it, so the popup stays quiet. */
+  agentActivity: SignalAgentEvent[] | null;
   loading: boolean;
   error: string | null;
 }
@@ -326,6 +383,54 @@ export interface Signal {
   reviewedAt?: number | null;
   isAutomated?: boolean;
   attachmentCount?: number;
+  /** When a person opened this Signal. `null` is unread; `undefined` is unknown. */
+  readAt?: number | null;
+}
+
+export type LeadCandidateDisposition = 'undecided' | 'lead' | 'not_lead';
+
+/**
+ * Inbound communication the Potential Lead Classifier judged to be possible
+ * work from someone the CRM does not know yet. A human decision remains in the
+ * audit row; the Board card leaves after an active canonical Contact claims it.
+ */
+export interface LeadCandidate {
+  id: number;
+  /** Their newest lead-verdict Signal — the popup loads its full detail by this id. */
+  activityId: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  /** Contact info the sender stated in message content — unverified, display-only. */
+  claimedName: string | null;
+  claimedEmail: string | null;
+  claimedPhone: string | null;
+  /** How many of their signals the classifier has judged, and the span they cover. */
+  signalCount: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  channel: Channel;
+  summary: string;
+  reason: string;
+  confidence: number | null;
+  disposition: LeadCandidateDisposition;
+  decidedBy: string | null;
+  decidedAt: number | null;
+  createdAt: number;
+  /** The same day strip a pipeline card carries, anchored on first contact. */
+  touches: PipelineStageTouches;
+  signal: {
+    subject: string;
+    preview: string;
+    occurredAt: number;
+    source: 'gmail' | 'quo';
+    eventType: string;
+    actorName: string | null;
+    callStatus: string | null;
+    durationSeconds: number | null;
+    callSummary: string[];
+    transcriptStatus: string | null;
+  };
 }
 
 export interface Reminder {

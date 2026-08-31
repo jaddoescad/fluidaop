@@ -16,7 +16,8 @@ export type AppPage = typeof APP_ROUTES[number]['id'];
 export function pageFromPath(pathname: string): AppPage {
   const route = APP_ROUTES.find((item) => pathname === item.path
     || item.aliases.some((alias) => pathname === alias)
-    || (item.id === 'Agents' && pathname.startsWith('/agents/')));
+    || (item.id === 'Agents' && pathname.startsWith('/agents/'))
+    || (item.id === 'Activity' && pathname.startsWith('/activity/')));
   return route?.id ?? 'Board';
 }
 

@@ -129,7 +129,7 @@ export function SchedulesPage({
                     {error !== null
                       ? error
                       : schedules === null
-                        ? 'Reading Fluid and Hermes schedule rosters…'
+                        ? 'Reading the Hermes schedule roster…'
                         : `${schedules.length} schedules · ${agentCount} agent · ${scriptCount} script · Hermes ${status?.connected === true ? `v${status.version ?? 'unknown'} online` : 'unavailable'}`}
                   </span>
                 </div>
@@ -160,12 +160,12 @@ export function SchedulesPage({
               ) : schedules === null ? (
                 <div className="sc-empty" role="status">
                   <strong>Loading schedules</strong>
-                  <p>Reading Fluid scripts and live Hermes jobs…</p>
+                  <p>Reading registered Hermes agents and scripts…</p>
                 </div>
               ) : schedules.length === 0 ? (
                 <div className="sc-empty">
                   <strong>No schedules</strong>
-                  <p>No recurring Fluid scripts or Hermes jobs are registered.</p>
+                  <p>No recurring Hermes agents or scripts are registered.</p>
                 </div>
               ) : visible !== null && visible.length === 0 ? (
                 <div className="sc-empty">
@@ -214,8 +214,8 @@ export function SchedulesPage({
               )}
 
               <p className="sc-note">
-                This roster combines Fluid's fixed-code schedules with live Hermes jobs. Connections
-                grant account permissions; recurring execution is listed here.
+                Hermes is the only scheduler. Agent and script invocations appear in Activity;
+                Connections only grant account permissions.
               </p>
             </div>
           </main>
@@ -363,8 +363,8 @@ const RUN_STATUS_LABELS: Record<HermesRunStatus, string> = {
 
 function ScheduleRunRow({ run }: { run: HermesRun }) {
   const duration = formatDuration(run.startedAt, run.finishedAt);
-  return (
-    <li className="sc-run">
+  const content = (
+    <>
       <span className={`sc-run-dot sc-run-dot-${run.status}`} aria-hidden="true" />
       <div className="sc-run-copy">
         <div className="sc-run-top">
@@ -374,8 +374,11 @@ function ScheduleRunRow({ run }: { run: HermesRun }) {
         {duration !== null ? <p>{duration}</p> : null}
         {run.error !== null ? <p className="sc-run-error">{run.error}</p> : null}
       </div>
-    </li>
+    </>
   );
+  return run.activityId ? (
+    <li className="sc-run"><a href={`/activity/${encodeURIComponent(run.activityId)}`}>{content}</a></li>
+  ) : <li className="sc-run">{content}</li>;
 }
 
 const STAMP_FORMATTER = new Intl.DateTimeFormat(undefined, {

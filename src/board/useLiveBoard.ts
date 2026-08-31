@@ -4,11 +4,14 @@ import { apiJson as json, isRecord } from '../lib/api';
 import {
   ActionCard,
   ActionDetail,
+  LeadCandidate,
+  LeadCandidateDisposition,
   Person,
   PersonRole,
   PipelineDeal,
   PipelineEvidenceKind,
   PipelineStageHistory,
+  PipelineStageTouches,
   PipelineSyncHealth,
   PipelineTouchDay,
   PipelineTouchpointMetrics,
@@ -17,6 +20,7 @@ import {
   Signal,
   SignalAttachment,
   SignalCallSummary,
+  SignalAgentEvent,
   SignalDetail,
   SignalRecordings,
   SignalRecommendation,
@@ -36,6 +40,22 @@ interface ApiPerson {
   recentSignalCount: number;
   latestActivityAt: string | null;
   urgency: string | null;
+}
+
+/** Touch counts and the day strip, as the read models emit them. */
+interface ApiTouches {
+  outbound?: number;
+  inbound?: number;
+  automated?: number;
+  reactions?: number;
+  lastAt?: string | null;
+  lastDirection?: 'inbound' | 'outbound' | null;
+  phase?: string;
+  phaseLabel?: string;
+  phaseStartedAt?: string | null;
+  evidenceKind?: PipelineEvidenceKind;
+  days?: unknown;
+  daysBefore?: unknown;
 }
 
 interface ApiPipelineDeal {
@@ -59,20 +79,7 @@ interface ApiPipelineDeal {
   stageEnteredAt: string | null;
   stageObservedAt: string | null;
   latestSignalAt: string | null;
-  stageTouches?: {
-    outbound?: number;
-    inbound?: number;
-    automated?: number;
-    reactions?: number;
-    lastAt?: string | null;
-    lastDirection?: 'inbound' | 'outbound' | null;
-    phase?: string;
-    phaseLabel?: string;
-    phaseStartedAt?: string | null;
-    evidenceKind?: PipelineEvidenceKind;
-    days?: unknown;
-    daysBefore?: unknown;
-  } | null;
+  stageTouches?: ApiTouches | null;
   archived?: boolean;
   archivedAt?: string | null;
   archiveBucket?: 'cold_lead' | 'estimate_scheduled' | 'proposal_sent' | 'closed_with_appointment' | 'closed_without_appointment' | null;
@@ -240,12 +247,125 @@ interface ApiSignal {
     reviewedBy?: string | null;
     reviewedAt?: string | null;
   };
+  /** Absent from older payloads; null means nobody has opened it. */
+  readAt?: string | null;
 }
 
 interface CursorPage<T> {
   items: T[];
   nextCursor: string | null;
   count?: number;
+}
+
+/** The Signals page also carries the column-wide unread total. */
+interface ApiSignalPage extends CursorPage<ApiSignal> {
+  unreadCount?: number;
+}
+
+interface ApiLeadCandidate {
+  id: number;
+  activityId: number | string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  claimedName?: string | null;
+  claimedEmail?: string | null;
+  claimedPhone?: string | null;
+  signalCount?: number;
+  firstSeenAt?: string | null;
+  lastSeenAt?: string | null;
+  summary: string | null;
+  reason: string | null;
+  confidence: number | string | null;
+  disposition: LeadCandidateDisposition;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+  touches?: ApiTouches | null;
+  signal: {
+    subject: string | null;
+    preview: string | null;
+    occurredAt: string;
+    direction: string;
+    source: 'gmail' | 'quo';
+    eventType: string;
+    actorName: string | null;
+    callStatus: string | null;
+    durationSeconds: number | null;
+    callSummary?: unknown;
+    transcriptStatus?: string | null;
+  };
+}
+
+function isApiLeadCandidate(value: unknown): value is ApiLeadCandidate {
+  return isRecord(value)
+    && typeof value.id === 'number'
+    && (typeof value.activityId === 'number' || typeof value.activityId === 'string')
+    && ['undecided', 'lead', 'not_lead'].includes(String(value.disposition))
+    && isRecord(value.signal)
+    && typeof value.signal.occurredAt === 'string';
+}
+
+interface ApiLeadCandidatePage {
+  undecidedCount?: number;
+  items?: unknown[];
+}
+
+function apiLeadCandidateToCandidate(candidate: ApiLeadCandidate): LeadCandidate {
+  const confidence = Number(candidate.confidence);
+  const decidedAt = candidate.decidedAt ? Date.parse(candidate.decidedAt) : Number.NaN;
+  const source = candidate.signal.source === 'gmail' ? 'gmail' : 'quo';
+  const occurredAt = Date.parse(candidate.signal.occurredAt);
+  const firstSeenAt = candidate.firstSeenAt ? Date.parse(candidate.firstSeenAt) : Number.NaN;
+  const lastSeenAt = candidate.lastSeenAt ? Date.parse(candidate.lastSeenAt) : Number.NaN;
+  return {
+    id: candidate.id,
+    activityId: String(candidate.activityId),
+    name: candidate.name,
+    email: candidate.email,
+    phone: candidate.phone,
+    claimedName: candidate.claimedName ?? null,
+    claimedEmail: candidate.claimedEmail ?? null,
+    claimedPhone: candidate.claimedPhone ?? null,
+    signalCount: typeof candidate.signalCount === 'number' && candidate.signalCount > 0
+      ? candidate.signalCount
+      : 1,
+    firstSeenAt: Number.isFinite(firstSeenAt) ? firstSeenAt : occurredAt,
+    lastSeenAt: Number.isFinite(lastSeenAt) ? lastSeenAt : occurredAt,
+    channel: candidate.signal.eventType === 'call.completed' ? 'call' : source === 'gmail' ? 'email' : 'sms',
+    summary: candidate.summary ?? '',
+    reason: candidate.reason ?? '',
+    confidence: candidate.confidence !== null && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1
+      ? confidence
+      : null,
+    disposition: candidate.disposition,
+    decidedBy: candidate.decidedBy,
+    decidedAt: Number.isFinite(decidedAt) ? decidedAt : null,
+    createdAt: Date.parse(candidate.createdAt),
+    // The strip starts the day they first reached us; that date is exact.
+    touches: apiTouches(candidate.touches, {
+      phase: 'first_contact',
+      phaseLabel: 'First contact',
+      phaseStartedAt: Number.isFinite(firstSeenAt)
+        ? firstSeenAt
+        : Number.isFinite(occurredAt) ? occurredAt : null,
+      evidenceKind: 'exact',
+    }),
+    signal: {
+      subject: candidate.signal.subject ?? '',
+      preview: candidate.signal.preview ?? '',
+      occurredAt,
+      source,
+      eventType: candidate.signal.eventType,
+      actorName: candidate.signal.actorName,
+      callStatus: candidate.signal.callStatus,
+      durationSeconds: candidate.signal.durationSeconds,
+      callSummary: Array.isArray(candidate.signal.callSummary)
+        ? candidate.signal.callSummary.filter((line): line is string => typeof line === 'string')
+        : [],
+      transcriptStatus: candidate.signal.transcriptStatus ?? null,
+    },
+  };
 }
 
 function isCursorPage(value: unknown): value is CursorPage<unknown> {
@@ -280,6 +400,10 @@ interface ApiSignalDetail {
   transcript?: Omit<SignalTranscript, 'updatedAt'> & { updatedAt?: string | null } | null;
   recordings?: Omit<SignalRecordings, 'updatedAt'> & { updatedAt?: string | null } | null;
   callSummary?: Omit<SignalCallSummary, 'updatedAt'> & { updatedAt?: string | null } | null;
+  agentActivity?: Array<Omit<SignalAgentEvent, 'at' | 'finishedAt'> & {
+    at: string;
+    finishedAt: string | null;
+  }>;
 }
 
 interface ApiWorkItem {
@@ -394,6 +518,34 @@ function touchDayStrip(days: unknown): PipelineTouchDay[] {
   });
 }
 
+/**
+ * One reader for every day strip the API emits — pipeline stages and
+ * Potential Leads alike — so the two columns can never drift in how they
+ * count a touch. `fallback` names the phase when the payload does not.
+ */
+function apiTouches(
+  raw: ApiTouches | null | undefined,
+  fallback: Pick<PipelineStageTouches, 'phase' | 'phaseLabel' | 'phaseStartedAt' | 'evidenceKind'>,
+): PipelineStageTouches {
+  const lastAt = raw?.lastAt ? Date.parse(raw.lastAt) : Number.NaN;
+  const phaseStartedAt = raw?.phaseStartedAt ? Date.parse(raw.phaseStartedAt) : Number.NaN;
+  return {
+    outbound: Number(raw?.outbound ?? 0),
+    // Provider tapbacks are ordinary customer replies in the CRM UI, not a
+    // separate category the salesperson has to interpret.
+    inbound: Number(raw?.inbound ?? 0) + Number(raw?.reactions ?? 0),
+    automated: Number(raw?.automated ?? 0),
+    lastAt: Number.isFinite(lastAt) ? lastAt : null,
+    lastDirection: raw?.lastDirection ?? null,
+    phase: raw?.phase ?? fallback.phase,
+    phaseLabel: raw?.phaseLabel?.trim() || fallback.phaseLabel,
+    phaseStartedAt: Number.isFinite(phaseStartedAt) ? phaseStartedAt : fallback.phaseStartedAt,
+    evidenceKind: raw?.evidenceKind ?? fallback.evidenceKind,
+    days: touchDayStrip(raw?.days),
+    daysBefore: Math.max(0, Math.trunc(Number(raw?.daysBefore ?? 0)) || 0),
+  };
+}
+
 function apiPipelineDealToDeal(deal: ApiPipelineDeal): PipelineDeal {
   if (!deal.personId) {
     throw new Error(`Pipeline deal ${deal.id} is missing its canonical Contact`);
@@ -401,10 +553,6 @@ function apiPipelineDealToDeal(deal: ApiPipelineDeal): PipelineDeal {
   const latestSignalAt = deal.latestSignalAt ? Date.parse(deal.latestSignalAt) : Number.NaN;
   const archivedAt = deal.archivedAt ? Date.parse(deal.archivedAt) : Number.NaN;
   const receivedAt = deal.receivedAt ? Date.parse(deal.receivedAt) : Number.NaN;
-  const touchLastAt = deal.stageTouches?.lastAt ? Date.parse(deal.stageTouches.lastAt) : Number.NaN;
-  const phaseStartedAt = deal.stageTouches?.phaseStartedAt
-    ? Date.parse(deal.stageTouches.phaseStartedAt)
-    : Number.NaN;
   return {
     ...deal,
     amountCents: Number.isSafeInteger(deal.amountCents) ? deal.amountCents : 0,
@@ -413,23 +561,12 @@ function apiPipelineDealToDeal(deal: ApiPipelineDeal): PipelineDeal {
     stageEnteredAt: deal.stageEnteredAt ? Date.parse(deal.stageEnteredAt) : null,
     stageObservedAt: deal.stageObservedAt ? Date.parse(deal.stageObservedAt) : null,
     latestSignalAt: Number.isFinite(latestSignalAt) ? latestSignalAt : null,
-    stageTouches: {
-      outbound: Number(deal.stageTouches?.outbound ?? 0),
-      // Provider tapbacks are ordinary customer replies in the CRM UI, not a
-      // separate category the salesperson has to interpret.
-      inbound: Number(deal.stageTouches?.inbound ?? 0) + Number(deal.stageTouches?.reactions ?? 0),
-      automated: Number(deal.stageTouches?.automated ?? 0),
-      lastAt: Number.isFinite(touchLastAt) ? touchLastAt : null,
-      lastDirection: deal.stageTouches?.lastDirection ?? null,
-      phase: deal.stageTouches?.phase ?? 'lead_received',
-      phaseLabel: deal.stageTouches?.phaseLabel?.trim() || 'Lead received',
-      phaseStartedAt: Number.isFinite(phaseStartedAt)
-        ? phaseStartedAt
-        : Number.isFinite(receivedAt) ? receivedAt : null,
-      evidenceKind: deal.stageTouches?.evidenceKind ?? 'inferred',
-      days: touchDayStrip(deal.stageTouches?.days),
-      daysBefore: Math.max(0, Math.trunc(Number(deal.stageTouches?.daysBefore ?? 0)) || 0),
-    },
+    stageTouches: apiTouches(deal.stageTouches, {
+      phase: 'lead_received',
+      phaseLabel: 'Lead received',
+      phaseStartedAt: Number.isFinite(receivedAt) ? receivedAt : null,
+      evidenceKind: 'inferred',
+    }),
     archived: deal.archived === true,
     archivedAt: Number.isFinite(archivedAt) ? archivedAt : null,
     archiveBucket: deal.archiveBucket ?? null,
@@ -559,6 +696,7 @@ function apiSignalToSignal(signal: ApiSignal, personId?: string): Signal {
     reviewedAt: signal.review?.reviewedAt ? Date.parse(signal.review.reviewedAt) : null,
     isAutomated: signal.isAutomated ?? false,
     attachmentCount: signal.attachmentCount ?? 0,
+    readAt: signal.readAt === undefined ? undefined : signal.readAt ? Date.parse(signal.readAt) : null,
   };
 }
 
@@ -649,6 +787,11 @@ export interface LiveBoardController {
   signalsHasMore: boolean;
   peopleLoading: boolean;
   signalsLoading: boolean;
+  /** Column-wide, not page-wide: how many Signals nobody has opened. */
+  unreadSignalCount: number;
+  leadCandidates: LeadCandidate[];
+  leadCandidatesUndecidedCount: number;
+  leadCandidatesLoading: boolean;
   pipelineDeals: PipelineDeal[];
   pipelineCapturedAt: number | null;
   pipelineSync: PipelineSyncHealth | null;
@@ -678,6 +821,15 @@ export function useLiveBoard(): LiveBoardController {
   const [apiPeople, setApiPeople] = useState<ApiPerson[]>([]);
   const [peopleCount, setPeopleCount] = useState(0);
   const [apiSignals, setApiSignals] = useState<ApiSignal[]>([]);
+  // Mirror for loaders that must merge against the latest page without taking
+  // apiSignals as a dependency (which would re-arm the polling effect).
+  const apiSignalsRef = useRef<ApiSignal[]>([]);
+  const [unreadSignalCount, setUnreadSignalCount] = useState(0);
+  const [apiLeadCandidates, setApiLeadCandidates] = useState<ApiLeadCandidate[]>([]);
+  const [leadCandidatesUndecidedCount, setLeadCandidatesUndecidedCount] = useState(0);
+  // "First load not finished yet", not "a request is in flight": the empty
+  // column must not swap its note for a spinner on every 60s poll.
+  const [leadCandidatesLoading, setLeadCandidatesLoading] = useState(true);
   const [apiPipelineDeals, setApiPipelineDeals] = useState<ApiPipelineDeal[]>([]);
   const [apiArchivedPipelineDeals, setApiArchivedPipelineDeals] = useState<ApiPipelineDeal[]>([]);
   const [archivedPipelineCount, setArchivedPipelineCount] = useState(0);
@@ -724,6 +876,21 @@ export function useLiveBoard(): LiveBoardController {
     ]);
     setApiActions(actions);
     setApiReminders(reminders);
+  }, []);
+
+  const loadLeadCandidates = useCallback(async () => {
+    try {
+      const payload = await json<ApiLeadCandidatePage>('/api/board/potential-leads?limit=200');
+      const items = Array.isArray(payload.items) ? payload.items.filter(isApiLeadCandidate) : [];
+      setApiLeadCandidates(items);
+      setLeadCandidatesUndecidedCount(
+        typeof payload.undecidedCount === 'number' && Number.isSafeInteger(payload.undecidedCount)
+          ? payload.undecidedCount
+          : items.filter((item) => item.disposition === 'undecided').length,
+      );
+    } finally {
+      setLeadCandidatesLoading(false);
+    }
   }, []);
 
   const loadPipeline = useCallback(async () => {
@@ -819,9 +986,29 @@ export function useLiveBoard(): LiveBoardController {
       const search = new URLSearchParams({ limit: '30', view: 'all' });
       if (focusId) search.set('contactId', focusId);
       if (cursor) search.set('cursor', cursor);
-      const page = await json<CursorPage<ApiSignal>>(`/api/board/signals?${search}`);
+      const page = await json<ApiSignalPage>(`/api/board/signals?${search}`);
       if (revision !== requestRevision.current) return;
-      setApiSignals((current) => append ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))] : page.items);
+      if (append) {
+        setApiSignals((current) => [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
+      } else {
+        // A read mark is monotonic. A refresh served before a just-sent read
+        // mark committed must not flip that card back to unread, so keep the
+        // reads we already know about and count them out of the server total.
+        const knownReads = new Map(apiSignalsRef.current
+          .filter((signal) => signal.readAt)
+          .map((signal) => [String(signal.id), signal.readAt as string]));
+        let preserved = 0;
+        const items = page.items.map((item) => {
+          const readAt = knownReads.get(String(item.id));
+          if (item.readAt || !readAt) return item;
+          preserved += 1;
+          return { ...item, readAt };
+        });
+        setApiSignals(items);
+        if (typeof page.unreadCount === 'number' && Number.isSafeInteger(page.unreadCount)) {
+          setUnreadSignalCount(Math.max(0, page.unreadCount - preserved));
+        }
+      }
       setSignalsCursor(page.nextCursor);
     } finally {
       if (revision === requestRevision.current) setSignalsLoading(false);
@@ -834,6 +1021,10 @@ export function useLiveBoard(): LiveBoardController {
   }, []);
 
   useEffect(() => {
+    apiSignalsRef.current = apiSignals;
+  }, [apiSignals]);
+
+  useEffect(() => {
     let active = true;
     void Promise.allSettled([
       loadCreatedWork(),
@@ -842,6 +1033,7 @@ export function useLiveBoard(): LiveBoardController {
       loadLabels(),
       loadPipeline(),
       loadArchivedPipeline(false),
+      loadLeadCandidates(),
     ]).then((results) => {
       if (!active) return;
       const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
@@ -870,11 +1062,12 @@ export function useLiveBoard(): LiveBoardController {
   useEffect(() => {
     if (!booted) return;
     const timer = window.setInterval(() => {
-      void Promise.all([loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline()])
-        .catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not refresh the Board'));
+      void Promise.all([
+        loadCreatedWork(), loadPeople(false), loadSignals(false), loadLabels(), loadPipeline(), loadLeadCandidates(),
+      ]).catch((cause) => setError(cause instanceof Error ? cause.message : 'Could not refresh the Board'));
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [booted, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals]);
+  }, [booted, loadCreatedWork, loadLabels, loadLeadCandidates, loadPeople, loadPipeline, loadSignals]);
 
   const openSignal = useCallback(async (id: string, personIdHint?: string) => {
     setDetails((current) => ({
@@ -888,6 +1081,7 @@ export function useLiveBoard(): LiveBoardController {
         transcript: null,
         recordings: null,
         callSummary: null,
+        agentActivity: null,
         loading: true,
         error: null,
       },
@@ -916,6 +1110,11 @@ export function useLiveBoard(): LiveBoardController {
             ...payload.callSummary,
             updatedAt: payload.callSummary.updatedAt ? Date.parse(payload.callSummary.updatedAt) : null,
           } : null,
+          agentActivity: payload.agentActivity ? payload.agentActivity.map((event) => ({
+            ...event,
+            at: Date.parse(event.at),
+            finishedAt: event.finishedAt ? Date.parse(event.finishedAt) : null,
+          })) : null,
           loading: false,
           error: null,
         },
@@ -932,6 +1131,7 @@ export function useLiveBoard(): LiveBoardController {
           transcript: null,
           recordings: null,
           callSummary: null,
+          agentActivity: null,
           loading: false,
           error: cause instanceof Error ? cause.message : 'Could not load Signal context',
         },
@@ -1065,6 +1265,59 @@ export function useLiveBoard(): LiveBoardController {
     await Promise.all([loadCreatedWork(), loadPeople(false), loadSignals(false)]);
   }, [loadCreatedWork, loadPeople, loadSignals]);
 
+  const markSignalRead = useCallback(async (signalId: string) => {
+    const known = apiSignals.find((signal) => String(signal.id) === signalId);
+    if (known?.readAt) return;
+    // Optimistic: the card dims and the badge drops as the popup opens. The
+    // server call is idempotent, and the next refresh restores the truth if
+    // it failed, so a failed read mark is not worth an error banner.
+    const readAt = new Date().toISOString();
+    if (known && known.readAt === null) setUnreadSignalCount((count) => Math.max(0, count - 1));
+    setApiSignals((current) => current.map((signal) => (
+      String(signal.id) === signalId && !signal.readAt ? { ...signal, readAt } : signal
+    )));
+    setDetails((current) => {
+      const detail = current[signalId];
+      if (!detail?.signal || detail.signal.readAt) return current;
+      return { ...current, [signalId]: { ...detail, signal: { ...detail.signal, readAt: Date.parse(readAt) } } };
+    });
+    try {
+      await json(`/api/board/signals/${signalId}/read`, { method: 'POST', body: '{}' });
+    } catch {
+      void loadSignals(false).catch(() => undefined);
+    }
+  }, [apiSignals, loadSignals]);
+
+  const decideLeadCandidate = useCallback(async (candidateId: number, disposition: LeadCandidateDisposition) => {
+    const current = apiLeadCandidates.find((candidate) => candidate.id === candidateId);
+    if (!current) throw new Error('That potential lead is no longer on the Board');
+    const decidedAt = disposition === 'undecided' ? null : new Date().toISOString();
+    // Optimistic, and composed with whatever else lands meanwhile: only this
+    // one card changes, and only the count's delta moves.
+    const apply = (list: ApiLeadCandidate[], next: Pick<ApiLeadCandidate, 'disposition' | 'decidedAt' | 'decidedBy'>) =>
+      list.map((candidate) => candidate.id === candidateId ? { ...candidate, ...next } : candidate);
+    setApiLeadCandidates((list) => apply(list, {
+      disposition, decidedAt, decidedBy: disposition === 'undecided' ? null : 'manager',
+    }));
+    const delta = (disposition === 'undecided' ? 1 : 0) - (current.disposition === 'undecided' ? 1 : 0);
+    if (delta !== 0) setLeadCandidatesUndecidedCount((count) => Math.max(0, count + delta));
+    try {
+      await json(`/api/board/potential-leads/${candidateId}/disposition`, {
+        method: 'POST', body: JSON.stringify({ disposition }),
+      });
+    } catch (cause) {
+      setApiLeadCandidates((list) => apply(list, {
+        disposition: current.disposition, decidedAt: current.decidedAt, decidedBy: current.decidedBy,
+      }));
+      if (delta !== 0) setLeadCandidatesUndecidedCount((count) => Math.max(0, count - delta));
+      throw cause;
+    }
+    // The verdict is saved. A failed refresh must not read as a failed
+    // decision: the optimistic state is already right and the next poll
+    // reconciles.
+    await loadLeadCandidates().catch(() => undefined);
+  }, [apiLeadCandidates, loadLeadCandidates]);
+
   const retry = useCallback(async () => {
     setError(null);
     const results = await Promise.allSettled([
@@ -1074,6 +1327,7 @@ export function useLiveBoard(): LiveBoardController {
       loadLabels(),
       loadPipeline(),
       loadArchivedPipeline(false),
+      loadLeadCandidates(),
     ]);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failure) {
@@ -1081,7 +1335,7 @@ export function useLiveBoard(): LiveBoardController {
       setError(message);
       throw new Error(message);
     }
-  }, [loadArchivedPipeline, loadCreatedWork, loadLabels, loadPeople, loadPipeline, loadSignals]);
+  }, [loadArchivedPipeline, loadCreatedWork, loadLabels, loadLeadCandidates, loadPeople, loadPipeline, loadSignals]);
 
   const urgencyLabelByName = useMemo(() => new Map(
     apiLabels
@@ -1122,6 +1376,7 @@ export function useLiveBoard(): LiveBoardController {
 
   const actions = useMemo(() => apiActions.map(apiActionToAction), [apiActions]);
   const reminders = useMemo(() => apiReminders.map(apiWorkToReminder), [apiReminders]);
+  const leadCandidates = useMemo(() => apiLeadCandidates.map(apiLeadCandidateToCandidate), [apiLeadCandidates]);
   const pipelineDeals = useMemo(
     () => [...apiPipelineDeals, ...apiArchivedPipelineDeals].map(apiPipelineDealToDeal),
     [apiArchivedPipelineDeals, apiPipelineDeals],
@@ -1146,7 +1401,9 @@ export function useLiveBoard(): LiveBoardController {
     simulateActionSend,
     retryAction,
     dismissAction,
-  }), [acceptRecommendation, dismissAction, retryAction, simulateActionSend, updateActionDraft]);
+    markSignalRead,
+    decideLeadCandidate,
+  }), [acceptRecommendation, decideLeadCandidate, dismissAction, markSignalRead, retryAction, simulateActionSend, updateActionDraft]);
 
   return {
     s,
@@ -1157,6 +1414,10 @@ export function useLiveBoard(): LiveBoardController {
     signalsHasMore: signalsCursor !== null,
     peopleLoading,
     signalsLoading,
+    unreadSignalCount,
+    leadCandidates,
+    leadCandidatesUndecidedCount,
+    leadCandidatesLoading,
     pipelineDeals,
     pipelineCapturedAt,
     pipelineSync,

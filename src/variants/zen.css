@@ -229,7 +229,6 @@
 
 .v-zen .fl-sig.int-urgent { border-color: rgba(244, 88, 122, 0.4); }
 
-.v-zen .fl-sig.settled,
 .v-zen .fl-done-card,
 .v-zen .fk-oblig.done {
   opacity: 0.5;
@@ -238,7 +237,14 @@
   background: var(--panel);
 }
 
-.v-zen .fl-sig.settled:hover { opacity: 0.85; border-color: var(--line); }
+/* Settled signals flatten but do not fade: fading belongs to read state. */
+.v-zen .fl-sig.settled {
+  border-color: transparent;
+  box-shadow: none;
+  background: var(--panel);
+}
+
+.v-zen .fl-sig.settled:hover { border-color: var(--line); }
 
 .v-zen .rem-card.due,
 .v-zen .rem-card.overdue {

@@ -29,7 +29,7 @@ class AgentContractsTest(unittest.TestCase):
         }
         self.environment = patch.dict(
             os.environ,
-            {"FLUID_AGENT_CONTRACT_DIR": str(self.contracts)},
+            {"FLUID_AUTOMATION_CONTRACT_DIR": str(self.contracts)},
         )
         self.environment.start()
 
@@ -40,6 +40,8 @@ class AgentContractsTest(unittest.TestCase):
     def create_contract(self):
         contract = agent_contracts.build_contract(
             self.job,
+            automation_key="sample-sync",
+            subject_types=["signal"],
             display_name="Sample Sync",
             summary="Syncs sample records.",
             steps=["Run the bounded sync once."],
@@ -59,6 +61,8 @@ class AgentContractsTest(unittest.TestCase):
         self.assertIsNotNone(verified)
         self.assertEqual(verified["definitionHash"], contract["definitionHash"])
         self.assertEqual(verified["steps"], ["Run the bounded sync once."])
+        self.assertEqual(verified["automationKey"], "sample-sync")
+        self.assertEqual(verified["subjectTypes"], ["signal"])
 
     def test_prompt_change_invalidates_contract(self) -> None:
         self.create_contract()
@@ -88,11 +92,47 @@ class AgentContractsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "definition sources unavailable"):
             agent_contracts.build_contract(
                 self.job,
+                automation_key="sample-sync",
+                subject_types=["signal"],
                 display_name="Sample Sync",
                 summary="Syncs sample records.",
                 steps=[],
                 skill_roots=[self.skills],
             )
+
+    def test_invalid_automation_key_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "automationKey is invalid"):
+            agent_contracts.build_contract(
+                self.job,
+                automation_key="Sample Sync",
+                subject_types=["signal"],
+                display_name="Sample Sync",
+                summary="Syncs sample records.",
+                steps=[],
+                skill_roots=[self.skills],
+            )
+
+    def test_unknown_subject_type_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported subjectTypes"):
+            agent_contracts.build_contract(
+                self.job,
+                automation_key="sample-sync",
+                subject_types=["deal"],
+                display_name="Sample Sync",
+                summary="Syncs sample records.",
+                steps=[],
+                skill_roots=[self.skills],
+            )
+
+    def test_duplicate_automation_keys_are_reported(self) -> None:
+        self.assertEqual(
+            agent_contracts.duplicate_automation_keys([
+                {"automationKey": "sample-sync"},
+                {"automationKey": "another-sync"},
+                {"automationKey": "sample-sync"},
+            ]),
+            ["sample-sync"],
+        )
 
 
 if __name__ == "__main__":

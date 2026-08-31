@@ -514,7 +514,7 @@ function RunHistory({
     return (
       <div className="ag-history-empty">
         <strong>No matching Hermes job</strong>
-        <p>No cron job currently matches this agent name. Rename the Hermes job or update its mapping in Fluid.</p>
+        <p>No live Hermes job has this verified automation key. Check its contract and schedule registration.</p>
       </div>
     );
   }
@@ -558,8 +558,8 @@ function RunHistoryRow({ run }: { run: HermesRun }) {
     formatDuration(run.startedAt, run.finishedAt),
   ].filter((fact): fact is string => Boolean(fact));
 
-  return (
-    <li className="ag-history-row">
+  const content = (
+    <>
       <span className={`ag-run-dot ag-run-${run.status}`} aria-hidden="true" />
       <div className="ag-run-copy">
         <div className="ag-run-title">
@@ -572,8 +572,11 @@ function RunHistoryRow({ run }: { run: HermesRun }) {
         {facts.length > 0 ? <p>{facts.join(' · ')}</p> : null}
         {run.error !== null ? <p className="ag-run-error">{run.error}</p> : null}
       </div>
-    </li>
+    </>
   );
+  return run.activityId ? (
+    <li className="ag-history-row"><a href={`/activity/${encodeURIComponent(run.activityId)}`}>{content}</a></li>
+  ) : <li className="ag-history-row">{content}</li>;
 }
 
 function formatRunTime(value: string | null): string {

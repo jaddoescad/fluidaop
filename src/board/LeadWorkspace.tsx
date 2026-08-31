@@ -404,7 +404,7 @@ export function LeadWorkspace({
               {showRecordings && recordings.items.map((recording, index) => (
                 <div className="fd-call-recording" key={recording.id ?? `${recording.url}:${index}`}>
                   <span>Recording{recordings.items.length > 1 ? ` ${index + 1}` : ''}{recording.duration === null ? '' : ` · ${callDuration(Math.round(recording.duration))}`}</span>
-                  <audio controls preload="none" src={recording.url}>Your browser cannot play this call recording.</audio>
+                  <audio controls preload="metadata" src={recording.url}>Your browser cannot play this call recording.</audio>
                 </div>
               ))}
               {showSummary && (

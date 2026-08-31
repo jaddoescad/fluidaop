@@ -666,20 +666,20 @@
 .v-flow .fl-st-done { color: var(--ok); background: var(--ok-soft); }
 .v-flow .fl-st-quiet { color: var(--faint); border: 1px dashed var(--line-2); }
 
-/* settled cards recede — the stream should read calm, not like homework */
+/* settled cards recede — the stream should read calm, not like homework.
+   Opacity is owned by read state (see fleet.css): a settled card nobody has
+   opened yet still has to look new. */
 
 .v-flow .fl-sig {
   transition: box-shadow 0.15s, border-color 0.15s, transform 0.24s, opacity 0.45s, background 0.3s;
 }
 
 .v-flow .fl-sig.settled {
-  opacity: 0.52;
   box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.35);
   border-color: rgba(0, 0, 0, 0.55);
 }
 
 .v-flow .fl-sig.settled:hover {
-  opacity: 0.92;
   box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.5);
 }
 

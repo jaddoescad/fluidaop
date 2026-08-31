@@ -107,18 +107,36 @@ export function DirectionTag({ direction }: { direction: 'inbound' | 'outbound' 
 export function PaneHead({
   title,
   count,
+  countTitle,
+  countTone,
   focusName,
   onClear,
 }: {
   title: string;
   count?: number | string;
+  /** What the number means, for the tooltip and screen readers. */
+  countTitle?: string;
+  /** `alert` when the number is a call to look — unread items, say. */
+  countTone?: 'alert';
   focusName?: string | null;
   onClear?: () => void;
 }) {
   return (
     <header className="pane-head">
       <h2>{title}</h2>
-      {count !== undefined && <span className="pane-count">{count}</span>}
+      {count !== undefined && (
+        <>
+          <span
+            className={`pane-count${countTone ? ` is-${countTone}` : ''}`}
+            title={countTitle}
+            aria-hidden={countTitle ? true : undefined}
+          >
+            {count}
+          </span>
+          {/* aria-label is not allowed on a plain span; say it in text instead. */}
+          {countTitle && <span className="sr-only">{countTitle}</span>}
+        </>
+      )}
       {focusName && onClear && (
         <button className="focus-pill" onClick={onClear} title="Clear filter">
           {focusName} <span className="focus-x">✕</span>

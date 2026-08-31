@@ -4,20 +4,27 @@ This file records the read-only comparison used to make the checked-in chain
 replayable without rewriting the linked project's migration ledger. It is an
 operational manifest, not a migration and not a reconstruction of missing SQL.
 
-Snapshot taken on 2026-08-30 with `supabase migration list` against project
+Snapshot refreshed on 2026-08-31 with `supabase migration list` against project
 `fskrxkiujtfuxntcrjam`:
 
-- remote versions: 223
-- exact local/remote version matches: 32
+- remote versions: 233
+- exact local/remote version matches: 42
 - remote-only versions: 191
 - local-only versions after this cleanup: 71
 - remote versions before the first formerly checked-in migration: 119
 
+The Potential Leads migrations from `20260831004143` through `20260831174056`,
+the Signal Recommender retirement migration `20260831185205`, and the Hermes
+Automation Activity protocol migration `20260831201936` are exact local/remote
+matches. The remaining local-only files all predate the latest remote migration
+and must not be replayed with `db push --include-all`.
+
 The bodies of the 119 remote prehistory migrations are unavailable in this
 repository. `20260823000000_root_schema_baseline.sql` is therefore a narrow,
 conditional compatibility baseline for the root objects required by the local
-chain. It must not be represented as recovered history. No `migration repair`,
-`db push`, or other remote mutation was used.
+chain. It must not be represented as recovered history. Refreshing this snapshot
+was read-only; it did not use `migration repair`, `db push`, or another remote
+mutation.
 
 ## Static clean-replay dependency inventory
 

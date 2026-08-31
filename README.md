@@ -1,7 +1,7 @@
 # Fluid
 
 Fluid turns connected business signals into reliable operational context for Ottawa
-Painters. Gmail and Quo remain customer-facing Activity sources. Slack is read-only
+Painters. Gmail and Quo remain customer-facing Signal sources. Slack is read-only
 internal context attached to Jobs. The Board is backed by canonical Job cases and
 persistent work items; it does not use seeded demo cards.
 
@@ -35,34 +35,16 @@ http://localhost:5173/api/oauth/google/callback
 Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and a stable
 `CONNECTION_TOKEN_ENCRYPTION_KEY`. Fluid accepts only `info@paintersottawa.com`, stores
 the refresh token encrypted, checks the connection every five minutes, and imports
-messages incrementally. Each Activity is one email; Gmail thread history is separate,
-collapsed context. Signal triage is the only classifier. A deterministic worker projects
-its topic onto new inbound messages as one `Fluid/<topic>` label, with managed role
-labels in the same `Fluid/` namespace. It removes only superseded labels in that managed
-namespace (or labels already recorded in Fluid's mapping table) and never sends,
-archives, deletes, or changes labels outside Fluid's ownership. Existing mail is not
-backfilled.
+messages incrementally. Each Signal is one email; Gmail thread history is separate,
+collapsed context. Fluid retains historical managed labels in its own `Fluid/`
+namespace, but no classifier assigns new topic or urgency labels. Gmail ingestion never
+sends, archives, or deletes mail.
 
 ### Quo
 
 Quo messages and calls are ingested for the selected Sales line. Signed webhook events
 provide live updates, while bounded backfill and contact enrichment fill provider
 context without importing every workspace contact.
-
-### Slack
-
-Slack is dormant infrastructure, not a connection offered by the local UI. This repo
-contains the signed event receiver and the database-backed internal sync contract, but
-does not contain a Slack OAuth callback or a token-owning sync client. Do not configure
-the previously documented `/api/oauth/slack/callback`; it does not exist.
-
-If an external connector is added later, it must provision workspaces, channels, users,
-messages, and sync state through the internal `fluid-slack-events` actions using
-`FLUID_SLACK_SYNC_SECRET`, and Slack event delivery must use `SLACK_SIGNING_SECRET`.
-Only selected public `#job-*` channels and `#sales` are modeled. A job channel links only
-when its final numeric suffix exactly matches the Job's DripJobs proposal ID.
-`#all-ottawa-painters`, private channels, Slack writeback, and file downloads remain out
-of scope.
 
 ## Operational cases and the Board
 
@@ -81,15 +63,26 @@ hard-coded demo layout. Contacts, Employees, Activity, Labels, Actions, Schedule
 Connections each have a dedicated route. Slack stays inside linked Job context and
 never appears as a global Signal.
 
-Opening an eligible inbound Gmail Signal can show one concrete Hermes recommendation
-for an enabled capability. The user must accept it before an Action exists. The first
-working capability is **Draft email to customer**; it creates an editable draft in the
-existing Action detail flow. **Send (simulation)** records an audit event only: it
-does not call Gmail, create an outbound Activity, or claim the customer received it.
-Pending Signals stay unresolved until a person explicitly settles them. A Signal with
-an open Action must be completed through that Action; it cannot also be settled as
-`no_action`. Provider activity may complete an Action, but it never silently makes the
-Signal review decision.
+Signals carry read state. Opening one records the read; unopened cards stay bright
+with a dot, opened ones recede, and the column head counts the unread ones across the
+whole column. Everything that existed when the feature shipped was marked read.
+
+**Potential Leads** sits between Signals and the pipeline. It holds inbound emails,
+texts, and calls from people the CRM does not know yet. The independent
+**Potential Lead Classifier — inbound email, text, call → Potential Leads** reads that
+bounded inbound stream, decides whether each item may be painting work, and sends only
+eligible candidates here for human review.
+It runs independently. The database refuses outbound mail, automated sends, system
+senders, existing Contacts, anything unreachable (no email or phone), and anything
+from before the feature started, so nothing is historically backfilled. A person marks
+each card **Lead** or **Not a lead**; the card dims and moves under a *Decided* divider
+rather than disappearing. The decision remains auditable; the card leaves only after
+an active canonical Contact claims the identity. Fluid never creates the provider
+Contact.
+
+Signals do not expose a manual-settlement control. The former Signal Recommender and
+its draft-email recommendation were removed; opening a Signal no longer queues that
+worker or offers an AI-generated Action.
 
 `/actions` is the built-in Action Library. It separates reusable Hermes capabilities
 from live Board instances. Draft email is the only supported capability; the unused SMS,
@@ -98,21 +91,30 @@ pipeline, Signal decision, Action, connection-cleanup, and failure states.
 
 ## Hermes reconciliation
 
+Hermes is Fluid's only scheduler. Every recurring agent or fixed-code script is
+registered in `hermes/automations.json`, carries one verified `automationKey`, and
+appears in global Activity for every invocation, including no-work ticks. Supabase
+ingests events, leases queues, and stores authoritative results; it does not schedule
+AI work. Host crontab, Supabase cron, and application business timers are prohibited.
+Read `hermes/automation-creator/SKILL.md` before creating, changing, or retiring any
+automation.
+
 `hermes/fluid-case-reconciler` contains the `case-reconciler` skill, one-minute precheck,
 and nightly deterministic reconciliation script. Hermes receives bounded canonical
 state, unresolved work, and evidence references. Its structured proposal is validated
 inside the database before any write. The first 50 proposed actions stay in shadow mode.
 
-`hermes/fluid-signal-recommender` contains the v2 Signal recommendation skill,
-one-minute precheck, and nightly deterministic repair script. It runs only after triage
-and identity resolution, uses bounded attachment/transcript, conversation, Contact, Job,
-Case, and linked Slack context, and returns zero or one enabled Action recommendation.
-The first 25 eligible Gmail Signals remain shadow-only until their quality is reviewed.
-
 `hermes/fluid-action-runner` contains the separate drafting skill and one-minute
 precheck. It receives only user-accepted Actions and returns the email body. Fluid owns
 and locks the recipient, Gmail thread, and subject, then rejects stale completions so an
 agent result cannot overwrite a user's newer edit.
+
+`hermes/fluid-potential-lead-classifier` contains the dedicated skill and bounded
+worker named **Potential Lead Classifier — inbound email, text, call → Potential
+Leads**. It has its own queue, Edge Function, runtime secret, pre-check, and completion
+contract. Its inputs are unknown inbound Gmail and Quo communications; its decision is
+lead or not-lead; its output is a database-validated Potential Lead for a person to
+review. See `hermes/fluid-potential-lead-classifier/DEPLOY.md`.
 
 ## Supabase
 
@@ -121,20 +123,19 @@ database-secret loading, constant-time service-secret checks, admin-client creat
 JSON responses. They are called server-to-server with dedicated runtime secrets; no
 browser login or user-auth layer was added. The main function groups are:
 
-- `fluid-gmail-activities` — server-only Gmail activity ingestion and Signal read models.
+- `fluid-gmail-activities` — server-only Gmail Signal ingestion and read models (the legacy function name is retained).
 - `fluid-gmail-label-sync` — server-only leased outbox for deterministic Gmail labels.
-- `fluid-slack-events` — custom Slack signature verification and event ingestion.
 - `fluid-operational-context` — Board, Job context, work-item resolution,
   and reconciliation RPC bridge.
 - `fluid-real-board` — cursor-paginated Signal/pipeline read models, Action definitions,
-  recommendation acceptance, and guarded no-action settlement.
-- `fluid-signal-recommender` — server-only Hermes claim, completion, failure, and
-  reconciliation bridge.
+  recommendation acceptance, Signal read state, and Potential Lead review controls.
 - `fluid-action-runner` — server-only leased drafting jobs and revision-safe completion.
+- `fluid-potential-lead-classifier` — independently classifies unknown inbound email,
+  text, and calls and submits eligible candidates to Potential Leads for human review.
 - `fluid-customer-sync` — canonical lead sync and Contacts/Employees projections; the
   legacy function name remains only as a deployment-compatible wrapper.
-- `fluid-dripjobs-events`, `fluid-dripjobs-pipeline`, `fluid-quo-events`, and
-  `fluid-signal-triage` — provider ingestion and deterministic processing endpoints.
+- `fluid-dripjobs-events`, `fluid-dripjobs-pipeline`, and `fluid-quo-events` — provider
+  ingestion and deterministic processing endpoints.
 
 New raw-provider and reconciliation tables are server-only with RLS enabled. Manager
 read access is limited to the public case/work-item projections required by the app.

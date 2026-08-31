@@ -86,30 +86,6 @@ interface PublicGmailConnection extends Omit<StoredGmailConnection, 'encryptedRe
   };
 }
 
-interface PublicFluidSchedule {
-  id: string;
-  runtimeName: string;
-  name: string;
-  icon: string;
-  description: string;
-  schedule: string;
-  profile: string;
-  mode: string;
-  runtimeMode: 'script';
-  steps: string[];
-  enabled: boolean;
-  state: string;
-  nextRunAt: string | null;
-  lastRunAt: string | null;
-  lastRunStatus: string | null;
-  lastError: string | null;
-  historyAgentId: null;
-  contractStatus: 'built-in';
-  source: 'fluid';
-  historyAvailable: false;
-  definition: null;
-}
-
 
 /** Whether a connection is actually delivering, not merely whether the last call succeeded.
  *
@@ -200,10 +176,6 @@ const gmailActivitySyncIntervalMs = readPositiveInt(
   process.env.GMAIL_ACTIVITY_SYNC_INTERVAL_MS,
   5 * 60_000,
 );
-const gmailLabelSyncIntervalMs = Math.max(5_000, readPositiveInt(
-  process.env.GMAIL_LABEL_SYNC_INTERVAL_MS,
-  30_000,
-));
 const gmailLabelSyncMaximumJobs = Math.min(
   readPositiveInt(process.env.GMAIL_LABEL_SYNC_MAX_JOBS, 10),
   100,
@@ -213,15 +185,6 @@ const hermesBaseUrl = (
   process.env.HERMES_BASE_URL ?? 'https://ottawa-painters-hermes-5745.agents.nousresearch.com'
 ).trim().replace(/\/$/, '');
 const hermesApiServerKey = process.env.HERMES_API_SERVER_KEY?.trim() ?? '';
-const hermesAgentIds = new Set([
-  'signal-triage',
-  'signal-recommender',
-  'action-runner',
-  'case-reconciler',
-  'contractor-invoices',
-  'dripjobs-operations',
-  'meta-ads-reporter',
-]);
 const storePath = resolve(process.env.CONNECTION_STORE_PATH ?? '.data/connections.json');
 const gmailConnectionId = `gmail:${intendedEmail}`;
 const pendingAuthorizations = new PendingOAuthAuthorizations<PendingAuthorizationPayload>();
@@ -340,6 +303,13 @@ function activityFunctionSecret(): string {
   return createHash('sha256').update('fluid-activity-sync:v2\0').update(root, 'utf8').digest('hex');
 }
 
+function maintenanceAuthorized(req: Request): boolean {
+  const configured = process.env.FLUID_SERVER_MAINTENANCE_SECRET?.trim() ?? '';
+  const supplied = req.header('x-fluid-maintenance-secret')?.trim() ?? '';
+  if (configured.length < 43 || supplied.length !== configured.length) return false;
+  return timingSafeEqual(Buffer.from(supplied, 'utf8'), Buffer.from(configured, 'utf8'));
+}
+
 function hermesHistoryToken(): string {
   const explicit = process.env.HERMES_HISTORY_TOKEN?.trim();
   if (explicit) return explicit;
@@ -355,7 +325,7 @@ function hermesHistoryToken(): string {
     .digest('base64url');
 }
 
-type HermesMetadataPath = 'agents' | 'skills' | 'jobs' | 'profiles' | 'sessions' | 'introspect';
+type HermesMetadataPath = 'agents' | 'activity' | 'skills' | 'jobs' | 'profiles' | 'sessions' | 'introspect';
 
 async function hermesMetadataJson(
   path: HermesMetadataPath,
@@ -378,12 +348,92 @@ async function hermesMetadataJson(
     if (response.status === 404) {
       throw new HttpError(502, 'The Fluid metadata bridge is not available in Hermes.');
     }
+    if (response.status === 409 && record(payload) && typeof payload.detail === 'string') {
+      throw new HttpError(409, payload.detail.slice(0, 1000));
+    }
     throw new HttpError(502, `Hermes ${path} returned HTTP ${response.status}`);
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new HttpError(502, `Hermes returned an invalid ${path} response`);
   }
   return payload as Record<string, unknown>;
+}
+
+interface AutomationActivityReference {
+  version: 1;
+  automationKey: string;
+  profile: string;
+  jobId: string;
+  executionId: string;
+  sessionId: string | null;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function activityReferenceKey(): Buffer {
+  const stableRoot = process.env.CONNECTION_TOKEN_ENCRYPTION_KEY?.trim();
+  if (!stableRoot || stableRoot.length < 32) {
+    throw new HttpError(503, 'Activity identifiers require CONNECTION_TOKEN_ENCRYPTION_KEY.');
+  }
+  return createHash('sha256')
+    .update('fluid-automation-activity-id:v1\0', 'utf8')
+    .update(stableRoot, 'utf8')
+    .digest();
+}
+
+function encodeActivityId(reference: AutomationActivityReference): string {
+  const encoded = Buffer.from(JSON.stringify(reference), 'utf8').toString('base64url');
+  const signature = createHmac('sha256', activityReferenceKey())
+    .update(encoded, 'utf8')
+    .digest()
+    .subarray(0, 16)
+    .toString('base64url');
+  return `${encoded}.${signature}`;
+}
+
+function decodeActivityId(value: string): AutomationActivityReference | null {
+  const [encoded, supplied, ...extra] = value.split('.');
+  if (!encoded || !supplied || extra.length > 0 || value.length > 1024) return null;
+  const expected = createHmac('sha256', activityReferenceKey())
+    .update(encoded, 'utf8')
+    .digest()
+    .subarray(0, 16);
+  let actual: Buffer;
+  try {
+    actual = Buffer.from(supplied, 'base64url');
+  } catch {
+    return null;
+  }
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!record(parsed) || parsed.version !== 1 ||
+      typeof parsed.automationKey !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(parsed.automationKey) ||
+      typeof parsed.profile !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(parsed.profile) ||
+      typeof parsed.jobId !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(parsed.jobId) ||
+      typeof parsed.executionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,256}$/.test(parsed.executionId) ||
+      (parsed.sessionId !== null && (typeof parsed.sessionId !== 'string' ||
+        !/^[A-Za-z0-9_.:-]{1,128}$/.test(parsed.sessionId)))) return null;
+    return parsed as unknown as AutomationActivityReference;
+  } catch {
+    return null;
+  }
+}
+
+function activityReference(execution: Record<string, unknown>): AutomationActivityReference | null {
+  const automationKey = typeof execution.automationKey === 'string' ? execution.automationKey : '';
+  const profile = typeof execution.profile === 'string' ? execution.profile : '';
+  const jobId = typeof execution.jobId === 'string' ? execution.jobId : '';
+  const executionId = typeof execution.id === 'string' ? execution.id : '';
+  const sessionId = typeof execution.sessionId === 'string' ? execution.sessionId : null;
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(automationKey) ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(profile) ||
+    !/^[A-Za-z0-9_.:-]{1,128}$/.test(jobId) ||
+    !/^[A-Za-z0-9_.:-]{1,256}$/.test(executionId) ||
+    (sessionId !== null && !/^[A-Za-z0-9_.:-]{1,128}$/.test(sessionId))) return null;
+  return { version: 1, automationKey, profile, jobId, executionId, sessionId };
 }
 
 type HermesAgentAction = 'pause' | 'resume' | 'delete';
@@ -784,7 +834,6 @@ async function activityFunctionJson<T>(
     | 'state'
     | 'labels'
     | 'label'
-    | 'agent-history'
     | 'upsert'
     | 'contacts'
     | 'contact'
@@ -834,13 +883,183 @@ async function realBoardFunctionJson<T>(
   action: 'summary' | 'people' | 'signals' | 'signal' | 'actions' | 'reminders' | 'automations' |
     'action-definitions' | 'update-action-definition' | 'accept-recommendation' | 'action-detail' |
     'update-action-draft' | 'simulate-action-send' | 'retry-action' | 'dismiss-action' | 'pipeline' |
-    'pipeline-history',
+    'pipeline-history' | 'potential-leads' | 'decide-potential-lead' | 'mark-signal-read' |
+    'agent-run-results',
   search: Record<string, string> = {},
   init?: RequestInit,
 ): Promise<T> {
   return await fluidFunctionJson<T>('fluid-real-board', action, search, init, {
     serviceName: 'Real Board service',
   });
+}
+
+interface StoredAutomationRun {
+  id: string;
+  automationKey: string;
+  jobId: number;
+  subject: { type: 'signal'; id: string };
+  signal: Record<string, unknown> | null;
+  status: string;
+  model: string | null;
+  promptVersion: string | null;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string;
+  runtime: { profile: string; jobId: string; executionId: string; sessionId: string };
+  result: Record<string, unknown> | null;
+  legacy: boolean;
+}
+
+async function storedRunsForExecutions(
+  executions: Array<Record<string, unknown>>,
+): Promise<StoredAutomationRun[]> {
+  const unique = new Map<string, { profile: string; executionId: string }>();
+  for (const item of executions) {
+    if (typeof item.profile !== 'string' || typeof item.id !== 'string') continue;
+    unique.set(`${item.profile}\u0000${item.id}`, {
+      profile: item.profile,
+      executionId: item.id,
+    });
+  }
+  if (unique.size === 0) return [];
+  const payload = await realBoardFunctionJson<{ runs?: unknown }>('agent-run-results', {}, {
+    method: 'POST',
+    body: JSON.stringify({ executions: [...unique.values()] }),
+  });
+  return Array.isArray(payload.runs)
+    ? payload.runs.filter(record) as unknown as StoredAutomationRun[]
+    : [];
+}
+
+function outcomeForExecution(
+  execution: Record<string, unknown>,
+  results: StoredAutomationRun[],
+): string {
+  if (execution.status === 'running' || execution.status === 'claimed') return 'Running now.';
+  if (execution.status === 'failed') {
+    return typeof execution.error === 'string' && execution.error
+      ? execution.error
+      : 'Hermes reported a failed execution.';
+  }
+  if (results.length > 0) {
+    const failures = results.filter((item) => item.status === 'failed').length;
+    if (failures > 0) return `${failures} of ${results.length} Signal results failed.`;
+    if (results.length === 1 && record(results[0]?.result) &&
+      typeof results[0].result.title === 'string') return results[0].result.title;
+    return `${results.length} Signal result${results.length === 1 ? '' : 's'} stored.`;
+  }
+  return execution.automationMode === 'script'
+    ? 'Script completed with no linked Signal result.'
+    : 'Completed with no Signal work recorded.';
+}
+
+async function decorateActivityExecutions(
+  executions: Array<Record<string, unknown>>,
+): Promise<Array<Record<string, unknown>>> {
+  const results = await storedRunsForExecutions(executions);
+  const byExecution = new Map<string, StoredAutomationRun[]>();
+  for (const result of results) {
+    const key = `${result.runtime.profile}\u0000${result.runtime.executionId}`;
+    byExecution.set(key, [...(byExecution.get(key) ?? []), result]);
+  }
+  return executions.map((execution) => {
+    const profile = typeof execution.profile === 'string' ? execution.profile : '';
+    const executionId = typeof execution.id === 'string' ? execution.id : '';
+    const automationKey = typeof execution.automationKey === 'string' ? execution.automationKey : '';
+    const jobId = typeof execution.jobId === 'string' ? execution.jobId : '';
+    const linked = (byExecution.get(`${profile}\u0000${executionId}`) ?? []).filter((item) => (
+      item.automationKey === automationKey && item.runtime.jobId === jobId
+    ));
+    const sessions = [...new Set(linked.map((item) => item.runtime.sessionId))];
+    const enriched = {
+      ...execution,
+      sessionId: sessions.length === 1 ? sessions[0] : null,
+    };
+    const reference = activityReference(enriched);
+    if (!reference) return {
+      ...enriched,
+      activityId: null,
+      outcome: 'This run has no verified automation identity.',
+      resultCount: 0,
+    };
+    return {
+      ...enriched,
+      activityId: encodeActivityId(reference),
+      outcome: outcomeForExecution(execution, linked),
+      resultCount: linked.length,
+    };
+  });
+}
+
+async function enrichSignalAgentActivity(
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!Array.isArray(payload.agentActivity)) return payload;
+  try {
+    const roster = await hermesMetadataJson('agents');
+    const contracts = new Map<string, {
+      name: string;
+      enabled: boolean;
+      jobId: string;
+      profile: string;
+    }>();
+    for (const item of Array.isArray(roster.agents) ? roster.agents : []) {
+      if (!record(item) || item.contractStatus !== 'verified' || !record(item.contract) ||
+        typeof item.contract.automationKey !== 'string') continue;
+      contracts.set(item.contract.automationKey, {
+        name: typeof item.contract.displayName === 'string'
+          ? item.contract.displayName
+          : item.contract.automationKey,
+        enabled: item.enabled === true,
+        jobId: typeof item.id === 'string' ? item.id : '',
+        profile: typeof item.profile === 'string' ? item.profile : '',
+      });
+    }
+    return {
+      ...payload,
+      agentActivity: payload.agentActivity.map((raw) => {
+        if (!record(raw) || typeof raw.agentKey !== 'string') return raw;
+        const automation = contracts.get(raw.agentKey);
+        const runtime = record(raw.runtime) && typeof raw.runtime.profile === 'string' &&
+          typeof raw.runtime.jobId === 'string' && typeof raw.runtime.executionId === 'string' &&
+          typeof raw.runtime.sessionId === 'string' ? raw.runtime : null;
+        const reference = automation && runtime && automation.jobId === runtime.jobId &&
+          automation.profile === runtime.profile
+          ? activityReference({
+            automationKey: raw.agentKey,
+            profile: runtime.profile,
+            jobId: runtime.jobId,
+            id: runtime.executionId,
+            sessionId: runtime.sessionId,
+          })
+          : null;
+        const queue = record(raw.queue) ? raw.queue : null;
+        const waiting = ['queued', 'claimed'].includes(String(raw.status)) &&
+          ['pending', 'leased'].includes(String(queue?.status ?? ''));
+        return {
+          ...raw,
+          status: waiting && (!automation || !automation.enabled) ? 'orphaned' : raw.status,
+          automationName: automation?.name ?? raw.agentKey,
+          activityId: reference ? encodeActivityId(reference) : null,
+          orphaned: waiting && (!automation || !automation.enabled),
+          warning: waiting && (!automation || !automation.enabled)
+            ? 'No verified active Hermes consumer is registered for this queued work.'
+            : null,
+        };
+      }),
+    };
+  } catch {
+    return {
+      ...payload,
+      agentActivity: payload.agentActivity.map((raw) => record(raw) ? {
+        ...raw,
+        automationName: raw.agentKey,
+        activityId: null,
+        orphaned: false,
+        warning: 'Hermes runtime correlation is temporarily unavailable.',
+      } : raw),
+    };
+  }
 }
 
 async function gmailLabelFunctionJson<T>(
@@ -1618,21 +1837,6 @@ function syncDueGmailLabels(): Promise<void> {
 
 
 
-// Fluid's own ingestion no longer appears here. Gmail is pulled in by a
-// connection, not a schedule the operator manages, so its cadence and health
-// belong on the Connections page beside the account it belongs to.
-async function fluidScheduleRoster(): Promise<PublicFluidSchedule[]> {
-  return [];
-}
-
-
-
-
-async function checkAllConnections(): Promise<void> {
-  const active = store.connections.filter((connection) => !connection.disconnectPending);
-  await Promise.allSettled(active.map((connection) => checkConnection(connection.id)));
-}
-
 async function checkDueConnections(): Promise<void> {
   const now = Date.now();
   const due = store.connections.filter((connection) => {
@@ -2306,11 +2510,12 @@ app.get('/api/board/signals/:id', async (req, res, next) => {
       ? req.query.historyCursor
       : undefined;
     if (historyCursor && historyCursor.length > 1024) throw new HttpError(400, 'History cursor is invalid');
-    const payload = await realBoardFunctionJson<Record<string, unknown>>('signal', {
+    const rawPayload = await realBoardFunctionJson<Record<string, unknown>>('signal', {
       activityId: req.params.id,
       historyLimit: String(historyLimit),
       ...(historyCursor ? { historyCursor } : {}),
     });
+    const payload = await enrichSignalAgentActivity(rawPayload);
     const signal = payload.signal && typeof payload.signal === 'object' && !Array.isArray(payload.signal)
       ? decorateEmailRecord(payload.signal as Record<string, unknown>)
       : payload.signal;
@@ -2325,7 +2530,44 @@ app.get('/api/board/signals/:id', async (req, res, next) => {
   }
 });
 
+app.post('/api/board/signals/:id/read', async (req, res, next) => {
+  try {
+    if (!/^[1-9][0-9]*$/.test(req.params.id)) throw new HttpError(400, 'Invalid Signal id');
+    res.json(await realBoardFunctionJson('mark-signal-read', {}, {
+      method: 'POST',
+      body: JSON.stringify({ activityId: req.params.id, actor: 'manager' }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
 
+app.get('/api/board/potential-leads', async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(500, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      100,
+    )));
+    res.json(await realBoardFunctionJson('potential-leads', { limit: String(limit) }));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/board/potential-leads/:id/disposition', async (req, res, next) => {
+  try {
+    const disposition = req.body?.disposition;
+    if (!/^[1-9][0-9]*$/.test(req.params.id) || !['undecided', 'lead', 'not_lead'].includes(disposition)) {
+      throw new HttpError(400, 'Invalid Potential Lead decision');
+    }
+    res.json(await realBoardFunctionJson('decide-potential-lead', {}, {
+      method: 'POST',
+      body: JSON.stringify({ candidateId: req.params.id, disposition, actor: 'manager' }),
+    }));
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.post('/api/board/signals/:signalId/recommendations/:recommendationId/accept', async (req, res, next) => {
   try {
@@ -2497,10 +2739,10 @@ app.get('/api/activities', async (req, res, next) => {
     const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
     const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
     if ((cursorAt === undefined) !== (cursorId === undefined)) {
-      throw new HttpError(400, 'Activity cursor is incomplete');
+      throw new HttpError(400, 'Signal cursor is incomplete');
     }
     if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
-      throw new HttpError(400, 'Activity cursor is invalid');
+      throw new HttpError(400, 'Signal cursor is invalid');
     }
     const payload = await activityFunctionJson<unknown>('list', {
       accountEmail: intendedEmail,
@@ -2594,10 +2836,10 @@ app.get('/api/contacts/:id/activities', async (req, res, next) => {
     const cursorAt = typeof req.query.cursorAt === 'string' ? req.query.cursorAt : undefined;
     const cursorId = typeof req.query.cursorId === 'string' ? req.query.cursorId : undefined;
     if ((cursorAt === undefined) !== (cursorId === undefined)) {
-      throw new HttpError(400, 'Contact Activity cursor is incomplete');
+      throw new HttpError(400, 'Contact Signal cursor is incomplete');
     }
     if (cursorAt !== undefined && (!Number.isFinite(Date.parse(cursorAt)) || !/^\d+$/.test(cursorId ?? ''))) {
-      throw new HttpError(400, 'Contact Activity cursor is invalid');
+      throw new HttpError(400, 'Contact Signal cursor is invalid');
     }
     res.json(await activityFunctionJson<unknown>('contact-activities', {
       contactId: req.params.id,
@@ -2737,6 +2979,71 @@ app.put('/api/labels/:labelId', async (req, res, next) => {
   }
 });
 
+app.get('/api/activity', async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(100, readPositiveInt(
+      typeof req.query.limit === 'string' ? req.query.limit : undefined,
+      30,
+    )));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined;
+    const mode = typeof req.query.mode === 'string' ? req.query.mode : undefined;
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const automation = typeof req.query.automation === 'string' ? req.query.automation : undefined;
+    if (cursor && cursor.length > 1024) throw new HttpError(400, 'Activity cursor is invalid');
+    if (mode && !['agent', 'script'].includes(mode)) throw new HttpError(400, 'Activity mode is invalid');
+    if (status && !/^[a-z-]{1,32}$/.test(status)) throw new HttpError(400, 'Activity status is invalid');
+    if (automation && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(automation)) {
+      throw new HttpError(400, 'Automation key is invalid');
+    }
+    const payload = await hermesMetadataJson('activity', {
+      limit: String(limit),
+      ...(cursor ? { cursor } : {}),
+      ...(mode ? { mode } : {}),
+      ...(status ? { status } : {}),
+      ...(automation ? { automation } : {}),
+    });
+    const executions = Array.isArray(payload.executions)
+      ? payload.executions.filter(record)
+      : [];
+    res.json({
+      items: await decorateActivityExecutions(executions),
+      nextCursor: typeof payload.nextCursor === 'string' ? payload.nextCursor : null,
+      fetchedAt: payload.fetchedAt ?? new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Activity: ${errorMessage(error)}`));
+  }
+});
+
+app.get('/api/activity/:activityId', async (req, res, next) => {
+  try {
+    const reference = decodeActivityId(req.params.activityId);
+    if (!reference) throw new HttpError(400, 'Activity id is invalid');
+    const payload = await hermesMetadataJson('activity', {
+      limit: '5',
+      job: reference.jobId,
+      execution: reference.executionId,
+      ...(reference.sessionId ? { session: reference.sessionId } : {}),
+    });
+    const executions = Array.isArray(payload.executions)
+      ? payload.executions.filter(record).filter((item) => (
+        item.automationKey === reference.automationKey && item.profile === reference.profile
+      ))
+      : [];
+    if (executions.length !== 1) throw new HttpError(404, 'Activity execution was not found');
+    const [activity] = await decorateActivityExecutions(executions);
+    const results = await storedRunsForExecutions(executions);
+    res.json({
+      activity,
+      results,
+      subjects: results.map((item) => item.subject),
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Activity detail: ${errorMessage(error)}`));
+  }
+});
+
 app.get('/api/hermes/status', async (_req, res, next) => {
   try {
     const response = await fetch(`${hermesBaseUrl}/api/status`, {
@@ -2869,14 +3176,6 @@ app.delete('/api/hermes/agents/:agentId', async (req, res, next) => {
   }
 });
 
-app.get('/api/fluid/schedules', async (_req, res, next) => {
-  try {
-    res.json({ schedules: await fluidScheduleRoster(), fetchedAt: new Date().toISOString() });
-  } catch (error) {
-    next(error instanceof HttpError ? error : new HttpError(502, `Could not read Fluid schedules: ${errorMessage(error)}`));
-  }
-});
-
 app.get('/api/hermes/skills', async (_req, res, next) => {
   try {
     res.json(await hermesMetadataJson('skills'));
@@ -2968,22 +3267,13 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
     if (jobId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) {
       throw new HttpError(400, 'Invalid Hermes job id');
     }
-    if (jobId === undefined && !hermesAgentIds.has(agentId)) {
-      throw new HttpError(404, 'Hermes agent not found');
+    if (jobId === undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(agentId)) {
+      throw new HttpError(400, 'Invalid automation key');
     }
     const limit = Math.max(1, Math.min(200, readPositiveInt(
       typeof req.query.limit === 'string' ? req.query.limit : undefined,
       20,
     )));
-    if (agentId === 'signal-triage' && jobId === undefined) {
-      const payload = await activityFunctionJson<unknown>('agent-history', {
-        accountEmail: intendedEmail,
-        agentKey: agentId,
-        limit: String(limit),
-      });
-      res.json(payload);
-      return;
-    }
     const url = new URL(`${hermesBaseUrl}/api/plugins/fluid-history/runs`);
     if (jobId !== undefined) url.searchParams.set('job', jobId);
     else url.searchParams.set('agent', agentId);
@@ -3008,7 +3298,9 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
     if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new HttpError(502, 'Hermes returned an invalid history response');
     }
-    res.json(payload);
+    const history = payload as Record<string, unknown>;
+    const runs = Array.isArray(history.runs) ? history.runs.filter(record) : [];
+    res.json({ ...history, runs: await decorateActivityExecutions(runs) });
   } catch (error) {
     next(error instanceof HttpError ? error : new HttpError(502, `Could not read Hermes history: ${errorMessage(error)}`));
   }
@@ -3016,6 +3308,31 @@ app.get('/api/hermes/agents/:agentId/runs', async (req, res, next) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'fluid-connections' });
+});
+
+app.post('/api/internal/hermes-maintenance', async (req, res, next) => {
+  try {
+    if (!maintenanceAuthorized(req)) throw new HttpError(401, 'Unauthorized');
+    const startedAt = Date.now();
+    const tasks = await Promise.allSettled([
+      checkDueConnections(),
+      syncDueActivities(),
+      syncDueGmailLabels(),
+    ]);
+    pendingAuthorizations.pruneExpired(Date.now());
+    const failures = tasks.filter((item) => item.status === 'rejected');
+    if (failures.length > 0) {
+      throw new HttpError(502, `${failures.length} server maintenance operation(s) failed`);
+    }
+    res.json({
+      ok: true,
+      operations: ['connection-health', 'gmail-signal-sync', 'gmail-label-sync', 'oauth-cleanup'],
+      durationMs: Date.now() - startedAt,
+      completedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -3056,41 +3373,6 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 export async function bootstrap() {
   await loadStore();
-
-  const startupCheck = setTimeout(() => {
-    void checkAllConnections();
-  }, 5_000);
-  startupCheck.unref();
-
-  const startupActivitySync = setTimeout(() => {
-    void syncDueActivities();
-  }, 10_000);
-  startupActivitySync.unref();
-
-  const startupGmailLabelSync = setTimeout(() => {
-    void syncDueGmailLabels();
-  }, 12_500);
-  startupGmailLabelSync.unref();
-
-  const healthTimer = setInterval(() => {
-    void checkDueConnections();
-  }, Math.min(healthCheckIntervalMs, 30_000));
-  healthTimer.unref();
-
-  const activitySyncTimer = setInterval(() => {
-    void syncDueActivities();
-  }, Math.min(gmailActivitySyncIntervalMs, 30_000));
-  activitySyncTimer.unref();
-
-  const gmailLabelSyncTimer = setInterval(() => {
-    void syncDueGmailLabels();
-  }, gmailLabelSyncIntervalMs);
-  gmailLabelSyncTimer.unref();
-
-  const pendingCleanupTimer = setInterval(() => {
-    pendingAuthorizations.pruneExpired(Date.now());
-  }, 60_000);
-  pendingCleanupTimer.unref();
 
   return app.listen(port, '127.0.0.1', () => {
     console.log(`Fluid connections API listening on http://127.0.0.1:${port}`);

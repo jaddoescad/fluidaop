@@ -16,7 +16,10 @@ only programmatic path.
 from __future__ import annotations
 
 import hmac
+import hashlib
 import importlib.util
+import base64
+import json
 import os
 import re
 import shutil
@@ -59,6 +62,7 @@ else:  # pragma: no cover - only taken when the package import above succeeds.
 router = APIRouter()
 ROUTE_PATHS = (
     "/api/plugins/fluid-history/agents",
+    "/api/plugins/fluid-history/activity",
     "/api/plugins/fluid-history/runs",
     "/api/plugins/fluid-history/skills",
     "/api/plugins/fluid-history/actions",
@@ -71,13 +75,7 @@ REQUIRED_SCOPE = "fluid:history"
 MANAGE_SCOPE = "fluid:manage"
 MIN_SECRET_CHARS = 43
 
-AGENT_JOB_NAME_PARTS = {
-    "signal-triage": ("fluid signal triage",),
-    "case-reconciler": ("fluid case reconciler",),
-    "contractor-invoices": ("contractor invoice sync",),
-    "dripjobs-operations": ("daily dripjobs",),
-    "meta-ads-reporter": ("daily meta ads",),
-}
+AUTOMATION_KEY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _fluid_secret() -> str:
@@ -175,15 +173,22 @@ def _int_or_none(value: Any) -> Optional[int]:
 def _safe_error(value: Any) -> Optional[str]:
     if not value:
         return None
-    return " ".join(str(value).split())[:300]
+    text = " ".join(str(value).split())
+    text = re.sub(r"https?://\S+", "[url redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)\b(secret|token|password|api[_-]?key|authorization)\b\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        text,
+    )
+    return text[:300]
 
 
 MAX_PROMPT_CHARS = 20_000
 MAX_JSON_DEPTH = 8
 REDACTED = "«redacted»"
 
-# Substring match against the *key*, so FLUID_SIGNAL_TRIAGE_SECRET and
-# openai_api_key are both caught without needing an exhaustive list.
+# Substring match against the key so secret-shaped names are caught without
+# needing an exhaustive list.
 _SECRET_KEY_PARTS = (
     "secret", "token", "password", "passwd", "credential",
     "api_key", "apikey", "private_key", "authorization", "auth_header",
@@ -251,11 +256,18 @@ def _definition_payload(job: Dict[str, Any], contract: Optional[Dict[str, Any]])
     }
 
 
-def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
+def _agent_payload(job: Dict[str, Any], duplicate_keys: Optional[set[str]] = None) -> Dict[str, Any]:
     latest = job.get("latest_execution")
     if not isinstance(latest, dict):
         latest = {}
     contract, contract_status = verified_contract(job)
+    if (
+        contract is not None
+        and duplicate_keys is not None
+        and str(contract.get("automationKey") or "") in duplicate_keys
+    ):
+        contract = None
+        contract_status = "duplicate-automation-key"
     return {
         "definition": _definition_payload(job, contract),
         # The complete record, for anything the curated fields below omit.
@@ -279,10 +291,17 @@ def _agent_payload(job: Dict[str, Any]) -> Dict[str, Any]:
 def _agents_payload() -> Dict[str, Any]:
     from hermes_cli import web_server as ws
 
+    jobs = [job for job in ws._list_cron_jobs_sync("all") if str(job.get("id") or "")]
+    key_counts: Dict[str, int] = {}
+    for job in jobs:
+        contract, status = verified_contract(job)
+        if contract is not None and status == "verified":
+            key = str(contract.get("automationKey") or "")
+            key_counts[key] = key_counts.get(key, 0) + 1
+    duplicate_keys = {key for key, count in key_counts.items() if count > 1}
     agents = [
-        _agent_payload(job)
-        for job in ws._list_cron_jobs_sync("all")
-        if str(job.get("id") or "")
+        _agent_payload(job, duplicate_keys)
+        for job in jobs
     ]
     agents.sort(key=lambda agent: (not agent["enabled"], agent["name"].casefold()))
     return {"agents": agents, "fetchedAt": datetime.now(timezone.utc).isoformat()}
@@ -514,7 +533,7 @@ def _skills_payload() -> Dict[str, Any]:
     for skill in skills:
         skill["profiles"].sort()
         skill["usedBy"].sort(key=str.casefold)
-    skills.sort(key=lambda skill: (skill["id"] != "agent-creator", skill["name"].casefold()))
+    skills.sort(key=lambda skill: (skill["id"] != "automation-creator", skill["name"].casefold()))
     return {"skills": skills, "fetchedAt": datetime.now(timezone.utc).isoformat()}
 
 
@@ -540,84 +559,63 @@ def _profile_executions(profile: str, job_id: str, limit: int) -> List[Dict[str,
         reset_hermes_home_override(token)
 
 
-def _closest_session(
-    execution: Dict[str, Any],
-    sessions: List[Dict[str, Any]],
-    used: set[int],
-) -> Optional[Dict[str, Any]]:
-    target = _epoch(execution.get("started_at") or execution.get("claimed_at"))
-    if target is None:
-        return None
-    candidates = []
-    for index, session in enumerate(sessions):
-        if index in used:
-            continue
-        started = _epoch(session.get("started_at"))
-        if started is None:
-            continue
-        delta = abs(started - target)
-        if delta <= 240:
-            candidates.append((delta, index, session))
-    if not candidates:
-        return None
-    _delta, index, session = min(candidates, key=lambda item: item[0])
-    used.add(index)
-    return session
+def _exact_session(job_id: str, profile: str, session_id: str) -> Optional[Dict[str, Any]]:
+    """Read only the explicitly correlated Hermes session.
+
+    The durable execution ledger does not currently store a session foreign
+    key. Fluid therefore refuses timestamp-nearest joins. The app supplies an
+    exact session captured by the worker runtime when one exists.
+    """
+    from hermes_cli import web_server as ws
+
+    result = ws._list_cron_job_runs_sync(job_id, profile, 1000)
+    matches = [
+        session for session in (result.get("runs") or [])
+        if str(session.get("id") or "") == session_id
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _job_runs(job: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
-    from hermes_cli import web_server as ws
-
     job_id = str(job.get("id") or "")
     job_name = str(job.get("name") or job_id)
     profile = str(job.get("profile") or job.get("profile_name") or "default")
-    session_result = ws._list_cron_job_runs_sync(job_id, profile, limit)
-    sessions = list(session_result.get("runs") or [])
+    contract, contract_status = verified_contract(job)
+    automation_key = str(contract.get("automationKey") or "") if contract is not None else None
     executions = _profile_executions(profile, job_id, limit)
-    used_sessions: set[int] = set()
     rows: List[Dict[str, Any]] = []
 
     for execution in executions:
-        session = _closest_session(execution, sessions, used_sessions)
-        session_fields = _session_payload(session) if session is not None else {
+        session_fields = {
             "sessionId": None,
-            "model": None,
+            "model": str(job.get("model") or "") or None,
             "messageCount": None,
             "toolCallCount": None,
         }
+        fallback_identity = hashlib.sha256(
+            f"{profile}\0{job_id}\0{execution.get('claimed_at', '')}".encode("utf-8")
+        ).hexdigest()[:32]
         rows.append({
-            "id": str(execution.get("id") or f"{job_id}:{execution.get('claimed_at', '')}"),
+            "id": str(execution.get("id") or f"legacy-{fallback_identity}"),
             "jobId": job_id,
             "jobName": job_name,
+            "automationKey": automation_key,
+            "automationName": contract.get("displayName") if contract is not None else None,
+            "automationMode": "script" if bool(job.get("no_agent")) else "agent",
+            "contractStatus": contract_status,
             "profile": profile,
             "status": str(execution.get("status") or "unknown"),
             "source": str(execution.get("source") or "cron"),
+            "attempt": _int_or_none(execution.get("attempt") or execution.get("attempts")),
             "startedAt": _iso(execution.get("started_at") or execution.get("claimed_at")),
             "finishedAt": _iso(execution.get("finished_at")),
             "error": _safe_error(execution.get("error")),
             **session_fields,
         })
-
-    for index, session in enumerate(sessions):
-        if index in used_sessions:
-            continue
-        active = bool(session.get("is_active")) and session.get("ended_at") is None
-        rows.append({
-            "id": f"session:{session.get('id', index)}",
-            "jobId": job_id,
-            "jobName": job_name,
-            "profile": profile,
-            "status": "running" if active else "recorded",
-            "source": "cron-session",
-            "startedAt": _iso(session.get("started_at")),
-            "finishedAt": _iso(session.get("ended_at")),
-            "error": None,
-            **_session_payload(session),
-        })
     return rows
 
 
-def _history_payload(agent_id: Optional[str], job_id: Optional[str], limit: int) -> Dict[str, Any]:
+def _history_payload(automation_key: Optional[str], job_id: Optional[str], limit: int) -> Dict[str, Any]:
     from hermes_cli import web_server as ws
 
     all_jobs = ws._list_cron_jobs_sync("all")
@@ -625,13 +623,19 @@ def _history_payload(agent_id: Optional[str], job_id: Optional[str], limit: int)
         jobs = [job for job in all_jobs if str(job.get("id") or "") == job_id]
         response_agent_id = job_id
     else:
-        assert agent_id is not None
-        name_parts = AGENT_JOB_NAME_PARTS[agent_id]
-        jobs = [
-            job for job in all_jobs
-            if any(part in str(job.get("name") or "").casefold() for part in name_parts)
-        ]
-        response_agent_id = agent_id
+        assert automation_key is not None
+        jobs = []
+        for job in all_jobs:
+            contract, status = verified_contract(job)
+            if (
+                contract is not None
+                and status == "verified"
+                and contract.get("automationKey") == automation_key
+            ):
+                jobs.append(job)
+        if len(jobs) > 1:
+            raise HTTPException(status_code=409, detail="Duplicate automation key")
+        response_agent_id = automation_key
     runs: List[Dict[str, Any]] = []
     for job in jobs:
         runs.extend(_job_runs(job, limit))
@@ -647,6 +651,127 @@ def _history_payload(agent_id: Optional[str], job_id: Optional[str], limit: int)
             for job in jobs
         ],
         "runs": runs[:limit],
+        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _registered_jobs() -> List[Dict[str, Any]]:
+    from hermes_cli import web_server as ws
+
+    jobs: List[Dict[str, Any]] = []
+    keys: Dict[str, int] = {}
+    invalid: List[str] = []
+    for job in ws._list_cron_jobs_sync("all"):
+        contract, status = verified_contract(job)
+        if contract is None or status != "verified":
+            invalid.append(
+                f"{str(job.get('id') or 'unknown')} ({status})"
+            )
+            continue
+        key = str(contract.get("automationKey") or "")
+        keys[key] = keys.get(key, 0) + 1
+        jobs.append(job)
+    duplicates = sorted(key for key, count in keys.items() if count > 1)
+    if duplicates:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate verified automation keys: {', '.join(duplicates)}",
+        )
+    if invalid:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Hermes jobs need verified Fluid automation contracts: "
+                + ", ".join(sorted(invalid))
+            ),
+        )
+    return jobs
+
+
+def _activity_cursor(row: Dict[str, Any]) -> str:
+    raw = json.dumps({
+        "at": row.get("startedAt"),
+        "id": row.get("id"),
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_activity_cursor(value: Optional[str]) -> Optional[tuple[float, str]]:
+    if value is None:
+        return None
+    try:
+        padding = "=" * ((4 - len(value) % 4) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(value + padding).decode("utf-8"))
+        at = _epoch(decoded.get("at")) if isinstance(decoded, dict) else None
+        row_id = str(decoded.get("id") or "") if isinstance(decoded, dict) else ""
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return (at, row_id) if at is not None and row_id else None
+
+
+def _activity_payload(
+    limit: int,
+    cursor: Optional[str],
+    mode: Optional[str],
+    status: Optional[str],
+    automation_key: Optional[str],
+    job_id: Optional[str],
+    execution_id: Optional[str],
+    session_id: Optional[str],
+) -> Dict[str, Any]:
+    cursor_value = _decode_activity_cursor(cursor)
+    if cursor is not None and cursor_value is None:
+        raise HTTPException(status_code=400, detail="Invalid Activity cursor")
+    jobs = _registered_jobs()
+    if job_id is not None:
+        jobs = [job for job in jobs if str(job.get("id") or "") == job_id]
+    if automation_key is not None:
+        jobs = [
+            job for job in jobs
+            if (verified_contract(job)[0] or {}).get("automationKey") == automation_key
+        ]
+
+    rows: List[Dict[str, Any]] = []
+    fetch_limit = 1000
+    for job in jobs:
+        rows.extend(_job_runs(job, fetch_limit))
+    if mode is not None:
+        rows = [row for row in rows if row.get("automationMode") == mode]
+    if status is not None:
+        rows = [row for row in rows if row.get("status") == status]
+    if execution_id is not None:
+        rows = [row for row in rows if str(row.get("id") or "") == execution_id]
+    if session_id is not None:
+        if execution_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="A session reference requires an exact execution reference",
+            )
+        for row in rows:
+            exact = _exact_session(
+                str(row.get("jobId") or ""),
+                str(row.get("profile") or "default"),
+                session_id,
+            )
+            row.update(_session_payload(exact) if exact is not None else {
+                "sessionId": session_id,
+                "messageCount": None,
+                "toolCallCount": None,
+            })
+
+    rows.sort(
+        key=lambda row: (_epoch(row.get("startedAt")) or 0, str(row.get("id") or "")),
+        reverse=True,
+    )
+    if cursor_value is not None:
+        rows = [
+            row for row in rows
+            if (_epoch(row.get("startedAt")) or 0, str(row.get("id") or "")) < cursor_value
+        ]
+    page = rows[:limit]
+    return {
+        "executions": page,
+        "nextCursor": _activity_cursor(page[-1]) if len(rows) > limit and page else None,
         "fetchedAt": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -788,6 +913,33 @@ async def agents(request: Request) -> Dict[str, Any]:
     return await run_in_threadpool(_agents_payload)
 
 
+@router.get("/activity")
+async def activity(
+    request: Request,
+    limit: int = Query(30, ge=1, le=200),
+    cursor: Optional[str] = Query(None, max_length=1024),
+    mode: Optional[str] = Query(None),
+    status: Optional[str] = Query(None, max_length=32),
+    automation: Optional[str] = Query(None, max_length=80),
+    job: Optional[str] = Query(None, max_length=128),
+    execution: Optional[str] = Query(None, max_length=256),
+    session: Optional[str] = Query(None, max_length=128),
+) -> Dict[str, Any]:
+    _require_scope(request, REQUIRED_SCOPE)
+    if mode is not None and mode not in ("agent", "script"):
+        raise HTTPException(status_code=400, detail="Invalid automation mode")
+    if automation is not None and AUTOMATION_KEY.fullmatch(automation) is None:
+        raise HTTPException(status_code=400, detail="Invalid automation key")
+    for value, label, maximum in (
+        (job, "job", 128), (execution, "execution", 256), (session, "session", 128)
+    ):
+        if value is not None and (len(value) > maximum or not all(char.isalnum() or char in "-_.:" for char in value)):
+            raise HTTPException(status_code=400, detail=f"Invalid Hermes {label} reference")
+    return await run_in_threadpool(
+        _activity_payload, limit, cursor, mode, status, automation, job, execution, session
+    )
+
+
 @router.get("/skills")
 async def skills(request: Request) -> Dict[str, Any]:
     principal = getattr(request.state, "token_principal", None)
@@ -821,11 +973,14 @@ async def runs(
         raise HTTPException(status_code=403, detail="Missing fluid:history scope")
     if (agent is None) == (job is None):
         raise HTTPException(status_code=400, detail="Provide exactly one of agent or job")
-    if agent is not None and agent not in AGENT_JOB_NAME_PARTS:
-        raise HTTPException(status_code=404, detail="Unknown Fluid agent")
+    if agent is not None and (len(agent) > 80 or AUTOMATION_KEY.fullmatch(agent) is None):
+        raise HTTPException(status_code=400, detail="Invalid automation key")
     if job is not None and (not job or len(job) > 128 or not all(char.isalnum() or char in "-_" for char in job)):
         raise HTTPException(status_code=400, detail="Invalid Hermes job id")
-    return await run_in_threadpool(_history_payload, agent, job, limit)
+    payload = await run_in_threadpool(_history_payload, agent, job, limit)
+    if agent is not None and not payload["jobs"]:
+        raise HTTPException(status_code=404, detail="Unknown or unverified Fluid automation")
+    return payload
 
 
 @router.post("/actions")

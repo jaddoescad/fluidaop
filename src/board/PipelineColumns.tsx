@@ -243,14 +243,24 @@ function phaseDwell(label: string, at: number, now: number): string {
   return `${label} ${Math.floor(d / DAY)}d ago`;
 }
 
-function touchSummary(touches: PipelineStageTouches, now: number): string {
+/**
+ * Who the strip is about changes what an inbound message is called. On a
+ * deal the customer answers us, so it is a reply; a potential lead wrote to
+ * us first, so their messages are simply "from them".
+ */
+export type TouchVariant = 'deal' | 'candidate';
+
+function inboundNoun(count: number, variant: TouchVariant): string {
+  if (variant === 'candidate') return `${count} from them`;
+  return count === 1 ? '1 reply' : `${count} replies`;
+}
+
+function touchSummary(touches: PipelineStageTouches, now: number, variant: TouchVariant): string {
   const parts = [
     touches.outbound === 1 ? '1 touch point from us' : `${touches.outbound} touch points from us`,
     `since ${touches.phaseLabel.toLowerCase()}`,
   ];
-  if (touches.inbound > 0) {
-    parts.push(`· ${touches.inbound === 1 ? '1 reply' : `${touches.inbound} replies`}`);
-  }
+  if (touches.inbound > 0) parts.push(`· ${inboundNoun(touches.inbound, variant)}`);
   if (touches.automated > 0) parts.push(`· ${touches.automated} automated`);
   if (touches.lastAt !== null) {
     parts.push(`· last ${touches.lastDirection === 'inbound' ? 'from them' : 'from us'} ${fmtAge(touches.lastAt, now)}`);
@@ -259,13 +269,15 @@ function touchSummary(touches: PipelineStageTouches, now: number): string {
 }
 
 /** Spelled out, not glyphs: a card at this size should never need a legend. */
-function touchCounts(touches: PipelineStageTouches): string {
+function touchCounts(touches: PipelineStageTouches, variant: TouchVariant): string {
   if (touches.outbound === 0 && touches.inbound === 0) return 'No touch points yet';
-  const made = touches.outbound === 1 ? '1 touch point' : `${touches.outbound} touch points`;
-  const reply = touches.inbound === 0
-    ? 'no reply'
-    : touches.inbound === 1 ? '1 reply' : `${touches.inbound} replies`;
-  return `${made} · ${reply}`;
+  const made = touches.outbound === 0
+    ? 'No touch points'
+    : touches.outbound === 1 ? '1 touch point' : `${touches.outbound} touch points`;
+  const theirs = touches.inbound === 0
+    ? variant === 'candidate' ? 'nothing from them' : 'no reply'
+    : inboundNoun(touches.inbound, variant);
+  return `${made} · ${theirs}`;
 }
 
 /**
@@ -291,12 +303,17 @@ function DayStrip({ days, daysBefore }: { days: readonly PipelineTouchDay[]; day
   );
 }
 
-function StageTouches({
+/** The day strip with its counts and heat — shared by pipeline cards and
+ *  Potential Leads, which is the point: contact frequency reads the same
+ *  everywhere on the board. */
+export function StageTouches({
   touches,
   now,
+  variant = 'deal',
 }: {
   touches: PipelineStageTouches;
   now: number;
+  variant?: TouchVariant;
 }) {
   const anchor = touches.lastAt ?? touches.phaseStartedAt;
   const heat = anchor === null ? 'cool' : touchHeat(anchor, now, touches.lastAt === null ? null : touches.lastDirection);
@@ -307,10 +324,10 @@ function StageTouches({
       : 'No activity recorded';
 
   return (
-    <div className="pipeline-touches" data-heat={heat} title={touchSummary(touches, now)}>
+    <div className="pipeline-touches" data-heat={heat} title={touchSummary(touches, now, variant)}>
       <DayStrip days={touches.days} daysBefore={touches.daysBefore} />
       <div className="pipeline-touch-line">
-        <span className="pipeline-touch-label">{touchCounts(touches)}</span>
+        <span className="pipeline-touch-label">{touchCounts(touches, variant)}</span>
         <span className="pipeline-touch-when">{when}</span>
       </div>
     </div>

@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "automations": [
+    {
+      "automationKey": "potential-lead-classifier",
+      "displayName": "Potential Lead Classifier — inbound email, text, call → Potential Leads",
+      "mode": "agent",
+      "status": "active",
+      "package": "hermes/fluid-potential-lead-classifier",
+      "entrypoint": "hermes/fluid-potential-lead-classifier/fluid-potential-lead-classifier-precheck.sh",
+      "schedule": "every 1m",
+      "subjectTypes": ["signal"],
+      "queueAgentKey": "potential-lead-classifier"
+    },
+    {
+      "automationKey": "potential-lead-classifier-repair",
+      "displayName": "Potential Lead Classifier queue repair — nightly",
+      "mode": "script",
+      "status": "active",
+      "package": "hermes/fluid-potential-lead-classifier",
+      "entrypoint": "hermes/fluid-potential-lead-classifier/fluid-potential-lead-classifier-reconcile.sh",
+      "schedule": "41 2 * * *",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "fluid-server-maintenance",
+      "displayName": "Fluid server maintenance — connections and Gmail queues",
+      "mode": "script",
+      "status": "active",
+      "package": "hermes/fluid-server-maintenance",
+      "entrypoint": "hermes/fluid-server-maintenance/fluid-server-maintenance.mjs",
+      "schedule": "every 1m",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "action-runner",
+      "displayName": "Action Runner",
+      "mode": "agent",
+      "status": "defined",
+      "package": "hermes/fluid-action-runner",
+      "schedule": "every 1m",
+      "subjectTypes": ["signal"],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "case-reconciler",
+      "displayName": "Case Reconciler",
+      "mode": "agent",
+      "status": "defined",
+      "package": "hermes/fluid-case-reconciler",
+      "schedule": "every 1m",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "case-reconciler-repair",
+      "displayName": "Case Reconciler queue repair — nightly",
+      "mode": "script",
+      "status": "defined",
+      "package": "hermes/fluid-case-reconciler",
+      "schedule": "47 2 * * *",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "lead-sync",
+      "displayName": "Lead sync",
+      "mode": "script",
+      "status": "defined",
+      "package": "hermes/fluid-customer-sync",
+      "schedule": "not-installed",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "quo-contact-enrichment",
+      "displayName": "Quo contact enrichment",
+      "mode": "script",
+      "status": "defined",
+      "package": "hermes/fluid-quo-maintenance",
+      "schedule": "17 */6 * * *",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "quo-recording-recovery",
+      "displayName": "Quo recording recovery",
+      "mode": "script",
+      "status": "defined",
+      "package": "hermes/fluid-quo-maintenance",
+      "schedule": "11 * * * *",
+      "subjectTypes": [],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "signal-recommender",
+      "displayName": "Signal Recommender",
+      "mode": "agent",
+      "status": "retired",
+      "package": "hermes/skills-archive",
+      "schedule": "retired",
+      "subjectTypes": ["signal"],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "signal-triage",
+      "displayName": "Signal Triage",
+      "mode": "agent",
+      "status": "retired",
+      "package": "hermes/skills-archive",
+      "schedule": "retired",
+      "subjectTypes": ["signal"],
+      "queueAgentKey": null
+    },
+    {
+      "automationKey": "email-categorizer",
+      "displayName": "Email Categorizer",
+      "mode": "agent",
+      "status": "retired",
+      "package": "hermes/skills-archive",
+      "schedule": "retired",
+      "subjectTypes": ["signal"],
+      "queueAgentKey": null
+    }
+  ]
+}

@@ -40,6 +40,13 @@ function boundedText(value: unknown, maximum: number, required = false): string 
   return cleaned;
 }
 
+export function safeDiagnostic(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return value.trim().replace(/https?:\/\/\S+/gi, '[url redacted]')
+    .replace(/\b(secret|token|password|api[_-]?key|authorization)\b\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/\s+/g, ' ').slice(0, 1000);
+}
+
 function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -125,6 +132,29 @@ async function addAutomatedFlags(
   if (error) throw error;
   const flags = new Map((data ?? []).map((item) => [String(item.id), automatedSource(item.source_metadata)]));
   return items.map((item) => ({ ...item, isAutomated: flags.get(String(item.id)) ?? false }));
+}
+
+/** When a person opened each Signal. Absence is unread — see signal_reads. */
+async function addReadFlags(
+  client: SupabaseClient,
+  items: Array<Record<string, unknown>>,
+): Promise<Array<Record<string, unknown>>> {
+  const ids = items.map((item) => item.id).filter((id): id is string | number => (
+    typeof id === 'string' || typeof id === 'number'
+  ));
+  if (ids.length === 0) return items;
+  const { data, error } = await client.from('signal_reads')
+    .select('activity_id,read_at')
+    .eq('workspace_key', WORKSPACE_KEY)
+    .in('activity_id', ids);
+  if (error) throw error;
+  const readAt = new Map((data ?? []).map((row) => [String(row.activity_id), row.read_at as string]));
+  return items.map((item) => ({ ...item, readAt: readAt.get(String(item.id)) ?? null }));
+}
+
+async function unreadSignalCount(client: SupabaseClient): Promise<number> {
+  const count = Number(await rpc(client, 'count_unread_real_board_signals', { p_workspace_key: WORKSPACE_KEY }));
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
 }
 
 async function addIdentityResolutions(
@@ -273,10 +303,177 @@ async function signals(client: SupabaseClient, url: URL): Promise<Response> {
     Boolean(item) && typeof item === 'object'
   ));
   const flagged = await addAutomatedFlags(client, items);
+  // The unread total is for the whole column, not the page or the Contact
+  // filter, so the badge means the same thing however the list is scoped.
+  const [decorated, unreadCount] = await Promise.all([
+    addReadFlags(client, flagged).then((read) => addIdentityResolutions(client, read)),
+    unreadSignalCount(client),
+  ]);
   return response({
-    items: await addIdentityResolutions(client, flagged),
+    items: decorated,
+    unreadCount,
     nextCursor: encodeCursor(result?.nextCursor),
   });
+}
+
+async function potentialLeads(client: SupabaseClient, url: URL): Promise<Response> {
+  const result = await rpc(client, 'list_lead_candidates', {
+    p_workspace_key: WORKSPACE_KEY,
+    p_limit: positiveInt(url.searchParams.get('limit'), 100, 500),
+  }) as { undecidedCount?: unknown; items?: unknown } | null;
+  const undecidedCount = Number(result?.undecidedCount);
+  return response({
+    undecidedCount: Number.isSafeInteger(undecidedCount) && undecidedCount >= 0 ? undecidedCount : 0,
+    items: Array.isArray(result?.items) ? result.items : [],
+  });
+}
+
+/** Which agents interacted with a Signal: real runs from agent_runs, plus
+ *  queue-only outcomes (skips, retirements, waiting work) from agent_jobs. */
+function signalAgentActivity(
+  runs: Array<Record<string, unknown>>,
+  jobs: Array<Record<string, unknown>>,
+  decisions: Array<Record<string, unknown>>,
+  lifecycle: Array<Record<string, unknown>> = [],
+): Array<Record<string, unknown>> {
+  const asNumber = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value)
+      ? value
+      : typeof value === 'string' && value !== '' && Number.isFinite(Number(value))
+        ? Number(value)
+        : null;
+  const asText = (value: unknown): string | null =>
+    typeof value === 'string' && value !== '' ? value : null;
+  const decisionByRun = new Map(decisions.map((item) => [String(item.agent_run_id), item]));
+  const runById = new Map(runs.map((item) => [String(item.id), item]));
+  const jobById = new Map(jobs.map((item) => [String(item.id), item]));
+  if (lifecycle.length > 0) {
+    return lifecycle.map((event) => {
+      const run = event.agent_run_id ? runById.get(String(event.agent_run_id)) : undefined;
+      const job = jobById.get(String(event.job_id));
+      const evidence = run?.evidence && typeof run.evidence === 'object' && !Array.isArray(run.evidence)
+        ? run.evidence as Record<string, unknown>
+        : {};
+      return {
+        id: `event:${event.id}`,
+        runId: run ? String(run.id) : null,
+        jobId: String(event.job_id),
+        agentKey: event.agent_key,
+        status: event.event_kind,
+        at: event.occurred_at,
+        finishedAt: ['completed', 'failed', 'skipped', 'superseded', 'retired'].includes(String(event.event_kind))
+          ? event.occurred_at
+          : null,
+        model: asText(run?.model),
+        error: event.event_kind === 'failed'
+          ? safeDiagnostic(event.detail) ?? safeDiagnostic(run?.error)
+          : null,
+        skipReason: ['skipped', 'superseded', 'retired'].includes(String(event.event_kind))
+          ? asText(event.detail) ?? String(event.event_kind)
+          : null,
+        verdict: asText(evidence.verdict),
+        confidence: asNumber(evidence.confidence),
+        summary: asText(evidence.summary),
+        recommendationCount: asNumber(evidence.recommendationCount),
+        runtime: run?.runtime_execution_id ? {
+          provider: run.runtime_provider,
+          profile: run.runtime_profile,
+          jobId: run.runtime_job_id,
+          executionId: run.runtime_execution_id,
+          sessionId: run.runtime_session_id,
+        } : null,
+        result: run?.result_schema_version ? {
+          schemaVersion: run.result_schema_version,
+          kind: run.result_kind,
+          title: run.result_title,
+          summary: run.result_summary,
+          payload: run.result_payload,
+        } : null,
+        queue: {
+          status: job?.status ?? null,
+          attempt: asNumber(event.attempt) ?? 0,
+          availableAt: job?.available_at ?? null,
+          claimedAt: job?.claimed_at ?? null,
+          finishedAt: job?.finished_at ?? null,
+        },
+        legacy: Boolean(run && !run.runtime_execution_id),
+        triage: null,
+      };
+    }).sort((left, right) => String(left.at).localeCompare(String(right.at)));
+  }
+  const jobIdsWithRuns = new Set(runs.map((run) => String(run.job_id)));
+  const events: Array<Record<string, unknown>> = [];
+  for (const run of runs) {
+    const evidence = run.evidence && typeof run.evidence === 'object' && !Array.isArray(run.evidence)
+      ? run.evidence as Record<string, unknown>
+      : {};
+    const decision = decisionByRun.get(String(run.id));
+    events.push({
+      id: String(run.id),
+      agentKey: run.agent_key,
+      status: run.status === 'completed' ? 'completed' : 'failed',
+      at: run.started_at ?? run.created_at,
+      finishedAt: run.finished_at ?? null,
+      model: asText(run.model),
+      error: safeDiagnostic(run.error),
+      skipReason: null,
+      verdict: asText(evidence.verdict),
+      confidence: asNumber(evidence.confidence),
+      summary: asText(evidence.summary),
+      recommendationCount: asNumber(evidence.recommendationCount),
+      triage: decision ? {
+        outcome: asText(decision.outcome),
+        proposedDisplayName: asText(decision.proposed_display_name),
+        confidence: asNumber(decision.confidence),
+        reason: asText(decision.reason),
+      } : null,
+    });
+  }
+  for (const job of jobs) {
+    if (jobIdsWithRuns.has(String(job.id))) continue;
+    const lastError = typeof job.last_error === 'string' ? job.last_error : '';
+    let status: string;
+    let skipReason: string | null = null;
+    let error: string | null = null;
+    if (job.status === 'pending') {
+      status = 'queued';
+    } else if (job.status === 'leased') {
+      status = 'claimed';
+    } else if (job.status === 'retired') {
+      status = 'retired';
+    } else if (job.status === 'failed') {
+      status = 'failed';
+      error = lastError || null;
+    } else if (job.status === 'succeeded') {
+      // A job closed without a run was refused by the eligibility gate (or
+      // settled as moot); the reason only survives inside last_error.
+      status = 'skipped';
+      skipReason = lastError.startsWith('Skipped: ')
+        ? lastError.slice('Skipped: '.length)
+        : lastError.startsWith('Superseded')
+          ? 'superseded'
+          : 'closed without a model run';
+    } else {
+      continue;
+    }
+    events.push({
+      id: `job:${job.id}`,
+      agentKey: job.agent_key,
+      status,
+      at: job.created_at,
+      finishedAt: job.finished_at ?? null,
+      model: null,
+      error,
+      skipReason,
+      verdict: null,
+      confidence: null,
+      summary: null,
+      recommendationCount: null,
+      triage: null,
+    });
+  }
+  // Same PostgREST timestamp format throughout, so string order is time order.
+  return events.sort((left, right) => String(left.at).localeCompare(String(right.at)));
 }
 
 async function signal(client: SupabaseClient, url: URL): Promise<Response> {
@@ -294,10 +491,10 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
   }) as Record<string, unknown> | null;
   if (!result) return response({ error: 'Signal not found' }, 404);
   const selectedWithFlags = result.signal && typeof result.signal === 'object'
-    ? await addAutomatedFlags(client, [result.signal as Record<string, unknown>])
+    ? await addReadFlags(client, await addAutomatedFlags(client, [result.signal as Record<string, unknown>]))
     : [];
   const selected = await addIdentityResolutions(client, selectedWithFlags);
-  const [contentResult, recordingResult, summaryResult] = await Promise.all([
+  const [contentResult, recordingResult, summaryResult, agentRunsResult, agentJobsResult, agentEventsResult, triageDecisionsResult] = await Promise.all([
     client.from('activities')
       .select('source,account_key,external_thread_id,raw_body_text,quoted_text,signature_text,has_quoted_content,content_parser_version,content_parse_method,content_parse_confidence,content_parsed_at')
       .eq('workspace_key', WORKSPACE_KEY).eq('id', activityId).maybeSingle(),
@@ -307,10 +504,33 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
     client.from('activity_call_summaries')
       .select('status,summary,next_steps,jobs,unavailable_reason,updated_at')
       .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId).maybeSingle(),
+    client.from('agent_runs')
+      .select('id,agent_key,job_id,status,model,error,evidence,started_at,finished_at,created_at,runtime_provider,runtime_profile,runtime_job_id,runtime_execution_id,runtime_session_id,result_schema_version,result_kind,result_title,result_summary,result_payload')
+      .eq('activity_id', activityId)
+      .order('started_at', { ascending: true })
+      .limit(50),
+    client.from('agent_jobs')
+      .select('id,agent_key,status,attempts,available_at,claimed_at,leased_until,last_error,created_at,finished_at')
+      .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId)
+      .order('created_at', { ascending: true })
+      .limit(50),
+    client.from('agent_job_events')
+      .select('id,agent_key,job_id,agent_run_id,event_kind,attempt,detail,occurred_at')
+      .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId)
+      .order('occurred_at', { ascending: true })
+      .limit(200),
+    client.from('signal_triage_decisions')
+      .select('agent_run_id,proposed_display_name,confidence,reason,outcome')
+      .eq('workspace_key', WORKSPACE_KEY).eq('activity_id', activityId)
+      .limit(20),
   ]);
   if (contentResult.error) throw contentResult.error;
   if (recordingResult.error) throw recordingResult.error;
   if (summaryResult.error) throw summaryResult.error;
+  if (agentRunsResult.error) throw agentRunsResult.error;
+  if (agentJobsResult.error) throw agentJobsResult.error;
+  if (agentEventsResult.error) throw agentEventsResult.error;
+  if (triageDecisionsResult.error) throw triageDecisionsResult.error;
   const content = contentResult.data;
   let threadMessageCount = 1;
   if (content?.external_thread_id) {
@@ -359,8 +579,92 @@ async function signal(client: SupabaseClient, url: URL): Promise<Response> {
       unavailableReason: summaryResult.data.unavailable_reason,
       updatedAt: summaryResult.data.updated_at,
     } : null,
+    agentActivity: signalAgentActivity(
+      agentRunsResult.data ?? [],
+      agentJobsResult.data ?? [],
+      triageDecisionsResult.data ?? [],
+      agentEventsResult.data ?? [],
+    ),
     historyNextCursor: encodeCursor(result.historyNextCursor),
   });
+}
+
+async function automationRunResults(
+  client: SupabaseClient,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const valid = cleanExecutionReferences(body.executions);
+  if (!valid) {
+    return response({ error: 'Provide 1–100 Hermes execution references' }, 400);
+  }
+  const executionIds = [...new Set(valid.map((item) => item.executionId))];
+  const allowed = new Set(valid.map((item) => `${item.profile}\u0000${item.executionId}`));
+  const { data, error } = await client.from('agent_runs')
+    .select('id,agent_key,job_id,activity_id,status,model,prompt_version,error,started_at,finished_at,runtime_profile,runtime_job_id,runtime_execution_id,runtime_session_id,result_schema_version,result_kind,result_title,result_summary,result_payload')
+    .eq('runtime_provider', 'hermes')
+    .in('runtime_execution_id', executionIds)
+    .order('finished_at', { ascending: true })
+    .limit(500);
+  if (error) throw error;
+  const runs = (data ?? []).filter((item) => allowed.has(`${item.runtime_profile}\u0000${item.runtime_execution_id}`));
+  const activityIds = [...new Set(runs.map((item) => item.activity_id))];
+  const activities = new Map<string, Record<string, unknown>>();
+  if (activityIds.length > 0) {
+    const result = await client.from('activities')
+      .select('id,subject,preview,event_type,direction,actor_name,occurred_at')
+      .eq('workspace_key', WORKSPACE_KEY)
+      .in('id', activityIds);
+    if (result.error) throw result.error;
+    for (const item of result.data ?? []) activities.set(String(item.id), item);
+  }
+  return response({
+    runs: runs.map((run) => ({
+      id: run.id,
+      automationKey: run.agent_key,
+      jobId: run.job_id,
+      subject: { type: 'signal', id: String(run.activity_id) },
+      signal: activities.get(String(run.activity_id)) ?? null,
+      status: run.status,
+      model: run.model,
+      promptVersion: run.prompt_version,
+      error: safeDiagnostic(run.error),
+      startedAt: run.started_at,
+      finishedAt: run.finished_at,
+      runtime: {
+        profile: run.runtime_profile,
+        jobId: run.runtime_job_id,
+        executionId: run.runtime_execution_id,
+        sessionId: run.runtime_session_id,
+      },
+      result: run.result_schema_version ? {
+        schemaVersion: run.result_schema_version,
+        kind: run.result_kind,
+        title: run.result_title,
+        summary: run.result_summary,
+        payload: run.result_payload,
+      } : null,
+      legacy: false,
+    })),
+  });
+}
+
+export function cleanExecutionReferences(
+  value: unknown,
+): Array<{ profile: string; executionId: string }> | null {
+  const raw = Array.isArray(value) ? value : null;
+  if (!raw || raw.length < 1 || raw.length > 100) return null;
+  const executions = raw.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const record = item as Record<string, unknown>;
+    const profile = boundedText(record.profile, 64, true);
+    const executionId = boundedText(record.executionId, 256, true);
+    if (!profile || !executionId || !/^[A-Za-z0-9_-]+$/.test(profile) ||
+      !/^[A-Za-z0-9._:-]+$/.test(executionId)) return null;
+    return { profile, executionId };
+  });
+  return executions.some((item) => item === null)
+    ? null
+    : executions as Array<{ profile: string; executionId: string }>;
 }
 
 async function actionDefinitions(client: SupabaseClient): Promise<Response> {
@@ -619,7 +923,7 @@ async function createdWork(client: SupabaseClient, url: URL, kind: 'action' | 'r
   });
 }
 
-Deno.serve(async (req: Request) => {
+export async function handleRequest(req: Request): Promise<Response> {
   try {
     if (!authorized(req)) return response({ error: 'Unauthorized' }, 401);
     const url = new URL(req.url);
@@ -636,8 +940,10 @@ Deno.serve(async (req: Request) => {
     if (req.method === 'GET' && action === 'action-detail') return await actionDetail(client, url);
     if (req.method === 'GET' && action === 'reminders') return await createdWork(client, url, 'reminder');
     if (req.method === 'GET' && action === 'automations') return response({ items: [], nextCursor: null });
+    if (req.method === 'GET' && action === 'potential-leads') return await potentialLeads(client, url);
     if (req.method !== 'POST') return response({ error: 'Method not allowed' }, 405);
     const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+    if (action === 'agent-run-results') return await automationRunResults(client, body);
     if (action === 'ingest-dripjobs-chat') {
       const contactId = boundedText(body.contactId, 200, true);
       const channelId = boundedText(body.channelId, 500, true);
@@ -679,6 +985,33 @@ Deno.serve(async (req: Request) => {
       return response({ personId, imported });
     }
     if (action === 'update-action-definition') return await updateActionDefinition(client, body);
+    if (action === 'mark-signal-read') {
+      if (!integerId(String(body.activityId))) return response({ error: 'Invalid Signal id' }, 400);
+      try {
+        return response(await rpc(client, 'mark_signal_read', {
+          p_workspace_key: WORKSPACE_KEY,
+          p_activity_id: body.activityId,
+          p_actor: typeof body.actor === 'string' ? body.actor : 'manager',
+        }));
+      } catch (error) {
+        // The only way to violate the foreign key is to name a Signal that
+        // does not exist; that is the caller's mistake, not an outage.
+        if ((error as { code?: unknown })?.code === '23503') return response({ error: 'Signal not found' }, 404);
+        throw error;
+      }
+    }
+    if (action === 'decide-potential-lead') {
+      const disposition = typeof body.disposition === 'string' ? body.disposition : '';
+      if (!integerId(String(body.candidateId)) || !['undecided', 'lead', 'not_lead'].includes(disposition)) {
+        return response({ error: 'Invalid Potential Lead decision' }, 400);
+      }
+      return response(await rpc(client, 'set_lead_candidate_disposition', {
+        p_workspace_key: WORKSPACE_KEY,
+        p_candidate_id: body.candidateId,
+        p_disposition: disposition,
+        p_actor: typeof body.actor === 'string' ? body.actor : 'manager',
+      }));
+    }
     if (action === 'accept-recommendation') {
       if (!integerId(String(body.activityId)) || !uuid(body.recommendationId)) {
         return response({ error: 'Invalid recommendation acceptance' }, 400);
@@ -730,4 +1063,6 @@ Deno.serve(async (req: Request) => {
     console.error('fluid-real-board', error);
     return response({ error: error instanceof Error ? error.message : 'Real Board request failed' }, 500);
   }
-});
+}
+
+if (import.meta.main) Deno.serve((req: Request) => handleRequest(req));

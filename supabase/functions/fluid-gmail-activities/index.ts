@@ -831,42 +831,6 @@ Deno.serve(async (req: Request) => {
       return response({ result: data });
     }
 
-    if (req.method === 'GET' && action === 'agent-history') {
-      const limit = cleanLimit(url.searchParams.get('limit'), 20, 50);
-      const requestedAgent = 'signal-triage';
-      const { data, error } = await supabase
-        .from('agent_runs')
-        .select('id,status,model,error,started_at,finished_at,input_revision')
-        .eq('agent_key', requestedAgent)
-        .order('finished_at', { ascending: false })
-        .limit(limit);
-      if (error) throw error;
-      return response({
-        agentId: requestedAgent,
-        jobs: [{
-          id: requestedAgent,
-          name: 'Fluid Signal Triage — database only — every minute',
-          profile: 'default',
-        }],
-        runs: (data ?? []).map((run) => ({
-          id: run.id,
-          jobId: requestedAgent,
-          jobName: 'Fluid Signal Triage — database only — every minute',
-          profile: 'default',
-          status: run.status,
-          source: 'supabase-agent-audit',
-          startedAt: run.started_at,
-          finishedAt: run.finished_at,
-          error: run.error,
-          sessionId: null,
-          model: run.model,
-          messageCount: null,
-          toolCallCount: null,
-        })),
-        fetchedAt: new Date().toISOString(),
-      });
-    }
-
     if (req.method === 'POST' && action === 'label') {
       const body: unknown = await req.json().catch(() => null);
       if (!body || typeof body !== 'object' || Array.isArray(body)) {

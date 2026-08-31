@@ -22,6 +22,22 @@ test.after(async () => {
   });
 });
 
+test('Activity detail rejects an unverified opaque identifier', async () => {
+  const response = await fetch(`${baseUrl}/api/activity/not-a-real-activity`);
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'Activity id is invalid' });
+});
+
+test('Hermes server maintenance requires its dedicated secret', async () => {
+  const response = await fetch(`${baseUrl}/api/internal/hermes-maintenance`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: 'Unauthorized' });
+});
+
 test('Express preserves malformed JSON as 400', async () => {
   const response = await fetch(`${baseUrl}/api/connections/quo/connect`, {
     method: 'POST',
@@ -42,12 +58,11 @@ test('Express preserves oversized JSON as 413', async () => {
   assert.deepEqual(await response.json(), { error: 'Request body is too large' });
 });
 
-test('settlement endpoint rejects invalid signal IDs locally', async () => {
-  const response = await fetch(`${baseUrl}/api/board/signals/0/settle`, {
+test('removed manual Signal settlement endpoint stays unavailable', async () => {
+  const response = await fetch(`${baseUrl}/api/board/signals/123/settle`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
   });
-  assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: 'Invalid Signal id' });
+  assert.equal(response.status, 404);
 });

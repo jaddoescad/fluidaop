@@ -3,6 +3,133 @@
    agent. The agent roster lives in the side nav. Clicking an action opens
    the run as a CHAT: context speaks first, then the agent explains itself. */
 
+/* ---------- initial board skeleton ---------- */
+
+.board-skeleton-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.board-skeleton-filter {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.board-skeleton-shim {
+  display: block;
+  flex: none;
+  border-radius: 6px;
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--line) 82%, transparent) 20%,
+    color-mix(in srgb, var(--line-2) 86%, transparent) 42%,
+    color-mix(in srgb, var(--line) 82%, transparent) 64%
+  );
+  background-size: 260% 100%;
+  animation: boardSkeletonShimmer 1.6s ease-in-out infinite;
+}
+
+.board-skeleton-filter-label { width: 74px; height: 9px; }
+.board-skeleton-filter-select { width: 104px; height: 24px; border-radius: 7px; }
+
+.board-skeleton-sync {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+}
+
+.board-skeleton-sync-dot { width: 6px; height: 6px; border-radius: 50%; }
+.board-skeleton-sync-label { width: 82px; height: 8px; }
+
+.v-flow .fl-cols.pipeline-cols.board-skeleton {
+  position: relative;
+  overflow-y: hidden;
+}
+
+.board-skeleton-column {
+  pointer-events: none;
+}
+
+.board-skeleton-icon { width: 16px; height: 16px; border-radius: 5px; }
+.board-skeleton-heading { width: 104px; height: 10px; }
+.board-skeleton-count { width: 27px; height: 17px; margin-left: auto; border-radius: 9px; }
+
+.board-skeleton-card {
+  display: grid;
+  gap: 9px;
+  margin-bottom: 9px;
+  padding: 12px 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.board-skeleton-card:nth-child(2) { opacity: 0.82; }
+.board-skeleton-card:nth-child(3) { opacity: 0.64; }
+.board-skeleton-card:nth-child(2) .board-skeleton-shim { animation-delay: -0.22s; }
+.board-skeleton-card:nth-child(3) .board-skeleton-shim { animation-delay: -0.44s; }
+
+.board-skeleton-name { width: 58%; height: 11px; }
+.board-skeleton-copy { width: 92%; height: 8px; }
+.board-skeleton-copy.is-short { width: 68%; }
+
+.board-skeleton-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.board-skeleton-pill { width: 64px; height: 16px; border-radius: 999px; }
+.board-skeleton-amount { width: 48px; height: 8px; }
+.board-skeleton-tail { width: 44%; height: 8px; margin: 18px 2px 0; }
+
+@keyframes boardSkeletonShimmer {
+  from { background-position: 100% 50%; }
+  to { background-position: 0 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-skeleton-shim { animation: none; }
+}
+
+/* ---------- signals: read / unread ----------
+   An opened card recedes; one nobody has opened stays bright and carries a
+   dot. This is the column's primary visual state, so it outranks settled. */
+
+.v-fleet .fl-sig.is-read { opacity: 0.55; }
+
+.v-fleet .fl-sig.is-read:hover,
+.v-fleet .fl-sig.is-read:focus-visible,
+.v-fleet .fl-sig.is-read.selected { opacity: 0.95; }
+
+.v-fleet .fl-sig.is-unread { opacity: 1; }
+
+.v-fleet .fl-sig.is-unread .fl-sig-name { font-weight: 800; }
+
+.v-fleet .fl-sig-unread {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, var(--warn));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, var(--warn)) 22%, transparent);
+}
+
+/* the unread total in the column head — a call to look, not a page size */
+.v-fleet .pane-count.is-alert {
+  color: var(--bg);
+  background: var(--accent, var(--warn));
+  border-color: transparent;
+  font-weight: 700;
+}
+
 /* ---------- card status: one chip, one accent bar ---------- */
 
 .fs-card { position: relative; cursor: pointer; }
@@ -296,18 +423,10 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: 20px 24px 40px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-/* Before the first history page arrives, keep the selected Signal and its
-   decision controls in their eventual bottom position. The auto margin
-   collapses to zero if the ticket itself is taller than the viewport. */
-.fc-body-signal-pending::before {
-  content: '';
-  margin-top: auto;
 }
 
 .fc-day {
@@ -508,25 +627,85 @@
 
 .fd-sel-evidence-row b { color: #e7e9ee; font-weight: 650; }
 
-.fd-call-recording-list,
 .fd-call-summary-content {
   display: grid;
   gap: 7px;
   margin-top: 3px;
 }
 
-.fd-call-recording {
-  display: grid;
-  gap: 5px;
-  padding: 8px;
+/* compact, theme-native recording player */
+.fd-rec {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 340px;
+  padding: 6px 10px;
   border: 1px solid #2d2e37;
   border-radius: 8px;
   background: #111117;
 }
 
-.fd-call-recording audio {
-  width: 100%;
-  height: 32px;
+.fd-rec audio { display: none; }
+
+.fd-rec-btn {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid #34353f;
+  border-radius: 50%;
+  background: #1c1c26;
+  color: #e7e9ee;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fd-rec-btn:hover {
+  border-color: #b8b3fa;
+  color: #b8b3fa;
+}
+
+.fd-rec-btn:focus-visible {
+  outline: 2px solid #b8b3fa;
+  outline-offset: 2px;
+}
+
+.fd-rec-label {
+  flex: none;
+  color: #8f93a0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.fd-rec-bar {
+  flex: 1;
+  min-width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  background: #2b2b34;
+  cursor: pointer;
+}
+
+.fd-rec-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: #b8b3fa;
+}
+
+.fd-rec-time {
+  flex: none;
+  color: #8f93a0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* evidence Quo has not produced yet: one quiet line, never filler rows */
+.fd-evidence-pending {
+  margin: 0;
+  color: #8f93a0;
+  font-size: 11px;
 }
 
 .fd-call-summary-content {
@@ -592,6 +771,163 @@
 }
 
 .fd-dec-summary b { color: #f2f3f7; font-weight: 650; }
+
+/* ---------- the popup side rail ----------
+   Chat stays in the middle; facts sit in a straight-edged bar beside it.
+   Each .fc-side-section is one kind of info — add more sections as they
+   exist (agent activity today; whatever comes next tomorrow). */
+
+/* The Signal popup owns its final size from the first frame — the rail never
+   pops in and the thread never rewraps mid-open. */
+.fc-signal:not(.fc-inspector) { width: min(1000px, 96vw); }
+
+.fc-columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.fc-columns .fc-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.fc-side {
+  flex: none;
+  width: 264px;
+  overflow-y: auto;
+  padding: 16px 16px 20px;
+  background: #0c0c10;
+  border-left: 1px solid #22222a;
+  border-radius: 0;
+}
+
+.fc-side-section {
+  display: grid;
+  gap: 10px;
+}
+
+.fc-side-section + .fc-side-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #22222a;
+}
+
+.fc-side-head {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: #8f93a0;
+}
+
+.fc-side-empty {
+  margin: 0;
+  color: #8f93a0;
+  font-size: 12px;
+}
+
+/* quiet placeholder while the ledger loads — same footprint as one entry */
+.fc-side-skel {
+  display: grid;
+  gap: 8px;
+}
+
+.fc-side-skel span {
+  display: block;
+  height: 10px;
+  background: #1a1a21;
+  animation: fcSkel 1.1s ease-in-out infinite alternate;
+}
+
+.fc-side-skel span:nth-child(1) { width: 62%; }
+.fc-side-skel span:nth-child(2) { width: 88%; }
+.fc-side-skel span:nth-child(3) { width: 40%; }
+
+@keyframes fcSkel {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fc-side-skel span { animation: none; }
+}
+
+/* the rail stacks under the thread when the popup has no room beside it */
+.fc-inspector .fc-columns { flex-direction: column; }
+
+.fc-inspector .fc-side {
+  width: auto;
+  max-height: 220px;
+  border-left: none;
+  border-top: 1px solid #22222a;
+}
+
+@media (max-width: 760px) {
+  .fc-columns { flex-direction: column; }
+
+  .fc-side {
+    width: auto;
+    max-height: 220px;
+    border-left: none;
+    border-top: 1px solid #22222a;
+  }
+}
+
+.fd-agents-row {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #1a1a21;
+}
+
+a.fd-agents-row { color: inherit; text-decoration: none; }
+a.fd-agents-row:hover { border-color: #434451; }
+.fd-agents-row summary { display: grid; gap: 2px; cursor: pointer; list-style: none; }
+.fd-agents-row summary::-webkit-details-marker { display: none; }
+.fd-agents-detail { display: grid; gap: 3px; margin-top: 7px; color: #8f93a0; font-size: 10px; line-height: 1.45; }
+
+.fd-agents-row:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.fd-agents-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.fd-agents-name b { color: #e7e9ee; font-weight: 650; }
+
+.fd-agents-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #23232c;
+  color: #9a9fae;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.fd-agents-chip.is-completed { background: #16281e; color: #7fcf9e; }
+.fd-agents-chip.is-failed { background: #2e1a18; color: #e08a7e; }
+.fd-agents-chip.is-queued,
+.fd-agents-chip.is-claimed,
+.fd-agents-chip.is-running { background: #262231; color: #b8b3fa; }
+.fd-agents-chip.is-orphaned { background: #33250f; color: #efbe69; }
+
+.fd-agents-line {
+  margin: 0;
+  color: #b8bac4;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.fd-agents-time { color: #8f93a0; }
 
 /* the work product */
 .fd-work {

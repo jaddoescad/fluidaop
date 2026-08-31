@@ -25,6 +25,8 @@ export interface HermesAgentSource {
 
 export interface HermesAgentDefinition {
   id: string;
+  automationKey: string | null;
+  subjectTypes: string[];
   runtimeName: string;
   name: string;
   icon: string;
@@ -50,6 +52,8 @@ export interface HermesAgentDefinition {
 
 interface HermesAgentContract {
   schemaVersion: number;
+  automationKey: string;
+  subjectTypes: string[];
   displayName: string;
   summary: string;
   steps: string[];
@@ -104,6 +108,8 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     : 'Live Hermes job. Verified presentation details are not available yet.';
   return {
     ...agent,
+    automationKey: contract?.automationKey ?? null,
+    subjectTypes: contract?.subjectTypes ?? [],
     runtimeName: agent.name,
     name: contract?.displayName ?? agent.name,
     icon: contract?.icon ?? (agent.mode === 'script' ? '⚙️' : '🤖'),
@@ -111,7 +117,7 @@ export function presentHermesAgent(agent: HermesAgentRecord): HermesAgentDefinit
     mode: agent.mode === 'script' ? 'Script-only automation' : 'Hermes agent',
     runtimeMode: agent.mode,
     steps: contract?.steps ?? [],
-    historyAgentId: null,
+    historyAgentId: contract?.automationKey ?? null,
     source: 'hermes',
     historyAvailable: true,
     definition: presentAgentSource(agent.definition),
@@ -148,8 +154,13 @@ export type HermesRunStatus =
 
 export interface HermesRun {
   id: string;
+  activityId: string | null;
   jobId: string;
   jobName: string;
+  automationKey: string | null;
+  automationName: string | null;
+  automationMode: 'agent' | 'script';
+  contractStatus: string;
   profile: string;
   status: HermesRunStatus;
   source: string;
@@ -160,6 +171,8 @@ export interface HermesRun {
   model: string | null;
   messageCount: number | null;
   toolCallCount: number | null;
+  outcome: string;
+  resultCount: number;
 }
 
 export interface HermesHistoryJob {

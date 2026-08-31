@@ -237,7 +237,7 @@ function SkillState({
 }
 
 function skillName(skill: HermesSkill): string {
-  if (skill.id === 'agent-creator') return 'Agent Creator';
+  if (skill.id === 'automation-creator') return 'Automation Creator';
   return skill.name
     .split(/[-_]/)
     .filter(Boolean)
@@ -246,7 +246,7 @@ function skillName(skill: HermesSkill): string {
 }
 
 function skillIcon(skill: HermesSkill): string {
-  return skill.id === 'agent-creator' ? '🛠️' : '🧩';
+  return skill.id === 'automation-creator' ? '🛠️' : '🧩';
 }
 
 interface SkillGroup {

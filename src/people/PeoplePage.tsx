@@ -138,8 +138,8 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
             {deal.amountCents > 0 ? <b>{money.format(deal.amountCents / 100)}</b> : null}
           </article>)}
         </section>
-        <section className="pp-detail-section pp-history"><h3>Activity <span>{activities.length}</span></h3>
-          {activities.length === 0 ? <p className="pp-muted">No linked Gmail or Quo activity.</p> : activities.map((signal) => {
+        <section className="pp-detail-section pp-history"><h3>Signal history <span>{activities.length}</span></h3>
+          {activities.length === 0 ? <p className="pp-muted">No linked Gmail or Quo Signals.</p> : activities.map((signal) => {
             const topic = signal.classifications?.find((classification) => classification.label_kind === 'topic')?.label;
             return <article key={signal.id}>
               <div className={`pp-source-mark is-${signal.source}`}>{signal.source === 'gmail' ? 'M' : 'Q'}</div>
@@ -147,7 +147,7 @@ function ContactDetail({ contactId, onClose }: { contactId: string; onClose: () 
               {topic ? <span className="pp-topic" style={{ borderColor: topic.color }}>{topic.name}</span> : null}
             </article>;
           })}
-          {nextCursor ? <button type="button" className="pp-more" disabled={loadingMore} onClick={() => void loadActivities(nextCursor, true).catch((cause: unknown) => { setLoadingMore(false); setError(cause instanceof Error ? cause.message : String(cause)); })}>{loadingMore ? 'Loading…' : 'Load older activity'}</button> : null}
+          {nextCursor ? <button type="button" className="pp-more" disabled={loadingMore} onClick={() => void loadActivities(nextCursor, true).catch((cause: unknown) => { setLoadingMore(false); setError(cause instanceof Error ? cause.message : String(cause)); })}>{loadingMore ? 'Loading…' : 'Load older Signals'}</button> : null}
         </section>
       </> : null}
     </aside>

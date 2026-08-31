@@ -9,11 +9,17 @@ import { ConnectionsPage } from '../connections/ConnectionsPage';
 import { LabelsPage } from '../labels/LabelsPage';
 import { PeoplePage } from '../people/PeoplePage';
 import { SchedulesPage } from '../schedules/SchedulesPage';
-import { loadFluidSchedules } from '../schedules/fluid';
 import { SkillsPage } from '../skills/SkillsPage';
 import { KitHeader, SideNav } from '../components/AppChrome';
 import { LeadWorkspace } from '../board/LeadWorkspace';
-import { ALL_MONTHS, PipelineColumns, PipelineFilterBar, receivedMonthKey } from '../board/PipelineColumns';
+import {
+  ALL_MONTHS,
+  PIPELINE_STAGES,
+  PipelineColumns,
+  PipelineFilterBar,
+  receivedMonthKey,
+} from '../board/PipelineColumns';
+import { candidateSignal, PotentialLeadsColumn } from '../board/PotentialLeads';
 import { useLiveBoard } from '../board/useLiveBoard';
 import { derive } from './shared';
 import {
@@ -25,7 +31,10 @@ import './flow.css';
 import './zen.css';
 import './fleet.css';
 
-type BoardPopupSubject = RunSubject | { type: 'action'; id: string };
+type BoardPopupSubject =
+  | RunSubject
+  | { type: 'action'; id: string }
+  | { type: 'candidate'; id: number };
 
 export function FleetV() {
   const [page, setPage] = useState<AppPage>(() => pageFromPath(window.location.pathname));
@@ -67,10 +76,9 @@ function SchedulesRoute({ onNavigate }: { onNavigate: (label: string) => void })
   const [warning, setWarning] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [statusResult, hermesSchedulesResult, fluidSchedulesResult] = await Promise.allSettled([
+    const [statusResult, hermesSchedulesResult] = await Promise.allSettled([
       loadHermesStatus(),
       loadHermesSchedules(),
-      loadFluidSchedules(),
     ]);
     setStatus(statusResult.status === 'fulfilled' ? statusResult.value : null);
     const hermesFailure = statusResult.status === 'rejected'
@@ -83,21 +91,12 @@ function SchedulesRoute({ onNavigate }: { onNavigate: (label: string) => void })
           ? hermesFailure.message
           : 'Could not reach Hermes',
     );
-    const availableSchedules = [
-      ...(fluidSchedulesResult.status === 'fulfilled' ? fluidSchedulesResult.value : []),
-      ...(hermesSchedulesResult.status === 'fulfilled' ? hermesSchedulesResult.value : []),
-    ];
-    const allSchedulesFailed = fluidSchedulesResult.status === 'rejected' && hermesSchedulesResult.status === 'rejected';
-    setSchedules(allSchedulesFailed ? null : availableSchedules);
-    setError(allSchedulesFailed ? 'Could not load Fluid or Hermes schedules.' : null);
+    setSchedules(hermesSchedulesResult.status === 'fulfilled' ? hermesSchedulesResult.value : null);
+    setError(hermesSchedulesResult.status === 'rejected' ? 'Could not load Hermes schedules.' : null);
     setWarning(
-      allSchedulesFailed
-        ? null
-        : fluidSchedulesResult.status === 'rejected'
-          ? 'Fluid script schedules are temporarily unavailable.'
-          : hermesSchedulesResult.status === 'rejected'
-            ? 'Hermes schedules are temporarily unavailable.'
-            : null,
+      statusResult.status === 'rejected' && hermesSchedulesResult.status === 'fulfilled'
+        ? 'Hermes runtime status is temporarily unavailable.'
+        : null,
     );
   }, []);
 
@@ -120,6 +119,72 @@ function SchedulesRoute({ onNavigate }: { onNavigate: (label: string) => void })
   );
 }
 
+const BOARD_SKELETON_COLUMNS = [
+  { key: 'signals', className: 'fl-signals', cards: 3 },
+  { key: 'potential-leads', className: 'pipeline-stage potential-leads', cards: 2 },
+  ...PIPELINE_STAGES.map((stage, index) => ({
+    key: stage.key,
+    className: 'pipeline-stage',
+    cards: index % 3 === 0 ? 3 : 2,
+  })),
+];
+
+function BoardSkeleton() {
+  return (
+    <>
+      <div className="pipeline-filter-bar board-skeleton-filter" aria-hidden="true">
+        <span className="board-skeleton-shim board-skeleton-filter-label" />
+        <span className="board-skeleton-shim board-skeleton-filter-select" />
+        <span className="board-skeleton-sync">
+          <span className="board-skeleton-shim board-skeleton-sync-dot" />
+          <span className="board-skeleton-shim board-skeleton-sync-label" />
+        </span>
+      </div>
+      <main
+        className="fl-cols pipeline-cols board-skeleton"
+        role="status"
+        aria-label="Loading Board…"
+        aria-live="polite"
+        aria-busy="true"
+      >
+        <span className="board-skeleton-sr">Loading Board…</span>
+        {BOARD_SKELETON_COLUMNS.map((column, columnIndex) => (
+          <section
+            className={`pane ${column.className} board-skeleton-column`}
+            aria-hidden="true"
+            key={column.key}
+          >
+            <header className="pane-head pipeline-stage-head">
+              <span className="board-skeleton-shim board-skeleton-icon" />
+              <span className="board-skeleton-shim board-skeleton-heading" />
+              <span className="board-skeleton-shim board-skeleton-count" />
+            </header>
+            <div className="pane-scroll pipeline-stage-scroll">
+              {Array.from({ length: column.cards }, (_, cardIndex) => (
+                <div
+                  className="board-skeleton-card"
+                  key={`${column.key}:${cardIndex}`}
+                >
+                  <span className="board-skeleton-shim board-skeleton-name" />
+                  <span className="board-skeleton-shim board-skeleton-copy" />
+                  <span className="board-skeleton-shim board-skeleton-copy is-short" />
+                  <span className="board-skeleton-meta">
+                    <span className="board-skeleton-shim board-skeleton-pill" />
+                    <span className="board-skeleton-shim board-skeleton-amount" />
+                  </span>
+                </div>
+              ))}
+              {columnIndex % 2 === 1 && (
+                <span className="board-skeleton-shim board-skeleton-tail" />
+              )}
+            </div>
+          </section>
+        ))}
+      </main>
+    </>
+  );
+}
+
 function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
   const board = useLiveBoard();
   const { s, act } = board;
@@ -127,6 +192,11 @@ function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
   const [runSel, setRunSel] = useState<BoardPopupSubject | null>(null);
   const [leadSel, setLeadSel] = useState<string | null>(null);
   const [receivedMonth, setReceivedMonth] = useState<string>(ALL_MONTHS);
+
+  useEffect(() => {
+    const signalId = new URLSearchParams(window.location.search).get('signal');
+    if (signalId && /^[1-9][0-9]*$/.test(signalId)) setRunSel({ type: 'signal', id: signalId });
+  }, []);
 
   /** Deals whose lead-received month matches the filter; undated deals drop out. */
   const visibleDeals = useMemo(
@@ -147,7 +217,7 @@ function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
         <SideNav active="Board" onNav={onNavigate} />
         <div className="fl-frame">
           <KitHeader />
-          <main className="board-state" role="status" aria-live="polite">Loading Board…</main>
+          <BoardSkeleton />
         </div>
       </div>
     </div>
@@ -155,6 +225,9 @@ function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
 
   const leadDeal = leadSel !== null
     ? board.pipelineDeals.find((deal) => deal.id === leadSel) ?? null
+    : null;
+  const openCandidate = runSel?.type === 'candidate'
+    ? board.leadCandidates.find((candidate) => candidate.id === runSel.id) ?? null
     : null;
 
   return (
@@ -188,11 +261,26 @@ function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
               selId={runSel?.type === 'signal' ? runSel.id : null}
               hasMore={board.signalsHasMore}
               loading={board.signalsLoading}
+              unreadCount={board.unreadSignalCount}
               onLoadMore={() => void board.loadMoreSignals()}
               onOpen={(sig) => {
                 setRunSel({ type: 'signal', id: sig.id });
                 void board.openSignal(sig.id);
+                void act.markSignalRead(sig.id);
               }}
+            />
+            <PotentialLeadsColumn
+              candidates={board.leadCandidates}
+              undecidedCount={board.leadCandidatesUndecidedCount}
+              loading={board.leadCandidatesLoading}
+              now={s.now}
+              selectedId={runSel?.type === 'candidate' ? runSel.id : null}
+              onOpen={(candidate) => {
+                setRunSel({ type: 'candidate', id: candidate.id });
+                void board.openSignal(candidate.activityId);
+                void act.markSignalRead(candidate.activityId);
+              }}
+              onDecide={act.decideLeadCandidate}
             />
             <PipelineColumns
               s={s}
@@ -242,8 +330,25 @@ function BoardPage({ onNavigate }: { onNavigate: (label: string) => void }) {
           onOpenSignal={(id) => {
             setRunSel({ type: 'signal', id });
             void board.openSignal(id);
+            void act.markSignalRead(id);
           }}
         />
+      ) : runSel?.type === 'candidate' ? (
+        openCandidate && (
+          <RunPopup
+            s={s}
+            act={act}
+            subject={{ type: 'signal', id: openCandidate.activityId }}
+            candidate={openCandidate}
+            fallbackSignal={candidateSignal(openCandidate)}
+            onClose={() => setRunSel(null)}
+            onLoadMoreHistory={(id) => void board.loadMoreHistory(id)}
+            onOpenAction={(id) => {
+              setRunSel({ type: 'action', id });
+              void board.openAction(id);
+            }}
+          />
+        )
       ) : runSel ? (
         <RunPopup
           s={s}

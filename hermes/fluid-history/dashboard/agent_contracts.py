@@ -10,13 +10,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_CONTRACT_BYTES = 32_768
 MAX_DISPLAY_NAME_CHARS = 80
 MAX_SUMMARY_CHARS = 180
 MAX_STEPS = 4
 MAX_STEP_CHARS = 160
 SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+AUTOMATION_KEY = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SUPPORTED_SUBJECT_TYPES = frozenset({"signal"})
 
 
 def _compact_text(value: Any) -> str:
@@ -28,7 +30,10 @@ def _sha256_bytes(value: bytes) -> str:
 
 
 def _default_skill_roots() -> List[Path]:
-    configured = os.environ.get("FLUID_AGENT_SKILL_ROOTS", "").strip()
+    configured = (
+        os.environ.get("FLUID_AUTOMATION_SKILL_ROOTS", "").strip()
+        or os.environ.get("FLUID_AGENT_SKILL_ROOTS", "").strip()
+    )
     roots = [Path(part) for part in configured.split(os.pathsep) if part] if configured else [
         Path("/opt/data/skills"),
         Path("/opt/hermes/skills"),
@@ -136,9 +141,20 @@ def _validated_text(value: Any, *, field: str, maximum: int) -> str:
     return text
 
 
+def duplicate_automation_keys(contracts: Iterable[Dict[str, Any]]) -> List[str]:
+    counts: Dict[str, int] = {}
+    for contract in contracts:
+        key = _compact_text(contract.get("automationKey"))
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return sorted(key for key, count in counts.items() if count > 1)
+
+
 def build_contract(
     job: Dict[str, Any],
     *,
+    automation_key: str,
+    subject_types: Iterable[str],
     display_name: str,
     summary: str,
     steps: Iterable[str],
@@ -148,6 +164,13 @@ def build_contract(
     job_id = _compact_text(job.get("id"))
     if SAFE_ID.fullmatch(job_id) is None:
         raise ValueError("job id is invalid")
+    normalized_key = _compact_text(automation_key)
+    if len(normalized_key) > 80 or AUTOMATION_KEY.fullmatch(normalized_key) is None:
+        raise ValueError("automationKey is invalid")
+    normalized_subjects = sorted({_compact_text(value) for value in subject_types if _compact_text(value)})
+    unsupported_subjects = [value for value in normalized_subjects if value not in SUPPORTED_SUBJECT_TYPES]
+    if unsupported_subjects:
+        raise ValueError(f"unsupported subjectTypes: {', '.join(unsupported_subjects)}")
     normalized_steps = [
         _validated_text(step, field="step", maximum=MAX_STEP_CHARS)
         for step in steps
@@ -160,6 +183,8 @@ def build_contract(
     contract: Dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "jobId": job_id,
+        "automationKey": normalized_key,
+        "subjectTypes": normalized_subjects,
         "displayName": _validated_text(
             display_name,
             field="displayName",
@@ -176,7 +201,10 @@ def build_contract(
 
 
 def contract_directory() -> Path:
-    return Path(os.environ.get("FLUID_AGENT_CONTRACT_DIR", "/opt/data/fluid-agent-contracts"))
+    return Path(
+        os.environ.get("FLUID_AUTOMATION_CONTRACT_DIR")
+        or os.environ.get("FLUID_AGENT_CONTRACT_DIR", "/opt/data/fluid-agent-contracts")
+    )
 
 
 def contract_path(job_id: str) -> Path:
@@ -224,6 +252,17 @@ def verified_contract(
     try:
         if contract.get("schemaVersion") != SCHEMA_VERSION or contract.get("jobId") != job_id:
             return None, "invalid"
+        automation_key = _compact_text(contract.get("automationKey"))
+        if len(automation_key) > 80 or AUTOMATION_KEY.fullmatch(automation_key) is None:
+            return None, "invalid"
+        subject_types = contract.get("subjectTypes")
+        if not isinstance(subject_types, list):
+            return None, "invalid"
+        normalized_subjects = sorted({_compact_text(value) for value in subject_types if _compact_text(value)})
+        if normalized_subjects != subject_types or any(
+            value not in SUPPORTED_SUBJECT_TYPES for value in normalized_subjects
+        ):
+            return None, "invalid"
         _validated_text(contract.get("displayName"), field="displayName", maximum=MAX_DISPLAY_NAME_CHARS)
         _validated_text(contract.get("summary"), field="summary", maximum=MAX_SUMMARY_CHARS)
         steps = contract.get("steps")
@@ -240,6 +279,8 @@ def verified_contract(
         return None, "invalid"
     return {
         "schemaVersion": SCHEMA_VERSION,
+        "automationKey": contract["automationKey"],
+        "subjectTypes": contract["subjectTypes"],
         "displayName": contract["displayName"],
         "summary": contract["summary"],
         "steps": contract["steps"],

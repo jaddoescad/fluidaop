@@ -233,6 +233,7 @@
 
 .ag-history-list { overflow: hidden; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; list-style: none; }
 .ag-history-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 11px; padding: 13px; background: var(--card); }
+.ag-history-row > a { display: contents; color: inherit; text-decoration: none; }
 .ag-history-row + .ag-history-row { border-top: 1px solid var(--line); }
 .ag-run-dot { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: var(--faint); }
 .ag-run-completed { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }

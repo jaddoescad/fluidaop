@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Create and verify Fluid UI contracts for live Hermes cron jobs."""
+"""Create and verify Fluid presentation contracts for live Hermes jobs."""
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,7 +24,7 @@ def _load_contract_module():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
-    raise RuntimeError("Fluid agent contract module is not installed")
+    raise RuntimeError("Fluid automation contract module is not installed")
 
 
 def _jobs() -> List[Dict[str, Any]]:
@@ -38,7 +37,7 @@ def _job(job_id: str) -> Dict[str, Any]:
     for job in _jobs():
         if str(job.get("id") or "") == job_id:
             return job
-    raise ValueError("Hermes cron job not found")
+    raise ValueError("Hermes job not found")
 
 
 def _safe_output(value: Dict[str, Any]) -> None:
@@ -51,6 +50,8 @@ def main() -> int:
 
     create = subparsers.add_parser("create", help="Create or replace a verified contract")
     create.add_argument("--job-id", required=True)
+    create.add_argument("--automation-key", required=True)
+    create.add_argument("--subject", action="append", default=[])
     create.add_argument("--display-name", required=True)
     create.add_argument("--summary", required=True)
     create.add_argument("--step", action="append", default=[])
@@ -66,6 +67,8 @@ def main() -> int:
     if args.command == "create":
         contract = contracts.build_contract(
             job,
+            automation_key=args.automation_key,
+            subject_types=args.subject,
             display_name=args.display_name,
             summary=args.summary,
             steps=args.step,
@@ -74,6 +77,8 @@ def main() -> int:
         contracts.write_contract(contract)
         _safe_output({
             "jobId": args.job_id,
+            "automationKey": contract["automationKey"],
+            "subjectTypes": contract["subjectTypes"],
             "status": "created",
             "definitionHash": contract["definitionHash"],
             "stepCount": len(contract["steps"]),
@@ -83,6 +88,8 @@ def main() -> int:
     contract, status = contracts.verified_contract(job)
     _safe_output({
         "jobId": args.job_id,
+        "automationKey": contract.get("automationKey") if contract is not None else None,
+        "subjectTypes": contract.get("subjectTypes") if contract is not None else [],
         "status": status,
         "verified": contract is not None,
         "stepCount": len(contract["steps"]) if contract is not None else 0,

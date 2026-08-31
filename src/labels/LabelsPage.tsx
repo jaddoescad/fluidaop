@@ -43,10 +43,10 @@ const SECTIONS: SectionCopy[] = [
     kind: 'topic',
     title: 'Topic labels',
     blurb:
-      'What a signal is about across Gmail emails, Quo messages, and calls. Signal Triage uses ' +
-      'these descriptions as its complete business vocabulary.',
+      'What a Signal is about across Gmail emails, Quo messages, and calls. Keep descriptions ' +
+      'specific so they remain useful for filtering and future automation.',
     createLabel: 'New topic label',
-    descPlaceholder: 'Tell Signal Triage what this topic covers…',
+    descPlaceholder: 'Describe what this topic covers…',
   },
 ];
 

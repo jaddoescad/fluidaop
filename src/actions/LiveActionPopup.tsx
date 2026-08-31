@@ -150,7 +150,7 @@ export function LiveActionPopup({
       )}
       {sent ? (
         <div className="la-simulation" role="status">
-          <strong>Sent (simulation)</strong> · No Gmail request was made, no outbound Activity was created, and the customer did not receive this. The Action stays open until Fluid sees a real Gmail reply.
+          <strong>Sent (simulation)</strong> · No Gmail request was made, no outbound Signal was created, and the customer did not receive this. The Action stays open until Fluid sees a real Gmail reply.
         </div>
       ) : (
         <div className="la-sim-note">
@@ -268,7 +268,7 @@ export function LiveActionPopup({
           </details>
           {detail.events.length > 0 && (
             <details className="la-details la-audit">
-              <summary>Activity ({detail.events.length})</summary>
+              <summary>History ({detail.events.length})</summary>
               {detail.events.map((event) => <div key={event.id}><span>{event.event_type.replace(/_/g, ' ')}</span><small>{fmtAge(Date.parse(event.created_at), now)}</small></div>)}
             </details>
           )}

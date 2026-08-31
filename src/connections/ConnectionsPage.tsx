@@ -681,7 +681,7 @@ function ConnectedQuoCard({
             <div id={panelId} className="cn-manage">
               <section aria-label="Phone lines">
                 <h3 className="cn-manage-label">Captured phone lines</h3>
-                <p className="cn-manage-note">Only checked lines can enter Activity. Unchecked lines are ignored during imports and webhook delivery.</p>
+                <p className="cn-manage-note">Only checked lines can enter Signals. Unchecked lines are ignored during imports and webhook delivery.</p>
                 <div className="cn-scope-options" role="group" aria-label="Choose Quo phone lines to capture">
                   {c.phoneNumbers.map((number) => (
                     <label className="cn-scope-option" key={number.id}>
@@ -863,8 +863,8 @@ export function ConnectionsPage({
         tone: 'ok',
         text: phoneNumberIds.length === 0 ? 'Quo capture is off.' : 'Quo phone-line scope saved.',
         detail: phoneNumberIds.length === 0
-          ? 'No Quo calls or texts will enter Activity.'
-          : `Only ${phoneNumberIds.length} selected phone line${phoneNumberIds.length === 1 ? '' : 's'} can enter Activity.`,
+          ? 'No Quo calls or texts will enter Signals.'
+          : `Only ${phoneNumberIds.length} selected phone line${phoneNumberIds.length === 1 ? '' : 's'} can enter Signals.`,
       });
     } catch (error) {
       setActionError(`Couldn’t save Quo phone lines: ${errText(error)}.`);

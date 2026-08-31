@@ -45,11 +45,12 @@ The bearer secret is `HERMES_FLUID_HISTORY_SECRET` on the Hermes host. Fluid
 derives the same value in `server/index.ts::hermesHistoryToken()` from
 `HERMES_HISTORY_TOKEN`, or by HMAC over `CONNECTION_TOKEN_ENCRYPTION_KEY`.
 
-## Endpoints (v2.0.0)
+## Endpoints (v3.0.0)
 
 | Plugin route | Fluid route | Notes |
 |---|---|---|
 | `GET /agents` | `/api/hermes/agents`, `/api/hermes/schedules` | Curated fields + `definition` + `raw` (full record) |
+| `GET /activity` | `/api/activity`, `/api/activity/:id` | Cursor-paginated executions for every registered tick |
 | `GET /jobs?job=` | `/api/hermes/jobs` | Complete job records, unfiltered |
 | `GET /profiles` | `/api/hermes/profiles` | |
 | `GET /runs?agent=\|job=` | `/api/hermes/agents/:id/runs` | limit ≤ 200 |
@@ -101,25 +102,23 @@ may shadow each other or double-register routes.
 `/opt/data/.hermes/plugins`, then `/opt/data/repos/`), and either remove it or
 overwrite it in place rather than installing a second one.
 
-## Pending work
+## Deployment work
 
-1. **Deploy v2.0.0.** The host is still serving the older build, so
-   `/api/hermes/agents` returns no `definition` and the Fluid agent detail page
-   shows "Definition not exposed". Nothing else blocks it — the Fluid side is
-   built and parses the field defensively.
-2. **Finish `/sessions`.** `_TRANSCRIPT_ACCESSORS` guesses at four plausible
+1. **Deploy v3.0.0.** Activity depends on this exact plugin and contract v2.
+2. **Regenerate every active presentation contract** with
+   `hermes/automation-creator/fluid-automation-contract.py`. Each needs one
+   unique `automationKey`; agent contracts declare their supported subject
+   types. Activity fails closed while any live job has a stale, missing, or
+   duplicate contract, so an unregistered schedule can never become hidden.
+3. **Finish `/sessions`.** `_TRANSCRIPT_ACCESSORS` guesses at four plausible
    `hermes_cli.web_server` helper names because that module is only readable on
    the host. After deploying, call `/api/hermes/introspect` and rewrite
    `_transcript_payload()` against the real helper. Until then it returns 501
    naming what it tried.
-3. **Regenerate presentation contracts.** Both live agents report
-   `contractStatus: "stale"`, so their names/summaries in Fluid are wrong and
-   the UI shows a warning banner. See `agent_contracts.py::build_contract`.
-4. **Impact tab (not started).** Supabase already records what agents actually
-   did — `agent_runs`, `agent_jobs`, `signal_triage_decisions`,
-   `signal_recommendations`, `signal_labels`, all keyed by `agent_key` /
-   `agent_run_id` with confidence, reason, evidence, model, prompt_version.
-   None of it is surfaced on the Agents page yet.
+4. **Verify the two-way link.** A Potential Lead run must open the same Activity
+   from Agents, Schedules, and the Signal's Agent activity. Activity detail must
+   show only bounded stored results and safe diagnostics, never session
+   transcripts, prompts, tool arguments, secrets, or provider URLs.
 
 ## Host facts
 
