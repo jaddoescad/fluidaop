@@ -759,7 +759,6 @@ export function RunPopup({
             <SignalEvidence signal={selectedSignal} detail={detail} />
           </ConversationTurn>
 
-          {day('d-agent', 'Summary & next step')}
           {detail?.error && hermesTurn(
             'detail-error',
             <>I could not load trustworthy context: {detail.error}</>,
@@ -772,9 +771,11 @@ export function RunPopup({
                 ? <>Scribe tried the reply but hit a wall—it needs you in Actions.</>
                 : <>Scribe drafted a reply—it’s waiting on your review in Actions.</>,
           )}
-          <article className="fd-dec">
-            <p className="fd-dec-summary">{decisionSummary}</p>
-          </article>
+          {decisionSummary && (
+            <article className="fd-dec">
+              <p className="fd-dec-summary">{decisionSummary}</p>
+            </article>
+          )}
           {notice && (
             <div
               className={notice.tone === 'error' ? 'fc-sys is-error' : 'fc-sys'}
