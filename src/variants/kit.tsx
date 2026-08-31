@@ -584,7 +584,7 @@ export function RunPopup({
         time={fmtAge(item.at, s.now)}
         historyId={item.id}
       >
-        {item.text}
+        {item.channel === 'email' ? normalizeEmailText(item.text) : item.text}
       </ConversationTurn>
     );
   };
@@ -609,7 +609,7 @@ export function RunPopup({
         time={fmtAge(item.at, s.now)}
         historyId={item.id}
       >
-        {item.text}
+        {item.channel === 'email' ? normalizeEmailText(item.text) : item.text}
       </ConversationTurn>
     );
   };
